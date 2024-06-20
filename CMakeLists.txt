@@ -16,6 +16,10 @@ if(CCACHE_PROGRAM)
   endforeach()
 endif()
 
+SET(CMAKE_BUILD_TYPE Release)
+SET(CMAKE_CONFIGURATION_TYPES Release)
+
+
 
 project(libsession-util
     VERSION 1.2.0
