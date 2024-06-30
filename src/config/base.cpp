@@ -337,7 +337,14 @@ ustring ConfigBase::dump() {
 
     auto d = make_dump();
     _needs_dump = false;
+
     return d;
+}
+
+std::string ConfigBase::make_dump_hex() const {
+    auto d = this->make_dump();
+
+    return oxenc::to_hex(d);
 }
 
 ustring ConfigBase::make_dump() const {

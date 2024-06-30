@@ -1085,6 +1085,7 @@ class ConfigBase : public ConfigSig {
     /// Outputs:
     /// - `ustring` -- Returns binary data of the state dump
     ustring make_dump() const;
+    std::string make_dump_hex() const;
 
     /// API: base/ConfigBase::needs_dump
     ///
