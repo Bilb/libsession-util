@@ -452,6 +452,7 @@ class UserGroups : public ConfigBase {
     void set(const group_info& info);
     void set(const community_info& info);
     void set(const legacy_group_info& info);
+    void set_legacy_group(const legacy_group_info& info) { this->set(info); }
 
   protected:
     // Drills into the nested dicts to access open group details
