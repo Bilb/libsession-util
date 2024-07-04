@@ -263,6 +263,7 @@ class UserGroups : public ConfigBase {
     /// Outputs:
     /// - `UserGroups` - Constructor
     UserGroups(ustring_view ed25519_secretkey, std::optional<ustring_view> dumped);
+    UserGroups(ustring ed25519_secretkey, std::optional<ustring> dumped);
 
     /// API: user_groups/UserGroups::storage_namespace
     ///
@@ -283,6 +284,9 @@ class UserGroups : public ConfigBase {
     /// Outputs:
     /// - `const char*` - Returns "UserGroups"
     const char* encryption_domain() const override { return "UserGroups"; }
+    const std::string encryption_domain_str() const override {
+        return std::string{this->encryption_domain()};
+    }
 
     /// API: user_groups/UserGroups::get_community
     ///
@@ -320,6 +324,9 @@ class UserGroups : public ConfigBase {
     /// - `std::optional<legacy_group_info>` - Returns the filled out legacy_group_info struct if
     ///   found
     std::optional<legacy_group_info> get_legacy_group(std::string_view pubkey_hex) const;
+    std::optional<legacy_group_info> get_legacy_group_str(std::string pubkey_hex) const {
+        return this->get_legacy_group(pubkey_hex);
+    }
 
     /// API: user_groups/UserGroups::get_group
     ///
@@ -394,6 +401,9 @@ class UserGroups : public ConfigBase {
     /// Outputs:
     /// - `legacy_group_info` - Returns the filled out legacy_group_info struct
     legacy_group_info get_or_construct_legacy_group(std::string_view pubkey_hex) const;
+    legacy_group_info get_or_construct_legacy_group_str(std::string pubkey_hex) const {
+        return this->get_or_construct_legacy_group(pubkey_hex);
+    }
 
     /// API: user_groups/UserGroups::get_or_construct_group
     ///

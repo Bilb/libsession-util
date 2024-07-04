@@ -178,6 +178,11 @@ class ConfigBase : public ConfigSig {
             std::optional<ustring_view> ed25519_pubkey = std::nullopt,
             std::optional<ustring_view> ed25519_secretkey = std::nullopt);
 
+    ConfigBase(
+            std::optional<ustring> dump = std::nullopt,
+            std::optional<ustring> ed25519_pubkey = std::nullopt,
+            std::optional<ustring> ed25519_secretkey = std::nullopt);
+
     // Tracks whether we need to dump again; most mutating methods should set this to true (unless
     // calling set_state, which sets to to true implicitly).
     bool _needs_dump = false;
@@ -855,6 +860,7 @@ class ConfigBase : public ConfigSig {
     /// Outputs:
     /// - `Namespace` -- Returns the namespace where config type is stored/loaded
     virtual const char* encryption_domain() const = 0;
+    virtual const std::string encryption_domain_str() const = 0;
 
     /// API: base/ConfigBase::compression_level
     ///

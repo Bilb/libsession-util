@@ -266,6 +266,9 @@ UserGroups::UserGroups(ustring_view ed25519_secretkey, std::optional<ustring_vie
     load_key(ed25519_secretkey);
 }
 
+UserGroups::UserGroups(ustring ed25519_secretkey, std::optional<ustring> dumped) :
+        UserGroups{to_unsigned_sv(ed25519_secretkey), dumped} {}
+
 ConfigBase::DictFieldProxy UserGroups::community_field(
         const community_info& og, ustring_view* get_pubkey) const {
     auto record = data["o"][og.base_url()];

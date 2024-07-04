@@ -19,6 +19,9 @@ UserProfile::UserProfile(ustring_view ed25519_secretkey, std::optional<ustring_v
     load_key(ed25519_secretkey);
 }
 
+UserProfile::UserProfile(ustring ed25519_secretkey, std::optional<ustring> dumped) :
+        UserProfile{to_unsigned_sv(ed25519_secretkey), dumped} {}
+
 LIBSESSION_C_API int user_profile_init(
         config_object** conf,
         const unsigned char* ed25519_secretkey_bytes,
@@ -44,6 +47,7 @@ void UserProfile::set_name(std::string_view new_name) {
         throw std::invalid_argument{"Invalid profile name: exceeds maximum length"};
     set_nonempty_str(data["n"], new_name);
 }
+
 LIBSESSION_C_API int user_profile_set_name(config_object* conf, const char* name) {
     try {
         unbox<UserProfile>(conf)->set_name(name);

@@ -366,6 +366,18 @@ ustring ConfigBase::make_dump() const {
 }
 
 ConfigBase::ConfigBase(
+        std::optional<ustring> dump,
+        std::optional<ustring> ed25519_pubkey,
+        std::optional<ustring> ed25519_secretkey) :
+        ConfigBase(
+                dump ? std::make_optional(static_cast<ustring_view>(*dump)) : std::nullopt,
+                ed25519_pubkey ? std::make_optional(static_cast<ustring_view>(*ed25519_pubkey))
+                               : std::nullopt,
+                ed25519_secretkey
+                        ? std::make_optional(static_cast<ustring_view>(*ed25519_secretkey))
+                        : std::nullopt) {}
+
+ConfigBase::ConfigBase(
         std::optional<ustring_view> dump,
         std::optional<ustring_view> ed25519_pubkey,
         std::optional<ustring_view> ed25519_secretkey) {

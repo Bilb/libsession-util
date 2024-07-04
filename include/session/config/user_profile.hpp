@@ -48,6 +48,7 @@ class UserProfile final : public ConfigBase {
     /// Outputs:
     /// - `UserProfile` - Constructor
     UserProfile(ustring_view ed25519_secretkey, std::optional<ustring_view> dumped);
+    UserProfile(ustring ed25519_secretkey, std::optional<ustring> dumped);
 
     /// API: user_profile/UserProfile::storage_namespace
     ///
@@ -68,6 +69,9 @@ class UserProfile final : public ConfigBase {
     /// Outputs:
     /// - `const char*` - Will return "UserProfile"
     const char* encryption_domain() const override { return "UserProfile"; }
+    const std::string encryption_domain_str() const override {
+        return std::string{this->encryption_domain()};
+    }
 
     /// API: user_profile/UserProfile::get_name
     ///
@@ -79,6 +83,10 @@ class UserProfile final : public ConfigBase {
     /// - `std::optional<std::string>` - Returns the user profile name if it exists
     std::optional<std::string_view> get_name() const;
 
+    std::optional<std::string> get_name_str() const {
+        return session::wrappedOptStrView(this->get_name());
+    }
+
     /// API: user_profile/UserProfile::set_name
     ///
     /// Sets the user profile name; if given an empty string then the name is removed.
@@ -86,6 +94,7 @@ class UserProfile final : public ConfigBase {
     /// Inputs:
     /// - `new_name` -- The name to be put into the user profile
     void set_name(std::string_view new_name);
+    void set_name_str(std::string new_name) { return this->set_name(std::string_view(new_name)); }
 
     /// API: user_profile/UserProfile::get_profile_pic
     ///

@@ -56,6 +56,9 @@ Contacts::Contacts(ustring_view ed25519_secretkey, std::optional<ustring_view> d
     load_key(ed25519_secretkey);
 }
 
+Contacts::Contacts(ustring ed25519_secretkey, std::optional<ustring> dumped) :
+        Contacts{to_unsigned_sv(ed25519_secretkey), dumped} {}
+
 LIBSESSION_C_API int contacts_init(
         config_object** conf,
         const unsigned char* ed25519_secretkey_bytes,

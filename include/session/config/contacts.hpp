@@ -119,6 +119,7 @@ class Contacts : public ConfigBase {
     /// Outputs:
     /// - `Contact` - Constructor
     Contacts(ustring_view ed25519_secretkey, std::optional<ustring_view> dumped);
+    Contacts(ustring ed25519_secretkey, std::optional<ustring> dumped);
 
     /// API: contacts/Contacts::storage_namespace
     ///
@@ -139,6 +140,9 @@ class Contacts : public ConfigBase {
     /// Outputs:
     /// - `const char*` - Will return "Contacts"
     const char* encryption_domain() const override { return "Contacts"; }
+    const std::string encryption_domain_str() const override {
+        return std::string{this->encryption_domain()};
+    }
 
     /// API: contacts/Contacts::get
     ///
@@ -168,6 +172,9 @@ class Contacts : public ConfigBase {
     /// Outputs:
     /// - `contact_info` - Returns a filled out contact_info
     contact_info get_or_construct(std::string_view pubkey_hex) const;
+    contact_info get_or_construct_str(std::string pubkey_hex) const {
+        return this->get_or_construct(pubkey_hex);
+    }
 
     /// API: contacts/contacts::set
     ///
@@ -195,6 +202,9 @@ class Contacts : public ConfigBase {
     /// - `session_id` -- hex string of the session id
     /// - `name` -- string of the contacts name
     void set_name(std::string_view session_id, std::string name);
+    void set_name_str(std::string pubkey_hex, std::string name) {
+        this->set_name(pubkey_hex, name);
+    }
 
     /// API: contacts/contacts::set_nickname
     ///
@@ -205,7 +215,9 @@ class Contacts : public ConfigBase {
     /// - `session_id` -- hex string of the session id
     /// - `nickname` -- string of the contacts nickname
     void set_nickname(std::string_view session_id, std::string nickname);
-
+    void set_nickname_str(std::string pubkey_hex, std::string nickname) {
+        this->set_nickname(pubkey_hex, nickname);
+    }
     /// API: contacts/contacts::set_profile_pic
     ///
     /// Alternative to `set()` for setting a single field.  (If setting multiple fields at once you
@@ -225,7 +237,9 @@ class Contacts : public ConfigBase {
     /// - `session_id` -- hex string of the session id
     /// - `approved` -- boolean on whether the contact is approved by me (to send messages to me)
     void set_approved(std::string_view session_id, bool approved);
-
+    void set_approved_str(std::string pubkey_hex, bool approved) {
+        this->set_approved(pubkey_hex, approved);
+    }
     /// API: contacts/contacts::set_approved_me
     ///
     /// Alternative to `set()` for setting a single field.  (If setting multiple fields at once you
@@ -236,7 +250,9 @@ class Contacts : public ConfigBase {
     /// - `approved_me` -- boolean on whether the contact has approved the user (so we can send
     /// messages to them)
     void set_approved_me(std::string_view session_id, bool approved_me);
-
+    void set_approved_me_str(std::string pubkey_hex, bool approved_me) {
+        this->set_approved_me(pubkey_hex, approved_me);
+    }
     /// API: contacts/contacts::set_blocked
     ///
     /// Alternative to `set()` for setting a single field.  (If setting multiple fields at once you
@@ -246,7 +262,9 @@ class Contacts : public ConfigBase {
     /// - `session_id` -- hex string of the session id
     /// - `blocked` -- boolean on whether the contact is blocked by us
     void set_blocked(std::string_view session_id, bool blocked);
-
+    void set_blocked_str(std::string pubkey_hex, bool blocked) {
+        this->set_blocked(pubkey_hex, blocked);
+    }
     /// API: contacts/contacts::set_priority
     ///
     /// Alternative to `set()` for setting a single field.  (If setting multiple fields at once you
@@ -256,7 +274,9 @@ class Contacts : public ConfigBase {
     /// - `session_id` -- hex string of the session id
     /// - `priority` -- numerical value on the contacts priority (pinned, normal, hidden etc)
     void set_priority(std::string_view session_id, int priority);
-
+    void set_priority_str(std::string pubkey_hex, int priority) {
+        this->set_priority(pubkey_hex, priority);
+    }
     /// API: contacts/contacts::set_notifications
     ///
     /// Alternative to `set()` for setting a single field.  (If setting multiple fields at once you

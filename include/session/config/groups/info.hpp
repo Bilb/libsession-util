@@ -78,6 +78,9 @@ class Info final : public ConfigBase {
     /// Outputs:
     /// - `const char*` - Will return "groups::Info"
     const char* encryption_domain() const override { return "groups::Info"; }
+    const std::string encryption_domain_str() const {
+        return std::string{this->encryption_domain()};
+    }
 
     /// API: groups/Info::id
     ///
