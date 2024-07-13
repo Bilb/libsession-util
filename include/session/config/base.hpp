@@ -192,12 +192,13 @@ class ConfigBase : public ConfigSig {
     // deleted at the next push.
     void set_state(ConfigState s);
 
+public:
     // Invokes the `logger` callback if set, does nothing if there is no logger.
     void log(LogLevel lvl, std::string msg) {
         if (logger)
             logger(lvl, std::move(msg));
     }
-
+protected:
     // Returns a reference to the current MutableConfigMessage.  If the current message is not
     // already dirty (i.e. Clean or Waiting) then calling this increments the seqno counter.
     MutableConfigMessage& dirty();
