@@ -310,6 +310,9 @@ class Contacts : public ConfigBase {
     /// - `session_id` -- hex string of the session id
     /// - `timestamp` -- standard unix timestamp of the time contact was created
     void set_created(std::string_view session_id, int64_t timestamp);
+    void set_created_str(std::string session_id, int32_t timestamp) {
+        set_created(session_id, timestamp);
+    }
 
     /// API: contacts/contacts::erase
     ///

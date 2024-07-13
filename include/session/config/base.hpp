@@ -847,6 +847,9 @@ class ConfigBase : public ConfigSig {
     /// Outputs:
     /// - `Namespace` -- Returns the namespace where config type is stored/loaded
     virtual Namespace storage_namespace() const = 0;
+    std::int16_t storage_namespace_number() const {
+        return static_cast<std::underlying_type<Namespace>::type>(this->storage_namespace());
+    }
 
     /// API: base/ConfigBase::encryption_domain
     ///
@@ -1044,6 +1047,8 @@ class ConfigBase : public ConfigSig {
     ///   - `ustring` -- data message to push to the server
     ///   - `std::vector<std::string>` -- list of known message hashes
     virtual std::tuple<seqno_t, ustring, std::vector<std::string>> push();
+
+    std::string make_push_hex();
 
     /// API: base/ConfigBase::confirm_pushed
     ///

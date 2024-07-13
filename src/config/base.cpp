@@ -322,6 +322,12 @@ std::tuple<seqno_t, ustring, std::vector<std::string>> ConfigBase::push() {
     return ret;
 }
 
+std::string ConfigBase::make_push_hex() {
+    auto push_result = this->push();
+    ustring data = std::get<1>(push_result);
+    return oxenc::to_hex(data);
+}
+
 void ConfigBase::confirm_pushed(seqno_t seqno, std::string msg_hash) {
     // Make sure seqno hasn't changed; if it has then that means we set some other data *after* the
     // caller got the last data to push, and so we don't care about this confirmation.
