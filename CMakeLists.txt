@@ -58,6 +58,9 @@ else()
     set(static_default ON)
 endif()
 
+
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --emit-tsd libsession-util.d.ts  -sNO_DISABLE_EXCEPTION_CATCHING  -sMODULARIZE=1")
+
 option(BUILD_STATIC_DEPS "Build all dependencies statically rather than trying to link to them on the system" ${static_default})
 option(STATIC_BUNDLE "Build a single static .a containing everything (both code and dependencies)" ${static_default})
 
