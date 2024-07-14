@@ -126,6 +126,7 @@ class UserProfile final : public ConfigBase {
     ///    - `pic` -- Profile pic object
     void set_profile_pic(std::string_view url, ustring_view key);
     void set_profile_pic(profile_pic pic);
+    void set_profile_pic_str(std::string url, ustring key) { set_profile_pic(url, key); }
 
     /// API: user_profile/UserProfile::get_nts_priority
     ///
@@ -158,6 +159,13 @@ class UserProfile final : public ConfigBase {
     /// - `std::optional<std::chrono::seconds>` - Returns the timestamp representing the message
     /// expiry timer if the timer is set
     std::optional<std::chrono::seconds> get_nts_expiry() const;
+    std::optional<uint32_t> get_nts_expiry_seconds() const {
+        std::optional<std::chrono::seconds> to_ret = this->get_nts_expiry();
+        if (to_ret) {
+            return to_ret->count();
+        }
+        return std::nullopt;
+    }
 
     /// API: user_profile/UserProfile::set_nts_expiry
     ///
@@ -167,6 +175,7 @@ class UserProfile final : public ConfigBase {
     /// Inputs:
     /// - `timer` -- Default to 0 seconds, will set the expiry timer
     void set_nts_expiry(std::chrono::seconds timer = 0s);
+    void set_nts_expiry_seconds(uint32_t timer) { this->set_nts_expiry(std::chrono::seconds(timer)); }
 
     /// API: user_profile/UserProfile::get_blinded_msgreqs
     ///
