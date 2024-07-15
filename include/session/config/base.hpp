@@ -12,6 +12,8 @@
 #include <variant>
 #include <vector>
 
+#include "../logging.hpp"
+#include "../sodium_array.hpp"
 #include "base.h"
 #include "namespaces.hpp"
 
@@ -28,9 +30,6 @@ static constexpr bool is_dict_subtype = is_one_of<T, config::scalar, config::set
 template <typename T>
 static constexpr bool is_dict_value =
         is_dict_subtype<T> || is_one_of<T, dict_value, int64_t, std::string>;
-
-// Levels for the logging callback
-enum class LogLevel { debug = 0, info, warning, error };
 
 /// Our current config state
 enum class ConfigState : int {
@@ -168,7 +167,7 @@ class ConfigBase : public ConfigSig {
     std::string _curr_hash;
 
     // Contains obsolete known message hashes that are obsoleted by the most recent merge or push;
-    // these are returned (and cleared) when `push` is called.
+    // these are returned (and cleared) when `push` or `old_hashes` are called.
     std::unordered_set<std::string> _old_hashes;
 
   protected:
@@ -194,19 +193,13 @@ class ConfigBase : public ConfigSig {
     // calling set_state, which sets to to true implicitly).
     bool _needs_dump = false;
 
+    ustring last_dumped = to_unsigned("");
+
     // Sets the current state; this also sets _needs_dump to true.  If transitioning to a dirty
     // state and we know our current message hash, that hash gets added to `old_hashes_` to be
     // deleted at the next push.
     void set_state(ConfigState s);
 
-  public:
-    // Invokes the `logger` callback if set, does nothing if there is no logger.
-    void log(LogLevel lvl, std::string msg) {
-        if (logger)
-            logger(lvl, std::move(msg));
-    }
-
-  protected:
     // Returns a reference to the current MutableConfigMessage.  If the current message is not
     // already dirty (i.e. Clean or Waiting) then calling this increments the seqno counter.
     MutableConfigMessage& dirty();
@@ -815,7 +808,7 @@ class ConfigBase : public ConfigSig {
     ///
     /// Inputs:
     /// - `extra` -- bt_dict containing a previous dump of data
-    virtual void load_extra_data(oxenc::bt_dict extra) {}
+    virtual void load_extra_data([[maybe_unused]] oxenc::bt_dict extra) {}
 
     /// API: base/ConfigBase::load_key
     ///
@@ -842,9 +835,6 @@ class ConfigBase : public ConfigSig {
 
     // Proxy class providing read and write access to the contained config data.
     const DictFieldRoot data{*this};
-
-    // If set then we log things by calling this callback
-    std::function<void(LogLevel lvl, std::string msg)> logger;
 
     /// API: base/ConfigBase::storage_namespace
     ///
@@ -1010,6 +1000,18 @@ class ConfigBase : public ConfigSig {
     /// - `std::vector<std::string>` -- Returns current config hashes
     std::vector<std::string> current_hashes() const;
 
+    /// API: base/ConfigBase::old_hashes
+    ///
+    /// The old config hash(es); this can be empty if there are no old hashes or if the config is in
+    /// a dirty state (in which case these should be retrieved via the `push` function). Calling
+    /// this function or the `push` function will clear the stored old_hashes.
+    ///
+    /// Inputs: None
+    ///
+    /// Outputs:
+    /// - `std::vector<std::string>` -- Returns old config hashes
+    std::vector<std::string> old_hashes();
+
     /// API: base/ConfigBase::needs_push
     ///
     /// Returns true if this object contains updated data that has not yet been confirmed stored on
@@ -1125,7 +1127,14 @@ class ConfigBase : public ConfigSig {
     ///
     /// Outputs:
     /// - `bool` -- Returns true if something has changed since last call to dump
-    virtual bool needs_dump() const { return _needs_dump; }
+    virtual bool needs_dump() const {
+        if (_needs_dump) {
+            return _needs_dump;
+        }
+        auto current_dump = this->make_dump();
+        auto dump_did_change = this->last_dumped != current_dump;
+        return dump_did_change;
+    }
 
     /// API: base/ConfigBase::add_key
     ///
@@ -1298,24 +1307,47 @@ inline const internals<T>& unbox(const config_object* conf) {
     return *static_cast<const internals<T>*>(conf->internals);
 }
 
-// Sets an error message in the internals.error string and updates the last_error pointer in the
-// outer (C) config_object struct to point at it.
-void set_error(config_object* conf, std::string e);
-
-// Same as above, but gets the error string out of an exception and passed through a return value.
-// Intended to simplify catch-and-return-error such as:
-//     try {
-//         whatever();
-//     } catch (const std::exception& e) {
-//         return set_error(conf, LIB_SESSION_ERR_OHNOES, e);
-//     }
-inline int set_error(config_object* conf, int errcode, const std::exception& e) {
-    set_error(conf, e.what());
-    return errcode;
+template <size_t N>
+void copy_c_str(char (&dest)[N], std::string_view src) {
+    if (src.size() >= N)
+        src.remove_suffix(src.size() - N - 1);
+    std::memcpy(dest, src.data(), src.size());
+    dest[src.size()] = 0;
 }
 
-// Copies a value contained in a string into a new malloced char buffer, returning the buffer and
-// size via the two pointer arguments.
-void copy_out(ustring_view data, unsigned char** out, size_t* outlen);
+// Wraps a labmda and, if an exception is thrown, sets an error message in the internals.error
+// string and updates the last_error pointer in the outer (C) config_object struct to point at it.
+//
+// No return value: accepts void and pointer returns; pointer returns will become nullptr on error
+template <std::invocable Call>
+decltype(auto) wrap_exceptions(config_object* conf, Call&& f) {
+    using Ret = std::invoke_result_t<Call>;
+
+    try {
+        conf->last_error = nullptr;
+        return std::invoke(std::forward<Call>(f));
+    } catch (const std::exception& e) {
+        copy_c_str(conf->_error_buf, e.what());
+        conf->last_error = conf->_error_buf;
+    }
+    if constexpr (std::is_pointer_v<Ret>)
+        return static_cast<Ret>(nullptr);
+    else
+        static_assert(std::is_void_v<Ret>, "Don't know how to return an error value!");
+}
+
+// Same as above but accepts callbacks with value returns on errors: returns `f()` on success,
+// `error_return` on exception
+template <std::invocable Call, typename Ret>
+Ret wrap_exceptions(config_object* conf, Call&& f, Ret error_return) {
+    try {
+        conf->last_error = nullptr;
+        return std::invoke(std::forward<Call>(f));
+    } catch (const std::exception& e) {
+        copy_c_str(conf->_error_buf, e.what());
+        conf->last_error = conf->_error_buf;
+    }
+    return error_return;
+}
 
 }  // namespace session::config

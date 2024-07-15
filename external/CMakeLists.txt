@@ -26,7 +26,7 @@ if(SUBMODULE_CHECK)
     message(STATUS "Checking submodules")
     check_submodule(ios-cmake)
     check_submodule(libsodium-internal)
-    check_submodule(oxen-encoding)
+    check_submodule(oxen-libquic external/oxen-logging external/oxen-encoding)
     check_submodule(nlohmann-json)
     check_submodule(zstd)
     check_submodule(protobuf)
@@ -70,6 +70,9 @@ macro(system_or_submodule BIGNAME smallname pkgconf subdir)
   if(NOT TARGET ${smallname}::${smallname})
     add_library(${smallname}::${smallname} ALIAS ${smallname})
   endif()
+  if(BUILD_STATIC_DEPS AND STATIC_BUNDLE)
+      libsession_static_bundle(${smallname}::${smallname})
+  endif()
 endmacro()
 
 
@@ -78,11 +81,6 @@ set(cross_host "")
 set(cross_rc "")
 if(CMAKE_CROSSCOMPILING)
     if(APPLE_TARGET_TRIPLE)
-        if(PLATFORM MATCHES "OS64" OR PLATFORM MATCHES "SIMULATORARM64")
-            set(APPLE_TARGET_TRIPLE aarch64-apple-ios)
-        elseif(PLATFORM MATCHES "SIMULATOR64")
-            set(APPLE_TARGET_TRIPLE x86_64-apple-ios)
-        endif()
         set(cross_host "--host=${APPLE_TARGET_TRIPLE}")
     elseif(ANDROID)
         if(CMAKE_ANDROID_ARCH_ABI MATCHES x86_64)
@@ -115,8 +113,31 @@ if(CMAKE_CROSSCOMPILING)
     endif()
 endif()
 
+set(LIBQUIC_BUILD_TESTS OFF CACHE BOOL "")
+if(ENABLE_ONIONREQ)
+  system_or_submodule(OXENQUIC quic liboxenquic>=1.1.0 oxen-libquic)
+endif()
 
-system_or_submodule(OXENC oxenc liboxenc>=1.0.10 oxen-encoding)
+if(NOT TARGET oxenc::oxenc)
+    # The oxenc target will already exist if we load libquic above via submodule
+    set(OXENC_BUILD_TESTS OFF CACHE BOOL "")
+    set(OXENC_BUILD_DOCS OFF CACHE BOOL "")
+    system_or_submodule(OXENC oxenc liboxenc>=1.1.0 oxen-libquic/external/oxen-encoding)
+endif()
+
+if(NOT TARGET oxen::logging)
+    add_subdirectory(oxen-libquic/external/oxen-logging)
+endif()
+
+oxen_logging_add_source_dir("${PROJECT_SOURCE_DIR}")
+
+# Apple xcode 15 has a completely broken std::source_location; we can't fix it, but at least we can
+# hack up the source locations to hide the path that it uses (which is the useless path to
+# oxen/log.hpp where the info/critical/etc. bodies are).
+if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL AppleClang AND NOT CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 16)
+    message(WARNING "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} is broken: filenames in logging statements will not display properly")
+    oxen_logging_add_source_dir("${CMAKE_CURRENT_SOURCE_DIR}/oxen-libquic/external/oxen-logging/include/oxen")
+endif()
 
 
 if(CMAKE_C_COMPILER_LAUNCHER)
