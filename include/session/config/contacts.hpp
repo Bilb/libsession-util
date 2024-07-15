@@ -66,8 +66,13 @@ struct contact_info {
                              // timestamp expires).
     expiration_mode exp_mode = expiration_mode::none;  // The expiry time; none if not expiring.
     std::chrono::seconds exp_timer{0};                 // The expiration timer (in seconds)
-    int64_t created = 0;                               // Unix timestamp when this contact was added
+    uint32_t get_exp_timer_number() { return exp_timer.count(); }
+    void set_exp_timer_number(uint32_t new_timer) { exp_timer = std::chrono::seconds(new_timer); };
 
+    int64_t created = 0;  // Unix timestamp when this contact was added
+
+    uint32_t get_created() { return created; }
+    void set_created(uint32_t new_created) { created = new_created; };
     explicit contact_info(std::string sid);
 
     // Internal ctor/method for C API implementations:
@@ -156,6 +161,9 @@ class Contacts : public ConfigBase {
     /// - `std::optional<contact_info>` - Returns nullopt if session ID was not found, otherwise a
     /// filled out contact_info
     std::optional<contact_info> get(std::string_view pubkey_hex) const;
+    std::optional<contact_info> get_str(std::string pubkey_hex) const {
+        return this->get(pubkey_hex);
+    };
 
     /// API: contacts/Contacts::get_or_construct
     ///
@@ -227,6 +235,9 @@ class Contacts : public ConfigBase {
     /// - `session_id` -- hex string of the session id
     /// - `profile_pic` -- profile pic of the contact
     void set_profile_pic(std::string_view session_id, profile_pic pic);
+    void set_profile_pic_str(std::string session_id, profile_pic pic) {
+        this->set_profile_pic(session_id, pic);
+    }
 
     /// API: contacts/contacts::set_approved
     ///
@@ -286,6 +297,9 @@ class Contacts : public ConfigBase {
     /// - `session_id` -- hex string of the session id
     /// - `notifications` -- detail on notifications
     void set_notifications(std::string_view session_id, notify_mode notifications);
+    void set_notifications_str(std::string pubkey_hex, notify_mode notifications) {
+        set_notifications(pubkey_hex, notifications);
+    }
 
     /// API: contacts/contacts::set_expiry
     ///
@@ -300,6 +314,10 @@ class Contacts : public ConfigBase {
             std::string_view session_id,
             expiration_mode exp_mode,
             std::chrono::seconds expiration_timer = 0min);
+    void set_expiry_wasm(
+            std::string session_id, expiration_mode exp_mode, uint32_t expiration_timer) {
+        this->set_expiry(session_id, exp_mode, std::chrono::seconds(expiration_timer));
+    }
 
     /// API: contacts/contacts::set_created
     ///
@@ -310,7 +328,7 @@ class Contacts : public ConfigBase {
     /// - `session_id` -- hex string of the session id
     /// - `timestamp` -- standard unix timestamp of the time contact was created
     void set_created(std::string_view session_id, int64_t timestamp);
-    void set_created_str(std::string session_id, int32_t timestamp) {
+    void set_created_str(std::string session_id, uint32_t timestamp) {
         set_created(session_id, timestamp);
     }
 
@@ -325,6 +343,7 @@ class Contacts : public ConfigBase {
     /// Outputs:
     /// - `bool` - Returns true if contact was found and removed, false otherwise
     bool erase(std::string_view session_id);
+    bool erase_str(std::string session_id) { return this->erase(session_id); }
 
     /// API: contacts/contacts::size
     ///
@@ -347,6 +366,14 @@ class Contacts : public ConfigBase {
     bool empty() const { return size() == 0; }
 
     bool accepts_protobuf() const override { return true; }
+
+    std::vector<contact_info> all() const {
+        std::vector<contact_info> contacts;
+        for (auto i = this->begin(); i != this->end(); i++) {
+            contacts.push_back(*i);
+        }
+        return contacts;
+    }
 
     struct iterator;
     /// API: contacts/contacts::begin

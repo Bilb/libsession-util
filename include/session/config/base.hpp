@@ -856,10 +856,6 @@ class ConfigBase : public ConfigSig {
     /// Outputs:
     /// - `Namespace` -- Returns the namespace where config type is stored/loaded
     virtual Namespace storage_namespace() const = 0;
-    std::int16_t storage_namespace_number() const {
-        return static_cast<std::underlying_type<Namespace>::type>(this->storage_namespace());
-    }
-
     /// API: base/ConfigBase::encryption_domain
     ///
     /// Subclasses must override this to return a constant string that is unique per config type;
