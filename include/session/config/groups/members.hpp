@@ -313,9 +313,6 @@ class Members final : public ConfigBase {
     /// Outputs:
     /// - `const char*` - Will return "groups::Members"
     const char* encryption_domain() const override { return "groups::Members"; }
-    const std::string encryption_domain_str() const {
-        return std::string{this->encryption_domain()};
-    }
 
     /// API: groups/Members::get
     ///

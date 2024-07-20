@@ -48,11 +48,6 @@ enum class ConfigState : int {
 
 using Ed25519PubKey = std::array<unsigned char, 32>;
 using Ed25519Secret = sodium_array<unsigned char>;
-struct PushResultStruct {
-    double seqno;  // wasm doesn't support bigints yet, which we'd need for int64
-    std::string data_hex;
-    std::vector<std::string> hashes;
-};
 
 // Helper base class for holding a config signing keypair
 class ConfigSig {
@@ -858,7 +853,7 @@ class ConfigBase : public ConfigSig {
     /// Outputs:
     /// - `Namespace` -- Returns the namespace where config type is stored/loaded
     virtual const char* encryption_domain() const = 0;
-    virtual const std::string encryption_domain_str() const = 0;
+    const std::string encryption_domain_str() { return std::string(this->encryption_domain()); }
 
     /// API: base/ConfigBase::compression_level
     ///
@@ -1055,17 +1050,6 @@ class ConfigBase : public ConfigSig {
     ///   - `std::vector<std::string>` -- list of known message hashes
     virtual std::tuple<seqno_t, ustring, std::vector<std::string>> push();
 
-    PushResultStruct push_wasm() {
-        auto push_ret = this->push();
-        PushResultStruct to_ret;
-        to_ret.seqno = std::get<0>(push_ret);
-        to_ret.data_hex = oxenc::to_hex(std::get<1>(push_ret));
-        to_ret.hashes = std::get<2>(push_ret);
-        return to_ret;
-    }
-
-    std::string make_push_hex();
-
     /// API: base/ConfigBase::confirm_pushed
     ///
     /// Should be called after the push is confirmed stored on the storage server swarm to let the
@@ -1087,9 +1071,6 @@ class ConfigBase : public ConfigSig {
     /// - `seqno` -- sequence number that was pushed
     /// - `msg_hash` -- message hash that was pushed
     virtual void confirm_pushed(seqno_t seqno, std::string msg_hash);
-    virtual void confirm_pushed_wasm(double seqno, std::string msg_hash) {
-        confirm_pushed(seqno, msg_hash);
-    }
 
     /// API: base/ConfigBase::dump
     ///
@@ -1103,7 +1084,6 @@ class ConfigBase : public ConfigSig {
     /// Outputs:
     /// - `ustring` -- Returns binary data of the state dump
     ustring dump();
-    std::string dump_hex() { return oxenc::to_hex(this->dump()); };
 
     /// API: base/ConfigBase::make_dump
     ///
@@ -1116,7 +1096,6 @@ class ConfigBase : public ConfigSig {
     /// Outputs:
     /// - `ustring` -- Returns binary data of the state dump
     ustring make_dump() const;
-    std::string make_dump_hex() const;
 
     /// API: base/ConfigBase::needs_dump
     ///

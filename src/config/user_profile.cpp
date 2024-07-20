@@ -19,9 +19,6 @@ UserProfile::UserProfile(ustring_view ed25519_secretkey, std::optional<ustring_v
     load_key(ed25519_secretkey);
 }
 
-UserProfile::UserProfile(ustring ed25519_secretkey, std::optional<ustring> dumped) :
-        UserProfile{to_unsigned_sv(ed25519_secretkey), dumped} {}
-
 LIBSESSION_C_API int user_profile_init(
         config_object** conf,
         const unsigned char* ed25519_secretkey_bytes,

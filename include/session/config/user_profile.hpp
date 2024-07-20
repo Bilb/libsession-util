@@ -48,7 +48,6 @@ class UserProfile final : public ConfigBase {
     /// Outputs:
     /// - `UserProfile` - Constructor
     UserProfile(ustring_view ed25519_secretkey, std::optional<ustring_view> dumped);
-    UserProfile(ustring ed25519_secretkey, std::optional<ustring> dumped);
 
     /// API: user_profile/UserProfile::storage_namespace
     ///
@@ -69,9 +68,6 @@ class UserProfile final : public ConfigBase {
     /// Outputs:
     /// - `const char*` - Will return "UserProfile"
     const char* encryption_domain() const override { return "UserProfile"; }
-    const std::string encryption_domain_str() const override {
-        return std::string{this->encryption_domain()};
-    }
 
     /// API: user_profile/UserProfile::get_name
     ///
@@ -84,7 +80,11 @@ class UserProfile final : public ConfigBase {
     std::optional<std::string_view> get_name() const;
 
     std::optional<std::string> get_name_str() const {
-        return session::wrappedOptStrView(this->get_name());
+        auto name = this->get_name();
+        if (name) {
+            return std::optional<std::string>(*name);
+        }
+        return std::nullopt;
     }
 
     /// API: user_profile/UserProfile::set_name
@@ -175,7 +175,9 @@ class UserProfile final : public ConfigBase {
     /// Inputs:
     /// - `timer` -- Default to 0 seconds, will set the expiry timer
     void set_nts_expiry(std::chrono::seconds timer = 0s);
-    void set_nts_expiry_seconds(uint32_t timer) { this->set_nts_expiry(std::chrono::seconds(timer)); }
+    void set_nts_expiry_seconds(uint32_t timer) {
+        this->set_nts_expiry(std::chrono::seconds(timer));
+    }
 
     /// API: user_profile/UserProfile::get_blinded_msgreqs
     ///

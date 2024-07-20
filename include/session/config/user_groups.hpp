@@ -263,7 +263,6 @@ class UserGroups : public ConfigBase {
     /// Outputs:
     /// - `UserGroups` - Constructor
     UserGroups(ustring_view ed25519_secretkey, std::optional<ustring_view> dumped);
-    UserGroups(ustring ed25519_secretkey, std::optional<ustring> dumped);
 
     /// API: user_groups/UserGroups::storage_namespace
     ///
@@ -284,9 +283,6 @@ class UserGroups : public ConfigBase {
     /// Outputs:
     /// - `const char*` - Returns "UserGroups"
     const char* encryption_domain() const override { return "UserGroups"; }
-    const std::string encryption_domain_str() const override {
-        return std::string{this->encryption_domain()};
-    }
 
     /// API: user_groups/UserGroups::get_community
     ///

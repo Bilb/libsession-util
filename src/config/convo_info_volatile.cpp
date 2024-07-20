@@ -97,9 +97,6 @@ ConvoInfoVolatile::ConvoInfoVolatile(
     load_key(ed25519_secretkey);
 }
 
-ConvoInfoVolatile::ConvoInfoVolatile(ustring ed25519_secretkey, std::optional<ustring> dumped) :
-        ConvoInfoVolatile{to_unsigned_sv(ed25519_secretkey), dumped} {}
-
 std::optional<convo::one_to_one> ConvoInfoVolatile::get_1to1(std::string_view pubkey_hex) const {
     std::string pubkey = session_id_to_bytes(pubkey_hex);
 

@@ -172,7 +172,6 @@ class ConvoInfoVolatile : public ConfigBase {
     /// - `dumped` -- either `std::nullopt` to construct a new, empty object; or binary state data
     /// that was previously dumped from an instance of this class by calling `dump()`.
     ConvoInfoVolatile(ustring_view ed25519_secretkey, std::optional<ustring_view> dumped);
-    ConvoInfoVolatile(ustring ed25519_secretkey, std::optional<ustring> dumped);
 
     /// API: convo_info_volatile/ConvoInfoVolatile::storage_namespace
     ///
@@ -193,9 +192,6 @@ class ConvoInfoVolatile : public ConfigBase {
     /// Outputs:
     /// - `const char*` - Will return "ConvoInfoVolatile"
     const char* encryption_domain() const override { return "ConvoInfoVolatile"; }
-    const std::string encryption_domain_str() const override {
-        return std::string{this->encryption_domain()};
-    }
 
     /// Our pruning ages.  We ignore added conversations that are more than PRUNE_LOW before now,
     /// and we actively remove (when doing a new push) any conversations that are more than

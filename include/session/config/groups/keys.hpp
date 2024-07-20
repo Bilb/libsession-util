@@ -204,9 +204,6 @@ class Keys final : public ConfigSig {
     /// Outputs:
     /// - `const char*` - Will return "groups::Keys"
     const char* encryption_domain() const { return "groups::Keys"; }
-    const std::string encryption_domain_str() const {
-        return std::string{this->encryption_domain()};
-    }
 
     /// API: groups/Keys::group_keys
     ///

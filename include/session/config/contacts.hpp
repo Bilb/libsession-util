@@ -124,7 +124,6 @@ class Contacts : public ConfigBase {
     /// Outputs:
     /// - `Contact` - Constructor
     Contacts(ustring_view ed25519_secretkey, std::optional<ustring_view> dumped);
-    Contacts(ustring ed25519_secretkey, std::optional<ustring> dumped);
 
     /// API: contacts/Contacts::storage_namespace
     ///
@@ -145,9 +144,6 @@ class Contacts : public ConfigBase {
     /// Outputs:
     /// - `const char*` - Will return "Contacts"
     const char* encryption_domain() const override { return "Contacts"; }
-    const std::string encryption_domain_str() const override {
-        return std::string{this->encryption_domain()};
-    }
 
     /// API: contacts/Contacts::get
     ///

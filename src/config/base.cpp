@@ -353,11 +353,6 @@ std::tuple<seqno_t, ustring, std::vector<std::string>> ConfigBase::push() {
     return ret;
 }
 
-std::string ConfigBase::make_push_hex() {
-    auto push_result = this->push();
-    ustring data = std::get<1>(push_result);
-    return oxenc::to_hex(data);
-}
 
 void ConfigBase::confirm_pushed(seqno_t seqno, std::string msg_hash) {
     // Make sure seqno hasn't changed; if it has then that means we set some other data *after* the
@@ -376,12 +371,6 @@ ustring ConfigBase::dump() {
     _needs_dump = false;
     this->last_dumped = d;
     return d;
-}
-
-std::string ConfigBase::make_dump_hex() const {
-    auto d = this->make_dump();
-
-    return oxenc::to_hex(d);
 }
 
 ustring ConfigBase::make_dump() const {
