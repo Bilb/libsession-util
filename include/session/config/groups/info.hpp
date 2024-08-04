@@ -78,7 +78,6 @@ class Info : public ConfigBase {
     /// Outputs:
     /// - `const char*` - Will return "groups::Info"
     const char* encryption_domain() const override { return "groups::Info"; }
-    
 
     /// API: groups/Info::id
     ///

@@ -80,6 +80,7 @@ template <typename Char, size_t N>
 inline std::basic_string_view<Char> to_sv(const std::array<Char, N>& v) {
     return {v.data(), N};
 }
+
 inline uint64_t get_timestamp() {
     return std::chrono::steady_clock::now().time_since_epoch().count();
 }

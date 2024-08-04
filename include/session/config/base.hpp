@@ -1,7 +1,5 @@
 #pragma once
 
-#include <oxenc/hex.h>
-
 #include <cassert>
 #include <memory>
 #include <session/config.hpp>
@@ -834,6 +832,7 @@ class ConfigBase : public ConfigSig {
     /// Outputs:
     /// - `Namespace` -- Returns the namespace where config type is stored/loaded
     virtual Namespace storage_namespace() const = 0;
+
     /// API: base/ConfigBase::encryption_domain
     ///
     /// Subclasses must override this to return a constant string that is unique per config type;

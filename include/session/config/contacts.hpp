@@ -66,13 +66,8 @@ struct contact_info {
                              // timestamp expires).
     expiration_mode exp_mode = expiration_mode::none;  // The expiry time; none if not expiring.
     std::chrono::seconds exp_timer{0};                 // The expiration timer (in seconds)
-    uint32_t get_exp_timer_number() { return exp_timer.count(); }
-    void set_exp_timer_number(uint32_t new_timer) { exp_timer = std::chrono::seconds(new_timer); };
+    int64_t created = 0;                               // Unix timestamp when this contact was added
 
-    int64_t created = 0;  // Unix timestamp when this contact was added
-
-    uint32_t get_created() { return created; }
-    void set_created(uint32_t new_created) { created = new_created; };
     explicit contact_info(std::string sid);
 
     // Internal ctor/method for C API implementations:
@@ -158,9 +153,6 @@ class Contacts : public ConfigBase {
     /// - `std::optional<contact_info>` - Returns nullopt if session ID was not found, otherwise a
     /// filled out contact_info
     std::optional<contact_info> get(std::string_view pubkey_hex) const;
-    std::optional<contact_info> get_str(std::string pubkey_hex) const {
-        return this->get(pubkey_hex);
-    };
 
     /// API: contacts/Contacts::get_or_construct
     ///
@@ -205,7 +197,6 @@ class Contacts : public ConfigBase {
     /// - `name` -- string of the contacts name
     void set_name(std::string_view session_id, std::string name);
 
-
     /// API: contacts/contacts::set_nickname
     ///
     /// Alternative to `set()` for setting a single field.  (If setting multiple fields at once you
@@ -246,6 +237,7 @@ class Contacts : public ConfigBase {
     /// - `session_id` -- hex string of the session id
     /// - `approved` -- boolean on whether the contact is approved by me (to send messages to me)
     void set_approved(std::string_view session_id, bool approved);
+
     /// API: contacts/contacts::set_approved_me
     ///
     /// Alternative to `set()` for setting a single field.  (If setting multiple fields at once you
