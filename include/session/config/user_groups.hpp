@@ -320,9 +320,6 @@ class UserGroups : public ConfigBase {
     /// - `std::optional<legacy_group_info>` - Returns the filled out legacy_group_info struct if
     ///   found
     std::optional<legacy_group_info> get_legacy_group(std::string_view pubkey_hex) const;
-    std::optional<legacy_group_info> get_legacy_group_str(std::string pubkey_hex) const {
-        return this->get_legacy_group(pubkey_hex);
-    }
 
     /// API: user_groups/UserGroups::get_group
     ///
@@ -397,9 +394,6 @@ class UserGroups : public ConfigBase {
     /// Outputs:
     /// - `legacy_group_info` - Returns the filled out legacy_group_info struct
     legacy_group_info get_or_construct_legacy_group(std::string_view pubkey_hex) const;
-    legacy_group_info get_or_construct_legacy_group_str(std::string pubkey_hex) const {
-        return this->get_or_construct_legacy_group(pubkey_hex);
-    }
 
     /// API: user_groups/UserGroups::get_or_construct_group
     ///
@@ -448,7 +442,6 @@ class UserGroups : public ConfigBase {
     void set(const group_info& info);
     void set(const community_info& info);
     void set(const legacy_group_info& info);
-    void set_legacy_group(const legacy_group_info& info) { this->set(info); }
 
   protected:
     // Drills into the nested dicts to access open group details

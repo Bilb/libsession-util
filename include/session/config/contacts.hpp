@@ -176,9 +176,6 @@ class Contacts : public ConfigBase {
     /// Outputs:
     /// - `contact_info` - Returns a filled out contact_info
     contact_info get_or_construct(std::string_view pubkey_hex) const;
-    contact_info get_or_construct_str(std::string pubkey_hex) const {
-        return this->get_or_construct(pubkey_hex);
-    }
 
     /// API: contacts/contacts::set
     ///
@@ -206,9 +203,7 @@ class Contacts : public ConfigBase {
     /// - `session_id` -- hex string of the session id
     /// - `name` -- string of the contacts name
     void set_name(std::string_view session_id, std::string name);
-    void set_name_str(std::string pubkey_hex, std::string name) {
-        this->set_name(pubkey_hex, name);
-    }
+
 
     /// API: contacts/contacts::set_nickname
     ///
@@ -219,9 +214,7 @@ class Contacts : public ConfigBase {
     /// - `session_id` -- hex string of the session id
     /// - `nickname` -- string of the contacts nickname
     void set_nickname(std::string_view session_id, std::string nickname);
-    void set_nickname_str(std::string pubkey_hex, std::string nickname) {
-        this->set_nickname(pubkey_hex, nickname);
-    }
+
     /// API: contacts/contacts::set_profile_pic
     ///
     /// Alternative to `set()` for setting a single field.  (If setting multiple fields at once you
@@ -231,9 +224,6 @@ class Contacts : public ConfigBase {
     /// - `session_id` -- hex string of the session id
     /// - `profile_pic` -- profile pic of the contact
     void set_profile_pic(std::string_view session_id, profile_pic pic);
-    void set_profile_pic_str(std::string session_id, profile_pic pic) {
-        this->set_profile_pic(session_id, pic);
-    }
 
     /// API: contacts/contacts::set_approved
     ///
@@ -244,9 +234,6 @@ class Contacts : public ConfigBase {
     /// - `session_id` -- hex string of the session id
     /// - `approved` -- boolean on whether the contact is approved by me (to send messages to me)
     void set_approved(std::string_view session_id, bool approved);
-    void set_approved_str(std::string pubkey_hex, bool approved) {
-        this->set_approved(pubkey_hex, approved);
-    }
     /// API: contacts/contacts::set_approved_me
     ///
     /// Alternative to `set()` for setting a single field.  (If setting multiple fields at once you
@@ -257,9 +244,7 @@ class Contacts : public ConfigBase {
     /// - `approved_me` -- boolean on whether the contact has approved the user (so we can send
     /// messages to them)
     void set_approved_me(std::string_view session_id, bool approved_me);
-    void set_approved_me_str(std::string pubkey_hex, bool approved_me) {
-        this->set_approved_me(pubkey_hex, approved_me);
-    }
+
     /// API: contacts/contacts::set_blocked
     ///
     /// Alternative to `set()` for setting a single field.  (If setting multiple fields at once you
@@ -269,9 +254,7 @@ class Contacts : public ConfigBase {
     /// - `session_id` -- hex string of the session id
     /// - `blocked` -- boolean on whether the contact is blocked by us
     void set_blocked(std::string_view session_id, bool blocked);
-    void set_blocked_str(std::string pubkey_hex, bool blocked) {
-        this->set_blocked(pubkey_hex, blocked);
-    }
+
     /// API: contacts/contacts::set_priority
     ///
     /// Alternative to `set()` for setting a single field.  (If setting multiple fields at once you
@@ -281,9 +264,7 @@ class Contacts : public ConfigBase {
     /// - `session_id` -- hex string of the session id
     /// - `priority` -- numerical value on the contacts priority (pinned, normal, hidden etc)
     void set_priority(std::string_view session_id, int priority);
-    void set_priority_str(std::string pubkey_hex, int priority) {
-        this->set_priority(pubkey_hex, priority);
-    }
+
     /// API: contacts/contacts::set_notifications
     ///
     /// Alternative to `set()` for setting a single field.  (If setting multiple fields at once you
@@ -293,9 +274,6 @@ class Contacts : public ConfigBase {
     /// - `session_id` -- hex string of the session id
     /// - `notifications` -- detail on notifications
     void set_notifications(std::string_view session_id, notify_mode notifications);
-    void set_notifications_str(std::string pubkey_hex, notify_mode notifications) {
-        set_notifications(pubkey_hex, notifications);
-    }
 
     /// API: contacts/contacts::set_expiry
     ///
@@ -310,10 +288,6 @@ class Contacts : public ConfigBase {
             std::string_view session_id,
             expiration_mode exp_mode,
             std::chrono::seconds expiration_timer = 0min);
-    void set_expiry_wasm(
-            std::string session_id, expiration_mode exp_mode, uint32_t expiration_timer) {
-        this->set_expiry(session_id, exp_mode, std::chrono::seconds(expiration_timer));
-    }
 
     /// API: contacts/contacts::set_created
     ///
@@ -324,9 +298,6 @@ class Contacts : public ConfigBase {
     /// - `session_id` -- hex string of the session id
     /// - `timestamp` -- standard unix timestamp of the time contact was created
     void set_created(std::string_view session_id, int64_t timestamp);
-    void set_created_str(std::string session_id, uint32_t timestamp) {
-        set_created(session_id, timestamp);
-    }
 
     /// API: contacts/contacts::erase
     ///
@@ -339,7 +310,6 @@ class Contacts : public ConfigBase {
     /// Outputs:
     /// - `bool` - Returns true if contact was found and removed, false otherwise
     bool erase(std::string_view session_id);
-    bool erase_str(std::string session_id) { return this->erase(session_id); }
 
     /// API: contacts/contacts::size
     ///
@@ -362,14 +332,6 @@ class Contacts : public ConfigBase {
     bool empty() const { return size() == 0; }
 
     bool accepts_protobuf() const override { return true; }
-
-    std::vector<contact_info> all() const {
-        std::vector<contact_info> contacts;
-        for (auto i = this->begin(); i != this->end(); i++) {
-            contacts.push_back(*i);
-        }
-        return contacts;
-    }
 
     struct iterator;
     /// API: contacts/contacts::begin
