@@ -79,7 +79,6 @@ class UserProfile : public ConfigBase {
     /// - `std::optional<std::string>` - Returns the user profile name if it exists
     std::optional<std::string_view> get_name() const;
 
-
     /// API: user_profile/UserProfile::set_name
     ///
     /// Sets the user profile name; if given an empty string then the name is removed.
@@ -88,6 +87,14 @@ class UserProfile : public ConfigBase {
     /// - `new_name` -- The name to be put into the user profile
     void set_name(std::string_view new_name);
 
+    /// API: user_profile/UserProfile::set_name_truncated
+    ///
+    /// Sets the user profile name; if given an empty string then the name is removed. Same as the
+    /// `set_name` function but truncates the name if it's too long.
+    ///
+    /// Inputs:
+    /// - `new_name` -- The name to be put into the user profile
+    void set_name_truncated(std::string new_name);
 
     /// API: user_profile/UserProfile::get_profile_pic
     ///
@@ -152,7 +159,6 @@ class UserProfile : public ConfigBase {
     /// expiry timer if the timer is set
     std::optional<std::chrono::seconds> get_nts_expiry() const;
 
-
     /// API: user_profile/UserProfile::set_nts_expiry
     ///
     /// Sets the Note-to-self message expiry timer.  Call without arguments (or pass a zero time) to
@@ -161,7 +167,6 @@ class UserProfile : public ConfigBase {
     /// Inputs:
     /// - `timer` -- Default to 0 seconds, will set the expiry timer
     void set_nts_expiry(std::chrono::seconds timer = 0s);
-   
 
     /// API: user_profile/UserProfile::get_blinded_msgreqs
     ///

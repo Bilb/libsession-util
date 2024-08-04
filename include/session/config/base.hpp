@@ -183,8 +183,6 @@ class ConfigBase : public ConfigSig {
     // calling set_state, which sets to to true implicitly).
     bool _needs_dump = false;
 
-    ustring last_dumped = to_unsigned("");
-
     // Sets the current state; this also sets _needs_dump to true.  If transitioning to a dirty
     // state and we know our current message hash, that hash gets added to `old_hashes_` to be
     // deleted at the next push.
@@ -1100,14 +1098,7 @@ class ConfigBase : public ConfigSig {
     ///
     /// Outputs:
     /// - `bool` -- Returns true if something has changed since last call to dump
-    virtual bool needs_dump() const {
-        if (_needs_dump) {
-            return _needs_dump;
-        }
-        auto current_dump = this->make_dump();
-        auto dump_did_change = this->last_dumped != current_dump;
-        return dump_did_change;
-    }
+    virtual bool needs_dump() const { return _needs_dump; }
 
     /// API: base/ConfigBase::add_key
     ///

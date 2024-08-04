@@ -11,7 +11,6 @@ namespace session::network {
 
 namespace fs = std::filesystem;
 
-using service_node = oxen::quic::RemoteAddress;
 using network_response_callback_t = std::function<void(
         bool success, bool timeout, int16_t status_code, std::optional<std::string> response)>;
 
@@ -28,6 +27,39 @@ enum class PathType {
     download,
 };
 
+struct service_node : public oxen::quic::RemoteAddress {
+  public:
+    std::vector<int> storage_server_version;
+
+    service_node() = delete;
+
+    template <typename... Opt>
+    service_node(
+            std::string_view remote_pk, std::vector<int> storage_server_version, Opt&&... opts) :
+            oxen::quic::RemoteAddress{remote_pk, std::forward<Opt>(opts)...},
+            storage_server_version{storage_server_version} {}
+
+    template <typename... Opt>
+    service_node(ustring_view remote_pk, std::vector<int> storage_server_version, Opt&&... opts) :
+            oxen::quic::RemoteAddress{remote_pk, std::forward<Opt>(opts)...},
+            storage_server_version{storage_server_version} {}
+
+    service_node(const service_node& obj) :
+            oxen::quic::RemoteAddress{obj}, storage_server_version{obj.storage_server_version} {}
+    service_node& operator=(const service_node& obj) {
+        storage_server_version = obj.storage_server_version;
+        oxen::quic::RemoteAddress::operator=(obj);
+        _copy_internals(obj);
+        return *this;
+    }
+
+    bool operator==(const service_node& other) const {
+        return static_cast<const oxen::quic::RemoteAddress&>(*this) ==
+                       static_cast<const oxen::quic::RemoteAddress&>(other) &&
+               storage_server_version == other.storage_server_version;
+    }
+};
+
 struct connection_info {
     service_node node;
     std::shared_ptr<oxen::quic::connection_interface> conn;
@@ -40,7 +72,6 @@ struct onion_path {
     connection_info conn_info;
     std::vector<service_node> nodes;
     uint8_t failure_count;
-    uint8_t timeout_count;
 
     bool operator==(const onion_path& other) const {
         // The `conn_info` and failure/timeout counts can be reset for a path in a number
@@ -57,11 +88,11 @@ struct request_info {
 
     std::string request_id;
     service_node target;
+    session::onionreq::network_destination destination;
     std::string endpoint;
     std::optional<ustring> body;
     std::optional<ustring> original_body;
     std::optional<session::onionreq::x25519_pubkey> swarm_pubkey;
-    onion_path path;
     PathType path_type;
     std::chrono::milliseconds timeout;
     bool node_destination;
@@ -81,6 +112,7 @@ class Network {
     bool shut_down_disk_thread = false;
     bool need_write = false;
     bool need_pool_write = false;
+    bool need_failure_counts_write = false;
     bool need_swarm_write = false;
     bool need_clear_cache = false;
 
@@ -367,6 +399,8 @@ class Network {
                          std::vector<service_node> pool,
                          std::optional<std::string> error)> callback);
 
+    void build_paths_and_pool_in_background(std::string caller, PathType path_type);
+
     /// API: network/with_path
     ///
     /// Retrieves a valid onion request path to perform a request on.  If there aren't currently any
@@ -471,6 +505,7 @@ class Network {
     /// Inputs:
     /// - 'request_id' - [in] id for the request which triggered the call.
     /// - `path_type` -- [in] the type of path to validate the size for.
+    /// - `test_attempt` -- [in] the number of test which have occurred before this one.
     /// - `target_nodes` -- [in] list of nodes to send requests to until we get a result or it's
     /// drained.
     /// - `callback` -- [in] callback to be triggered once we make a successful request.  NOTE: If
@@ -479,6 +514,7 @@ class Network {
     void find_valid_guard_node_recursive(
             std::string request_id,
             PathType path_type,
+            int64_t test_attempt,
             std::vector<service_node> target_nodes,
             std::function<
                     void(std::optional<connection_info> valid_guard_node,
@@ -585,6 +621,7 @@ class Network {
     ///
     /// Inputs:
     /// - `info` -- [in] the information for the request that was made.
+    /// - `path` -- [in] the onion path the request was sent along.
     /// - `timeout` -- [in, optional] flag indicating whether the request timed out.
     /// - `status_code` -- [in, optional] the status code returned from the network.
     /// - `response` -- [in, optional] response data returned from the network.
@@ -592,6 +629,7 @@ class Network {
     /// information after processing the error.
     void handle_errors(
             request_info info,
+            onion_path path,
             bool timeout,
             std::optional<int16_t> status_code,
             std::optional<std::string> response,
