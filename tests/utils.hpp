@@ -1,6 +1,7 @@
 #pragma once
 
 #include <oxenc/hex.h>
+#include <sodium/crypto_scalarmult.h>
 
 #include <array>
 #include <chrono>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "session/config/base.h"
+#include "session/util.hpp"
 
 using ustring = std::basic_string<unsigned char>;
 using ustring_view = std::basic_string_view<unsigned char>;
@@ -87,4 +89,23 @@ std::vector<std::basic_string_view<C>> view_vec(const std::vector<std::basic_str
     vv.reserve(v.size());
     std::copy(v.begin(), v.end(), std::back_inserter(vv));
     return vv;
+}
+
+inline std::string point_on_ed25519(uint8_t multiplier) {
+    // base point (09 00 00 ... in little-endian)
+    unsigned char base_point[32] = {0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+    unsigned char scalar[32] = {multiplier, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                0x00,       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                0x00,       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                0x00,       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    // Resulting point after scalar multiplication
+    unsigned char point[32];
+    if (crypto_scalarmult(point, scalar, base_point) != 0) {
+        throw std::invalid_argument("Error: Scalar multiplication failed");
+    }
+    return oxenc::to_hex(session::from_unsigned(point));
 }

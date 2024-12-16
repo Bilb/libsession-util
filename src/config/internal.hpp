@@ -1,6 +1,7 @@
 #pragma once
 
 #include <oxenc/bt_producer.h>
+#include <sodium/crypto_scalarmult_ed25519.h>
 
 #include <cassert>
 #include <memory>
@@ -125,6 +126,8 @@ config_string_list* make_string_list(Container vals) {
 
     return ret;
 }
+
+bool is_valid_x25519_pubkey(const unsigned char* public_key);
 
 // Throws std::invalid_argument if session_id doesn't look valid.  Can optionally be passed a prefix
 // byte for id's that aren't starting with 0x05 (e.g. 0x03 for non-legacy group ids).

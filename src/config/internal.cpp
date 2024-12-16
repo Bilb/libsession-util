@@ -4,6 +4,7 @@
 #include <oxenc/base64.h>
 #include <oxenc/bt_value_producer.h>
 #include <oxenc/hex.h>
+#include <sodium.h>
 #include <zstd.h>
 
 #include <iterator>
@@ -11,12 +12,39 @@
 
 namespace session::config {
 
+bool is_valid_x25519_pubkey(const char* public_key) {
+    unsigned char basepoint[32] = {9};  // X25519 basepoint
+    unsigned char result[32];
+
+    return crypto_scalarmult_ed25519(result, to_unsigned(public_key), basepoint) != 0;
+}
+
 void check_session_id(std::string_view session_id, std::string_view prefix) {
     if (!(session_id.size() == 64 + prefix.size() && oxenc::is_hex(session_id) &&
           session_id.substr(0, prefix.size()) == prefix))
         throw std::invalid_argument{
                 "Invalid session ID: expected 66 hex digits starting with " + std::string{prefix} +
                 "; got " + std::string{session_id}};
+
+    if (prefix == "05") {
+        // the session_id should be valid on the x25519 curve (used for user sessionIds and for
+        // legacy groups pubkey)
+        const auto data = session_id.substr(2).data();
+        if (!is_valid_x25519_pubkey(data)) {
+            throw std::invalid_argument{
+                    "Invalid session ID: '" + std::string{session_id} +
+                    "' is not on the x25519 curve."};
+        }
+    } else if (prefix == "03") {
+        // the session_id should be valid on the ed25519 curve (used for 03-groups only)
+        const auto data = session_id.substr(2).data();
+
+        if (!crypto_core_ed25519_is_valid_point(to_unsigned(data))) {
+            throw std::invalid_argument{
+                    "Invalid session ID: '" + std::string{session_id} +
+                    "' is not on the ed25519 curve."};
+        }
+    }
 }
 
 std::string session_id_to_bytes(std::string_view session_id, std::string_view prefix) {
