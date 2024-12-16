@@ -354,8 +354,7 @@ ustring ConfigBase::make_dump() const {
 
     d.append_list(")").append(_old_hashes.begin(), _old_hashes.end());
 
-    if (auto extra = extra_data(); !extra.empty())
-        d.append_bt("+", std::move(extra));
+    extra_data(d.append_dict("+"));
 
     return ustring{to_unsigned_sv(d.view())};
 }
@@ -424,10 +423,6 @@ void ConfigBase::init_from_dump(std::string_view dump) {
         for (auto old = d.consume_list_consumer(); !old.is_finished();)
             _old_hashes.insert(old.consume_string());
     }
-
-    if (d.skip_until("+"))
-        if (auto extra = d.consume_dict(); !extra.empty())
-            load_extra_data(std::move(extra));
 }
 
 int ConfigBase::key_count() const {

@@ -2,6 +2,9 @@
 
 #include <oxenc/hex.h>
 
+#include <iostream>
+#include <vector>
+
 #include "../internal.hpp"
 #include "session/config/groups/members.h"
 
@@ -11,7 +14,11 @@ Members::Members(
         ustring_view ed25519_pubkey,
         std::optional<ustring_view> ed25519_secretkey,
         std::optional<ustring_view> dumped) :
-        ConfigBase{dumped, ed25519_pubkey, ed25519_secretkey} {}
+        ConfigBase{dumped, ed25519_pubkey, ed25519_secretkey} {
+    if (dumped) {
+        load_extra_data_from_dump(from_unsigned_sv(*dumped));
+    }
+}
 
 std::optional<member> Members::get(std::string_view pubkey_hex) const {
     std::string pubkey = session_id_to_bytes(pubkey_hex);
@@ -122,6 +129,22 @@ bool Members::erase(std::string_view session_id) {
     bool ret = info.exists();
     info.erase();
     return ret;
+}
+
+void Members::extra_data(oxenc::bt_dict_producer&& extra) const {
+    std::vector<std::string> pending_send_ids{"12", "34"};
+    extra.append_list("pending_send_ids").append(pending_send_ids.begin(), pending_send_ids.end());
+}
+
+void Members::load_extra_data(oxenc::bt_dict_consumer&& extra) {
+    std::cout << "load_extra_data()" << std::endl;
+    if (extra.skip_until("pending_send_ids")) {
+        std::cout << "load_extra_data pending_send_ids()" << std::endl;
+
+        auto lst = extra.consume_list_consumer();
+        while (!lst.is_finished())
+            std::cout << "load:" << lst.consume_string() << std::endl;
+    }
 }
 
 size_t Members::size() const {
