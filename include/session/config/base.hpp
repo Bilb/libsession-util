@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cassert>
+#include <iostream>
 #include <memory>
 #include <session/config.hpp>
 #include <session/util.hpp>
@@ -13,6 +14,11 @@
 #include "../sodium_array.hpp"
 #include "base.h"
 #include "namespaces.hpp"
+
+namespace oxenc {
+class bt_dict_producer;
+class bt_dict_consumer;
+}  // namespace oxenc
 
 namespace session::config {
 
@@ -783,35 +789,42 @@ class ConfigBase : public ConfigSig {
     /// API: base/ConfigBase::extra_data
     ///
     /// Called when dumping to obtain any extra data that a subclass needs to store to reconstitute
-    /// the object.  The base implementation does nothing.  The counterpart to this,
-    /// `load_extra_data()`, is called when loading from a dump that has extra data; a subclass
-    /// should either override both (if it needs to serialize extra data) or neither (if it needs no
-    /// extra data).  Internally this extra data (if non-empty) is stored in the "+" key of the
-    /// dump.
+    /// the object.  The base implementation does nothing (i.e. extra data will be an empty dict).
+    /// The counterpart to this, `load_extra_data()`, is called when loading from a dump that has
+    /// extra data; a subclass should either override both (if it needs to serialize extra data) or
+    /// neither (if it needs no extra data).  Internally this extra data is stored in the "+" key of
+    /// the dump.
     ///
-    /// Inputs: None
-    ///
-    /// Outputs:
-    /// - `oxenc::bt_dict` -- Returns a btdict of the data
-    virtual oxenc::bt_dict extra_data() const { return {}; }
+    /// Inputs:
+    /// - `extra` -- An empty dict producer into which extra data can be added.
+    virtual void extra_data(oxenc::bt_dict_producer&&) const {}
 
     /// API: base/ConfigBase::load_extra_data
     ///
-    /// Called when constructing from a dump that has extra data.  The base implementation does
-    /// nothing.
+    /// Called when constructing from a dump with the extra data dict.  The base implementation does
+    /// nothing.  See extra_data() for a description.
     ///
     /// Inputs:
-    /// - `extra` -- bt_dict containing a previous dump of data
-    virtual void load_extra_data(oxenc::bt_dict extra) {}
+    /// - `extra` -- bt_dict_consumer over the extra data subdict.
+    virtual void load_extra_data(oxenc::bt_dict_consumer&&) {};
+
+    virtual void load_extra_data_from_dump(std::string_view dump) {
+        oxenc::bt_dict_consumer d{dump};
+
+        if (d.skip_until("+"))
+            load_extra_data(d.consume_dict_consumer());
+    }
 
     /// API: base/ConfigBase::load_key
     ///
-    /// Called to load an ed25519 key for encryption; this is meant for use by single-ownership
-    /// config types, like UserProfile, but not shared config types (closed groups).
+    /// Called to load an ed25519 key for encryption; this is meant for use by
+    /// single-ownership config types, like UserProfile, but not shared config types (closed
+    /// groups).
     ///
-    /// Takes a binary string which is either the 32-byte seed, or 64-byte libsodium secret (which
-    /// is just the seed and pubkey concatenated together), and then calls `key(...)` with the seed.
-    /// Throws std::invalid_argument if given something that doesn't match the required input.
+    /// Takes a binary string which is either the 32-byte seed, or 64-byte libsodium secret
+    /// (which is just the seed and pubkey concatenated together), and then calls `key(...)`
+    /// with the seed. Throws std::invalid_argument if given something that doesn't match
+    /// the required input.
     ///
     /// Inputs:
     /// - `ed25519_secret_key` -- key is loaded for encryption

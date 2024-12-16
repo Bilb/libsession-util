@@ -304,3 +304,27 @@ TEST_CASE("Group Members", "[config][groups][members]") {
           "1234567890123456789012345678901234567890123456789012345678901234567890123456789012345678"
           "901234567890");
 }
+
+TEST_CASE("Group Members plop", "[config][groups][members]plop") {
+
+    const auto seed = "0123456789abcdef0123456789abcdeffedcba9876543210fedcba9876543210"_hexbytes;
+    std::array<unsigned char, 32> ed_pk;
+    std::array<unsigned char, 64> ed_sk;
+    crypto_sign_ed25519_seed_keypair(
+            ed_pk.data(), ed_sk.data(), reinterpret_cast<const unsigned char*>(seed.data()));
+
+    REQUIRE(oxenc::to_hex(ed_pk.begin(), ed_pk.end()) ==
+            "cbd569f56fb13ea95a3f0c05c331cc24139c0090feb412069dc49fab34406ece");
+    CHECK(oxenc::to_hex(seed.begin(), seed.end()) ==
+          oxenc::to_hex(ed_sk.begin(), ed_sk.begin() + 32));
+
+    groups::Members gmem1{to_usv(ed_pk), to_usv(ed_sk), std::nullopt};
+
+    auto dump_with_extra = gmem1.make_dump();
+
+    std::cout << "plop: " << oxenc::to_hex(dump_with_extra) << std::endl;
+
+    groups::Members gmem2{to_usv(ed_pk), to_usv(ed_sk), dump_with_extra};
+
+    std::cout << "plop2: " << oxenc::to_hex(gmem2.make_dump()) << std::endl;
+}
