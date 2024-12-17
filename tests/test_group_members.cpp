@@ -61,12 +61,10 @@ TEST_CASE("Group Members", "[config][groups][members]") {
 
     std::vector<std::string> sids;
     while (sids.size() < 256) {
-        std::array<unsigned char, 33> sid;
-        for (auto& s : sid)
-            s = sids.size();
-        sid[0] = 0x05;
-        sids.push_back(oxenc::to_hex(sid.begin(), sid.end()));
+        auto sid = "05" + random_point_on_x25519();
+        sids.push_back(sid);
     }
+    std::sort(sids.begin(), sids.end());
 
     // 10 admins:
     for (int i = 0; i < 10; i++) {
@@ -97,7 +95,7 @@ TEST_CASE("Group Members", "[config][groups][members]") {
 
     CHECK(gmem1.needs_push());
     auto [s1, p1, o1] = gmem1.push();
-    CHECK(p1.size() == 768);
+    CHECK(p1.size() == 1536);
 
     gmem1.confirm_pushed(s1, "fakehash1");
     CHECK(gmem1.needs_dump());
