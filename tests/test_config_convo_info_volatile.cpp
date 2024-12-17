@@ -12,6 +12,8 @@
 
 using namespace std::literals;
 using namespace oxenc::literals;
+using std::cout;
+using std::endl;
 
 TEST_CASE("Conversations", "[config][conversations]") {
 
@@ -32,11 +34,10 @@ TEST_CASE("Conversations", "[config][conversations]") {
 
     session::config::ConvoInfoVolatile convos{ustring_view{seed}, std::nullopt};
 
-    constexpr auto definitely_real_id =
-            "055000000000000000000000000000000000000000000000000000000000000000"sv;
+    const std::string definitely_real_id_str = "05" + random_point_on_x25519();
+    const char* const definitely_real_id = definitely_real_id_str.data();
 
-    constexpr auto benders_nightmare_group =
-            "030111101001001000101010011011010010101010111010000110100001210000"sv;
+    auto benders_nightmare_group = random_03_pubkey();
 
     CHECK_FALSE(convos.get_1to1(definitely_real_id));
 
@@ -160,10 +161,12 @@ TEST_CASE("Conversations", "[config][conversations]") {
     using session::config::convo::one_to_one;
 
     std::vector<std::string> seen, expected;
+    const std::string val_1o1 = std::string("1-to-1: ") + definitely_real_id_str;
+    const std::string val_gr = std::string("gr: ") + benders_nightmare_group;
     for (const auto& e :
          {"1-to-1: 051111111111111111111111111111111111111111111111111111111111111111",
-          "1-to-1: 055000000000000000000000000000000000000000000000000000000000000000",
-          "gr: 030111101001001000101010011011010010101010111010000110100001210000",
+          val_1o1.data(),
+          val_gr.data(),
           "comm: http://example.org:5678/r/sudokuroom",
           "lgr: 05cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"})
         expected.emplace_back(e);
@@ -197,7 +200,7 @@ TEST_CASE("Conversations", "[config][conversations]") {
     CHECK_FALSE(convos.needs_push());
     convos.erase_1to1("052000000000000000000000000000000000000000000000000000000000000000");
     CHECK_FALSE(convos.needs_push());
-    convos.erase_1to1("055000000000000000000000000000000000000000000000000000000000000000");
+    convos.erase_1to1(definitely_real_id_str);
     CHECK(convos.needs_push());
     CHECK(convos.size() == 4);
     CHECK(convos.size_1to1() == 1);
@@ -245,8 +248,8 @@ TEST_CASE("Conversations (C API)", "[config][conversations][c]") {
     config_object* conf;
     REQUIRE(0 == convo_info_volatile_init(&conf, ed_sk.data(), NULL, 0, NULL));
 
-    const char* const definitely_real_id =
-            "055000000000000000000000000000000000000000000000000000000000000000";
+    const std::string definitely_real_id_str = "05" + random_point_on_x25519();
+    const char* const definitely_real_id = definitely_real_id_str.data();
 
     convo_info_volatile_1to1 c;
     CHECK_FALSE(convo_info_volatile_get_1to1(conf, &c, definitely_real_id));
@@ -404,8 +407,7 @@ TEST_CASE("Conversations (C API)", "[config][conversations][c]") {
         CHECK(seen == std::vector<std::string>{
                               {"1-to-1: "
                                "051111111111111111111111111111111111111111111111111111111111111111",
-                               "1-to-1: "
-                               "055000000000000000000000000000000000000000000000000000000000000000",
+                               std::string("1-to-1: ") + definitely_real_id_str,
                                "comm: http://example.org:5678/r/sudokuroom",
                                "lgr: "
                                "05ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
@@ -416,8 +418,7 @@ TEST_CASE("Conversations (C API)", "[config][conversations][c]") {
     convo_info_volatile_erase_1to1(
             conf, "052000000000000000000000000000000000000000000000000000000000000000");
     CHECK_FALSE(config_needs_push(conf));
-    convo_info_volatile_erase_1to1(
-            conf, "055000000000000000000000000000000000000000000000000000000000000000");
+    convo_info_volatile_erase_1to1(conf, definitely_real_id);
     CHECK(config_needs_push(conf));
     CHECK(convo_info_volatile_size(conf) == 3);
     CHECK(convo_info_volatile_size_1to1(conf) == 1);

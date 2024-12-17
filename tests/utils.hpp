@@ -1,16 +1,20 @@
 #pragma once
 
 #include <oxenc/hex.h>
+#include <sodium.h>
+#include <sodium/crypto_scalarmult_ed25519.h>
 
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <iostream>
 #include <set>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "session/config/base.h"
+#include "session/util.hpp"
 
 using ustring = std::basic_string<unsigned char>;
 using ustring_view = std::basic_string_view<unsigned char>;
@@ -87,4 +91,54 @@ std::vector<std::basic_string_view<C>> view_vec(const std::vector<std::basic_str
     vv.reserve(v.size());
     std::copy(v.begin(), v.end(), std::back_inserter(vv));
     return vv;
+}
+
+inline std::string random_point_on_ed25519() {
+    if (sodium_init() == -1)
+        throw std::runtime_error{"Failed to initialize libsodium!"};
+
+    unsigned char ed25519_pk[crypto_sign_ed25519_PUBLICKEYBYTES];
+    unsigned char ed25519_skpk[crypto_sign_ed25519_SECRETKEYBYTES];
+
+    crypto_sign_ed25519_keypair(ed25519_pk, ed25519_skpk);
+
+    char hex[crypto_sign_ed25519_PUBLICKEYBYTES * 2 + 1];
+    sodium_bin2hex(hex, sizeof(hex), ed25519_pk, 32);
+
+    auto pk_unsigned = session::to_unsigned_sv(hex);
+    auto pk = std::string{to_sv(pk_unsigned)};
+    if (!crypto_core_ed25519_is_valid_point(ed25519_pk)) {
+        throw std::invalid_argument{
+                "random_point_on_ed25519: '" + pk + "' is not on the ed25519 curve."};
+    }
+
+    return pk;
+}
+
+inline std::string random_point_on_x25519() {
+    if (sodium_init() == -1)
+        throw std::runtime_error{"Failed to initialize libsodium!"};
+
+    unsigned char ed25519_pk[crypto_sign_ed25519_PUBLICKEYBYTES];
+    unsigned char ed25519_skpk[crypto_sign_ed25519_SECRETKEYBYTES];
+    unsigned char x25519_pk[crypto_scalarmult_curve25519_BYTES];
+
+    crypto_sign_ed25519_keypair(ed25519_pk, ed25519_skpk);
+
+    if (crypto_sign_ed25519_pk_to_curve25519(x25519_pk, ed25519_pk) != 0) {
+        throw std::invalid_argument("crypto_sign_ed25519_pk_to_curve25519 failed");
+    }
+    char hex[crypto_scalarmult_curve25519_BYTES * 2 + 1] = {0};
+
+    sodium_bin2hex(hex, sizeof(hex), x25519_pk, sizeof(x25519_pk));
+
+    return std::string{hex};
+}
+
+inline std::string random_05_pubkey() {
+    return "05" + random_point_on_x25519();
+}
+
+inline std::string random_03_pubkey() {
+    return "03" + random_point_on_ed25519();
 }

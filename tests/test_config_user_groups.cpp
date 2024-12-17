@@ -98,8 +98,7 @@ TEST_CASE("User Groups", "[config][groups]") {
 
     session::config::UserGroups groups{ustring_view{seed}, std::nullopt};
 
-    constexpr auto definitely_real_id =
-            "055000000000000000000000000000000000000000000000000000000000000000"sv;
+    auto definitely_real_id = random_05_pubkey();
 
     int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                           std::chrono::system_clock::now().time_since_epoch())
@@ -128,13 +127,14 @@ TEST_CASE("User Groups", "[config][groups]") {
     CHECK(std::get<seqno_t>(groups.push()) == 0);
 
     std::vector<std::string> users = {
-            "050000000000000000000000000000000000000000000000000000000000000000"s,
-            "051111111111111111111111111111111111111111111111111111111111111111"s,
-            "052222222222222222222222222222222222222222222222222222222222222222"s,
-            "053333333333333333333333333333333333333333333333333333333333333333"s,
-            "054444444444444444444444444444444444444444444444444444444444444444"s,
-            "055555555555555555555555555555555555555555555555555555555555555555"s,
-            "056666666666666666666666666666666666666666666666666666666666666666"s};
+            "05" + random_point_on_x25519(),
+            "05" + random_point_on_x25519(),
+            "05" + random_point_on_x25519(),
+            "05" + random_point_on_x25519(),
+            "05" + random_point_on_x25519(),
+            "05" + random_point_on_x25519(),
+            "05" + random_point_on_x25519(),
+    };
 
     c.name = "Englishmen";
     c.disappearing_timer = 60min;
@@ -198,7 +198,7 @@ TEST_CASE("User Groups", "[config][groups]") {
     // The new data doesn't get stored until we call this:
     groups.set(og);
 
-    auto fake_group_id = "030101010101010101010101010101010101010101010101010101010101010101"s;
+    auto fake_group_id = random_03_pubkey();
     auto ggg = groups.get_or_construct_group(fake_group_id);
     groups.set(ggg);
 
@@ -442,8 +442,7 @@ TEST_CASE("User Groups -- (non-legacy) groups", "[config][groups][new]") {
 
     session::config::UserGroups groups{ustring_view{seed}, std::nullopt};
 
-    constexpr auto definitely_real_id =
-            "035000000000000000000000000000000000000000000000000000000000000000"sv;
+    auto definitely_real_id = random_03_pubkey();
 
     int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                           std::chrono::system_clock::now().time_since_epoch())
@@ -571,13 +570,12 @@ TEST_CASE("User Groups -- (non-legacy) groups", "[config][groups][new]") {
     CHECK_FALSE(c3b->kicked());
     CHECK(c3b->is_destroyed());
 
-    auto gg = groups.get_or_construct_group(
-            "030303030303030303030303030303030303030303030303030303030303030303");
+    auto group_id = random_03_pubkey();
+
+    auto gg = groups.get_or_construct_group(group_id);
     groups.set(gg);
-    CHECK(groups.erase_group("030303030303030303030303030303030303030303030303030303030303030303"));
-    CHECK_FALSE(
-            groups.erase_group("03030303030303030303030303030303030303030303030303030303030303030"
-                               "3"));
+    CHECK(groups.erase_group(group_id));
+    CHECK_FALSE(groups.erase_group(group_id));
 }
 
 TEST_CASE("User Groups members C API", "[config][groups][c]") {
@@ -611,13 +609,14 @@ TEST_CASE("User Groups members C API", "[config][groups][c]") {
     group->joined_at = created_ts;
 
     std::vector<std::string> users = {
-            "050000000000000000000000000000000000000000000000000000000000000000"s,
-            "051111111111111111111111111111111111111111111111111111111111111111"s,
-            "052222222222222222222222222222222222222222222222222222222222222222"s,
-            "053333333333333333333333333333333333333333333333333333333333333333"s,
-            "054444444444444444444444444444444444444444444444444444444444444444"s,
-            "055555555555555555555555555555555555555555555555555555555555555555"s,
-            "056666666666666666666666666666666666666666666666666666666666666666"s};
+            "05" + random_point_on_x25519(),
+            "05" + random_point_on_x25519(),
+            "05" + random_point_on_x25519(),
+            "05" + random_point_on_x25519(),
+            "05" + random_point_on_x25519(),
+            "05" + random_point_on_x25519(),
+            "05" + random_point_on_x25519(),
+    };
 
     CHECK(ugroups_legacy_member_add(group, users[0].c_str(), false));
     CHECK(ugroups_legacy_member_add(group, users[1].c_str(), true));
