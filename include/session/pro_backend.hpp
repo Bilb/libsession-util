@@ -42,7 +42,7 @@
 ///    circulating proofs. This is done by constructing the request via
 ///    `GetProRevocationsRequest::to_json` and sending it to the backend.
 ///
-///    Server responds JSON to be parsed with `GetProRevocationResponse::parse` which contains the
+///    Server responds JSON to be parsed with `GetProRevocationsResponse::parse` which contains the
 ///    list that clients should cache. Any incoming messages with a Pro proof that is in the list of
 ///    revoked proofs will not be entitled to Pro features.
 ///
@@ -268,7 +268,7 @@ struct GetProRevocationsRequest {
     std::uint8_t version;
 
     /// 4-byte monotonic integer for the caller's revocation list iteration. Set to 0 if unknown;
-    /// otherwise, use the latest known `ticket` from a prior `GetProRevocationResponse` to allow
+    /// otherwise, use the latest known `ticket` from a prior `GetProRevocationsResponse` to allow
     /// the Session Pro Backend to omit the revocation list if it has not changed.
     std::uint32_t ticket;
 
