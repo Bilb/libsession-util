@@ -1180,6 +1180,10 @@ class Client {
             bool wait,
             std::function<void(std::optional<std::vector<std::byte>>)> then);
 
+    // A cache entry whose file a read found missing, or unreadable and so removed: the entry is
+    // dropped, and the messages showing it told.
+    void _drop_unreadable(int64_t id, const std::string& name);
+
     // These read on the disk loop and hand the answer to `done` on Core's loop.  They throw
     // `session::error` rather than calling `done` when there is plainly nothing to read.
     void _attachment_data_cached(int64_t message_id, size_t index, bytes_answer done, bool wait);
