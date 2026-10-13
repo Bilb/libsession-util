@@ -79,8 +79,9 @@ enum class ExistingAttachments {
     fetch,  ///< Queues every one the setting takes that is not yet here, behind new arrivals.
 };
 
-/// Attachments already in a conversation that `ExistingAttachments::fetch` would queue.
+/// Files already in a conversation that `ExistingAttachments::fetch` would download.
 struct ExistingAttachmentCount {
+    /// Distinct files: one carried by several messages counts once.
     size_t count = 0;
     /// The sizes their senders declared, summed; one declaring no size adds nothing.
     int64_t bytes = 0;

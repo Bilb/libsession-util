@@ -1332,8 +1332,8 @@ class Client {
 
     // Starts queued auto-downloads until as many are running as `auto_download_concurrency`
     // allows.  Does nothing when called from within itself, which an auto-download ending as soon
-    // as it starts -- a cache hit, or no network -- does: the loop already running picks up the
-    // freed slot, where recursing would go one level deeper for every entry in the queue.
+    // as it starts -- a cache hit, say -- does: the loop already running picks up the freed slot,
+    // where recursing would go one level deeper for every entry in the queue.
     void _pump_auto_downloads();
 
     // Whether a file somebody asked for, of the size its sender declared, is kept once fetched: it
