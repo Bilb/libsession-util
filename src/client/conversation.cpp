@@ -1,5 +1,4 @@
 #include <session/client.hpp>
-#include <stdexcept>
 
 // Every operation here is one line of dispatch onto a `_`-form on Client: the work itself lives
 // there, next to the rest of what touches the database, and this file is only about which thread it
@@ -137,28 +136,19 @@ void Conversation::set_expiry(config::expiration_mode mode, std::chrono::seconds
 }
 
 void Conversation::set_auto_download(AutoDownload mode, result_function<> cb) {
-    set_auto_download(mode, ExistingAttachments::leave, std::move(cb));
+    _client->_async(
+            [c = _client, id = id, mode] { c->_set_auto_download(id, mode); }, std::move(cb));
 }
 void Conversation::set_auto_download(AutoDownload mode, await_t) {
-    set_auto_download(mode, ExistingAttachments::leave, await);
+    _client->call_get([this, mode] { _client->_set_auto_download(id, mode); });
 }
 
-// Checked before anything is posted, so that the handler form throws as the waiting form does.
-static void check_existing(AutoDownload mode, ExistingAttachments existing) {
-    if (existing == ExistingAttachments::fetch && mode == AutoDownload::none)
-        throw std::invalid_argument{"set_auto_download: there is nothing to fetch with it off"};
-}
-
-void Conversation::set_auto_download(
-        AutoDownload mode, ExistingAttachments existing, result_function<> cb) {
-    check_existing(mode, existing);
+void Conversation::download_existing_attachments(result_function<> cb) {
     _client->_async(
-            [c = _client, id = id, mode, existing] { c->_set_auto_download(id, mode, existing); },
-            std::move(cb));
+            [c = _client, id = id] { c->_download_existing_attachments(id); }, std::move(cb));
 }
-void Conversation::set_auto_download(AutoDownload mode, ExistingAttachments existing, await_t) {
-    check_existing(mode, existing);
-    _client->call_get([this, mode, existing] { _client->_set_auto_download(id, mode, existing); });
+void Conversation::download_existing_attachments(await_t) {
+    _client->call_get([this] { _client->_download_existing_attachments(id); });
 }
 
 void Conversation::existing_attachments(result_function<ExistingAttachmentCounts> cb) {

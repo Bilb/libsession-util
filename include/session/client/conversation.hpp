@@ -295,21 +295,26 @@ class Conversation {
     /// prompts on first use should call it with whatever answer it was given — `none` included,
     /// since that is not the same as never having asked, and only the latter should prompt again.
     ///
-    /// `existing` says whether attachments already here and not yet downloaded are fetched too;
-    /// with `leave`, only messages that arrive afterwards are.  Either way, whatever this
-    /// conversation still had queued that the setting and the current `auto_download_max_size` no
-    /// longer take is dropped, and only a later `fetch` queues it again.
-    ///
-    /// @throws std::invalid_argument for `ExistingAttachments::fetch` with `AutoDownload::none`.
+    /// It governs what arrives afterwards; `download_existing_attachments` is the way to fetch what
+    /// is already here.  Whatever this conversation still had queued that the new setting does not
+    /// take is dropped, and only a later `download_existing_attachments` queues it again.
     void set_auto_download(AutoDownload mode, result_function<> cb);
     void set_auto_download(AutoDownload mode, await_t);
-    void set_auto_download(AutoDownload mode, ExistingAttachments existing, result_function<> cb);
-    void set_auto_download(AutoDownload mode, ExistingAttachments existing, await_t);
 
-    /// What `set_auto_download` with `ExistingAttachments::fetch` would download, for each mode,
-    /// under the current `auto_download_max_size`: what a prompt offering it can say it costs.
-    /// Counts files rather than attachments, since a file several messages carry is fetched once,
-    /// and includes what an earlier attempt left owed.
+    /// Queues every attachment already in this conversation that its auto-download setting takes
+    /// and that is not here yet, behind new arrivals: what an offer to "also download what is
+    /// already in this chat" calls once `set_auto_download` has recorded the answer.  Does nothing
+    /// without a cache directory.
+    ///
+    /// @throws std::invalid_argument if auto-download is unset or `none` here (through `cb` for the
+    /// handler form, which needs the database to know).
+    void download_existing_attachments(result_function<> cb);
+    void download_existing_attachments(await_t);
+
+    /// What `download_existing_attachments` would download, for each mode, under the current
+    /// `auto_download_max_size`: what an offer of it can say it costs.  Counts files rather than
+    /// attachments, since a file several messages carry is fetched once, and includes what an
+    /// earlier attempt left owed.  Zero for both without a cache directory.
     void existing_attachments(result_function<ExistingAttachmentCounts> cb);
     ExistingAttachmentCounts existing_attachments(await_t);
 
@@ -591,6 +596,7 @@ class AnyConversation {
     SESSION_CONVO_FORWARD(set_mute_until)
     SESSION_CONVO_FORWARD(set_expiry)
     SESSION_CONVO_FORWARD(set_auto_download)
+    SESSION_CONVO_FORWARD(download_existing_attachments)
     SESSION_CONVO_FORWARD(existing_attachments)
     SESSION_CONVO_FORWARD(send_message)
     SESSION_CONVO_FORWARD(clear_messages)

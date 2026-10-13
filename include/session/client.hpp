@@ -14,7 +14,6 @@
 #include <session/clock.hpp>
 #include <session/core.hpp>
 #include <session/util.hpp>
-#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -537,6 +536,8 @@ class Client {
     /// here, rather than on a timer: those are things that happen while we are not looking, and
     /// this is the moment we look.  It runs off the event loop and reports only to the log.
     ///
+    /// It also resumes the auto-downloads an earlier run left owed, once a network is attached.
+    ///
     /// Contents are encrypted under a key generated once and kept in the database, so they outlive
     /// the message or config entry whose key originally opened them — and so the files are not
     /// readable by whoever ends up with the disk.  That protection is only as good as the
@@ -637,7 +638,8 @@ class Client {
     /// somebody asking for one particular file, and are never refused for being large; whether
     /// what they fetch is kept is `requested_cache_max_size`'s question.
     ///
-    /// Persisted and device-local, for the same reasons as the cache limit.
+    /// Persisted and device-local, for the same reasons as the cache limit.  Lowering it also
+    /// forgets the queued auto-downloads it now refuses.
     ///
     /// @throws std::invalid_argument if `bytes` is negative.
     void set_auto_download_max_size(std::optional<int64_t> bytes, result_function<> cb);
@@ -800,10 +802,8 @@ class Client {
     void _set_mute_until(const ConversationId& id, std::chrono::sys_seconds until);
     void _set_expiry(
             const ConversationId& id, config::expiration_mode mode, std::chrono::seconds timer);
-    void _set_auto_download(
-            const ConversationId& id,
-            AutoDownload mode,
-            ExistingAttachments existing = ExistingAttachments::leave);
+    void _set_auto_download(const ConversationId& id, AutoDownload mode);
+    void _download_existing_attachments(const ConversationId& id);
     ExistingAttachmentCounts _existing_attachments(const ConversationId& id);
     void _set_nickname(const ConversationId& id, std::string_view nickname);
 
@@ -1134,12 +1134,14 @@ class Client {
     std::deque<PendingAutoDownload> _auto_pending;
     size_t _auto_running = 0;
     bool _auto_pumping = false;
-    // (message, index) of each auto-download running, so a rebuild does not queue it twice.
-    std::set<std::pair<int64_t, size_t>> _auto_inflight;
 
-    // Replaces the queue with every attachment still flagged, newest message first.  Run once a
-    // cache directory and a network are both there, since nothing can be fetched before.
+    // Replaces the queue with every attachment still flagged, newest sent first.  Run when the
+    // cache directory is set and when a network is attached, and does nothing without the first.
     void _reload_auto_downloads();
+
+    // Unflags what the setting of its conversation, under the current size limit, no longer takes:
+    // in one conversation, or in all of them for nullopt.
+    void _drop_unwanted_auto(std::optional<int64_t> convo);
 
     // Whether a queued entry is still owed under the conversation's current setting and size
     // limit, dropping its flag when the answer has become no.
