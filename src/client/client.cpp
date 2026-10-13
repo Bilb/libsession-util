@@ -2310,9 +2310,8 @@ static bool auto_download_wants(AutoDownload mode, const std::optional<std::stri
     return false;
 }
 
-// `auto_download_wants`, held to the size limit as well.  The size is the sender's claim, and all
-// we have before fetching anything: one who under-reports is caught by the transfer being held to
-// the size it declared, but this is what stops a download nobody wanted from starting.
+// `auto_download_wants`, held to the size limit too.  The size is the sender's claim and all we
+// have before fetching; the transfer is held to it, which is what catches one that under-reports.
 static bool auto_download_takes(
         AutoDownload mode,
         const std::optional<std::string>& content_type,
@@ -2325,57 +2324,65 @@ namespace {
     struct UnfetchedAttachment {
         int64_t message;
         size_t index;
+        std::string url;
         std::optional<std::string> content_type;
         std::optional<int64_t> size;
     };
 }  // namespace
 
-// What `ExistingAttachments::fetch` considers in a conversation: neither here, nor known to be
-// gone, nor already owed.  Newest message first, the order its queue entries go in.
+// What `ExistingAttachments::fetch` considers in a conversation: neither here nor known to be gone,
+// owed already or not, since a failed attempt leaves a file owed and asking again must retry it.
 static std::vector<UnfetchedAttachment> existing_unfetched(sqlite::Connection& c, int64_t convo) {
     std::vector<UnfetchedAttachment> found;
-    for (auto&& [message, idx, content_type, size] :
-         c.prepared_results<int64_t, int64_t, std::optional<std::string>, std::optional<int64_t>>(
+    for (auto&& [message, idx, url, content_type, size] : c.prepared_results<
+                                                          int64_t,
+                                                          int64_t,
+                                                          std::string,
+                                                          std::optional<std::string>,
+                                                          std::optional<int64_t>>(
                  R"(
-        SELECT a.message, a.idx, a.content_type, a.size
-        FROM message_attachments a JOIN messages m ON m.id = a.message
+        SELECT a.message, a.idx, a.url, a.content_type, a.size
+        FROM messages m JOIN message_attachments a ON a.message = m.id
         WHERE m.conversation = ? AND m.deleted IS NULL
           AND a.url IS NOT NULL AND a.cached IS NULL AND a.unavailable IS NULL
-          AND a.auto_pending IS NULL
-        ORDER BY a.message DESC, a.idx
+        ORDER BY m.timestamp DESC, m.id DESC, a.idx
     )",
                  convo))
-        found.push_back({message, static_cast<size_t>(idx), std::move(content_type), size});
+        found.push_back(
+                {message, static_cast<size_t>(idx), std::move(url), std::move(content_type), size});
     return found;
 }
 
-// Unflags what `mode` no longer takes in a conversation, so that turning auto-download off, or
-// narrowing it, also forgets what was owed under the old setting.
+static void unflag_auto(sqlite::Connection& c, int64_t message, int64_t idx) {
+    c.prepared_exec(
+            "UPDATE message_attachments SET auto_pending = NULL WHERE message = ? AND idx = ?",
+            message,
+            idx);
+}
+
+// Unflags what `mode` under `max_size` no longer takes in a conversation, so that turning
+// auto-download off, or narrowing it, also forgets what was owed under the old setting.
 static void drop_unwanted_auto(
         sqlite::Connection& c, int64_t convo, AutoDownload mode, std::optional<int64_t> max_size) {
+    // Driven from the partial index, which holds a handful of rows, not from the conversation's
+    // messages, which can be most of the database.
     std::vector<std::pair<int64_t, int64_t>> dropped;
     for (auto&& [message, idx, content_type, size] :
          c.prepared_results<int64_t, int64_t, std::optional<std::string>, std::optional<int64_t>>(
                  R"(
-        SELECT a.message, a.idx, a.content_type, a.size
-        FROM message_attachments a JOIN messages m ON m.id = a.message
-        WHERE m.conversation = ? AND a.auto_pending IS NOT NULL
+        SELECT message, idx, content_type, size FROM message_attachments
+        WHERE auto_pending IS NOT NULL
+          AND message IN (SELECT id FROM messages WHERE conversation = ?)
     )",
                  convo))
         if (!auto_download_takes(mode, content_type, size, max_size))
             dropped.emplace_back(message, idx);
     for (auto [message, idx] : dropped)
-        c.prepared_exec(
-                "UPDATE message_attachments SET auto_pending = NULL WHERE message = ? AND idx = ?",
-                message,
-                idx);
+        unflag_auto(c, message, idx);
 }
 
 void Client::_set_auto_download(
         const ConversationId& id, AutoDownload mode, ExistingAttachments existing) {
-    if (existing == ExistingAttachments::fetch && mode == AutoDownload::none)
-        throw std::invalid_argument{"set_auto_download: there is nothing to fetch with it off"};
-
     int changed = 0;
     std::vector<PendingAutoDownload> backlog;
     {
@@ -2409,7 +2416,8 @@ void Client::_set_auto_download(
                 )",
                         a.message,
                         static_cast<int64_t>(a.index));
-                backlog.push_back({id, a.message, a.index});
+                if (!_auto_inflight.contains({a.message, a.index}))
+                    backlog.push_back({id, a.message, a.index});
             }
         tx.commit();
     }
@@ -2437,16 +2445,22 @@ ExistingAttachmentCounts Client::_existing_attachments(const ConversationId& id)
     if (!convo)
         return counts;
 
+    // By url: several messages carrying one file make one download.
     auto max_size = core.globals.get_integer(AUTO_DL_MAX_KEY);
-    auto add = [&](ExistingAttachmentCount& n, AutoDownload mode, const UnfetchedAttachment& a) {
-        if (!auto_download_takes(mode, a.content_type, a.size, max_size))
+    std::set<std::string> all, images;
+    auto add = [&](ExistingAttachmentCount& n,
+                   std::set<std::string>& seen,
+                   AutoDownload mode,
+                   const UnfetchedAttachment& a) {
+        if (!auto_download_takes(mode, a.content_type, a.size, max_size) ||
+            !seen.insert(a.url).second)
             return;
         ++n.count;
         n.bytes += a.size.value_or(0);
     };
     for (const auto& a : existing_unfetched(c, *convo)) {
-        add(counts.all, AutoDownload::all, a);
-        add(counts.image_attachments, AutoDownload::image_attachments, a);
+        add(counts.all, all, AutoDownload::all, a);
+        add(counts.image_attachments, images, AutoDownload::image_attachments, a);
     }
     return counts;
 }
@@ -2876,6 +2890,7 @@ void Client::_auto_download(const ConversationId& convo_id, int64_t message_id) 
     std::vector<PendingAutoDownload> wanted;
     {
         auto c = core.database().conn();
+        SQLite::Transaction tx{c.sql};
         for (const auto& a : msg->attachments) {
             if (!auto_download_takes(*mode, a.content_type, a.size, max_size))
                 continue;
@@ -2893,6 +2908,7 @@ void Client::_auto_download(const ConversationId& convo_id, int64_t message_id) 
 
             wanted.push_back({convo_id, message_id, a.index});
         }
+        tx.commit();
     }
 
     // Ahead of everything already waiting, and in the message's own order among themselves.
@@ -2917,7 +2933,19 @@ void Client::_pump_auto_downloads() {
         _auto_pending.pop_front();
 
         std::pair key{next.message_id, next.index};
-        if (_auto_inflight.contains(key) || !_auto_still_owed(next))
+        // Caught here because a throw out of this loop would leave `_auto_pumping` set for good.
+        bool owed = false;
+        try {
+            owed = !_auto_inflight.contains(key) && _auto_still_owed(next);
+        } catch (const std::exception& e) {
+            log::warning(
+                    cat,
+                    "Not auto-downloading attachment {} of message {}: {}",
+                    next.index,
+                    next.message_id,
+                    e.what());
+        }
+        if (!owed)
             continue;
 
         // Once, however it ends: an ending that throws after the waiter has already been told would
@@ -2979,7 +3007,7 @@ void Client::_reload_auto_downloads() {
         SELECT a.message, a.idx, m.conversation
         FROM message_attachments a JOIN messages m ON m.id = a.message
         WHERE a.auto_pending IS NOT NULL AND a.cached IS NULL AND a.unavailable IS NULL
-        ORDER BY a.message DESC, a.idx
+        ORDER BY m.timestamp DESC, m.id DESC, a.idx
     )")) {
         auto it = convos.find(convo);
         if (it == convos.end())
@@ -3017,10 +3045,7 @@ bool Client::_auto_still_owed(const PendingAutoDownload& entry) {
                         core.globals.get_integer(AUTO_DL_MAX_KEY)))
         return true;
 
-    c.prepared_exec(
-            "UPDATE message_attachments SET auto_pending = NULL WHERE message = ? AND idx = ?",
-            entry.message_id,
-            static_cast<int64_t>(entry.index));
+    unflag_auto(c, entry.message_id, static_cast<int64_t>(entry.index));
     return false;
 }
 

@@ -17,9 +17,11 @@ struct Backlog {
     decltype(random::random(32)) seed = random::random(32);
     int64_t when = 1000;
 
-    explicit Backlog(bool one_at_a_time = false) : one_at_a_time{one_at_a_time} {
+    explicit Backlog(bool one_at_a_time = false, bool with_cache = true) :
+            one_at_a_time{one_at_a_time} {
         attach();
-        c->set_cache_dir(dir.path);
+        if (with_cache)
+            c->set_cache_dir(dir.path);
         c->open_dm(convo, await);
     }
 
@@ -44,30 +46,55 @@ struct Backlog {
         sync(*c);
     }
 
-    // A message carrying one file, served as `file`.  Returns the message's id.
-    int64_t arrive(const std::string& file, std::string type = "image/png", size_t size = 3000) {
+    struct File {
+        std::vector<std::byte> ciphertext, key;
+        std::string type;
+        size_t size;
+    };
+    std::map<std::string, File> made;
+
+    // A message carrying one new file, served as `file`, sent at `ts` (else just after the last).
+    // Returns the message's id.
+    int64_t arrive(
+            const std::string& file,
+            std::string type = "image/png",
+            size_t size = 3000,
+            std::optional<int64_t> ts = std::nullopt) {
         std::vector<std::byte> data(size);
         random::fill(data);
         auto [ct, key] = attachment::encrypt(seed, data, attachment::Domain::ATTACHMENT);
+        made[file] = {ct, to_vector<std::byte>(key), std::move(type), size};
         served[file] = ct;
         net->served[file] = ct;
+        return carry(file, "h" + file, ts);
+    }
+
+    // Another message carrying a file `arrive` made, as a forward would.
+    int64_t carry(
+            const std::string& file, std::string hash, std::optional<int64_t> ts = std::nullopt) {
+        const auto& f = made.at(file);
         deliver(*c,
                 peer,
                 "",
-                from_epoch_ms(when++),
-                "h" + file,
+                from_epoch_ms(ts ? *ts : when++),
+                std::move(hash),
                 "",
                 std::nullopt,
                 [&](SessionProtos::DataMessage& d) {
                     auto* a = d.add_attachments();
                     a->set_id(1);
                     a->set_url(network::file_server::generate_download_url(file, {}, true));
-                    a->set_key(std::string{reinterpret_cast<const char*>(key.data()), key.size()});
-                    a->set_size(size);
-                    a->set_contenttype(type);
+                    a->set_key(
+                            std::string{reinterpret_cast<const char*>(f.key.data()), f.key.size()});
+                    a->set_size(f.size);
+                    a->set_contenttype(f.type);
                 });
         sync(*c);
-        return c->conversation(convo, await)->messages(await)[0].id;
+        // Ids only grow, so the newest arrival is the largest whatever its timestamp.
+        int64_t newest = 0;
+        for (const auto& m : c->conversation(convo, await)->messages(await))
+            newest = std::max(newest, m.id);
+        return newest;
     }
 
     void set(AutoDownload mode, ExistingAttachments existing) {
@@ -131,6 +158,9 @@ TEST_CASE(
 
         b.set(AutoDownload::all, ExistingAttachments::fetch);
         CHECK(b.fetching() == files{"b", "a"});
+        // Still counted while only queued: they are not here yet.
+        CHECK(b.counts().all.count == 2);
+        b.serve();
         CHECK(b.counts().all.count == 0);
     }
 
@@ -273,6 +303,14 @@ TEST_CASE(
         b.reopen(false);
         CHECK(b.fetching() == files{"a"});
     }
+
+    SECTION("asking again retries what a failed attempt left owed") {
+        fail_downloads(*b.net, 503);
+        sync(*b.c);
+        CHECK(b.counts().all.count == 1);
+        b.set(AutoDownload::all, ExistingAttachments::fetch);
+        CHECK(b.fetching() == files{"a"});
+    }
 }
 
 TEST_CASE("Client: a file fetched another way is no longer owed", "[client][auto][existing]") {
@@ -290,4 +328,93 @@ TEST_CASE("Client: a file fetched another way is no longer owed", "[client][auto
 
     b.reopen(false);
     CHECK(b.fetching().empty());
+}
+
+TEST_CASE(
+        "Client: a file several messages carry is counted and fetched once",
+        "[client][auto][existing]") {
+    Backlog b;
+    auto first = b.arrive("a");
+    auto forward = b.carry("a", "h-forward");
+    auto n = b.counts();
+    CHECK(n.all.count == 1);
+    CHECK(n.all.bytes == 3000);
+
+    b.set(AutoDownload::all, ExistingAttachments::fetch);
+    CHECK(b.fetching() == files{"a"});
+    b.serve();
+    for (auto id : {first, forward})
+        CHECK(b.c->message(id, await)->attachments[0].availability ==
+              AttachmentAvailability::cached);
+}
+
+TEST_CASE(
+        "Client: the backlog goes newest message first by when it was sent",
+        "[client][auto][existing]") {
+    Backlog b{true};
+    b.arrive("newer", "image/png", 3000, 5000);
+    // Delivered after, sent before: a late or synced delivery.
+    b.arrive("older", "image/png", 3000, 2000);
+    b.set(AutoDownload::all, ExistingAttachments::fetch);
+    CHECK(b.fetching() == files{"newer"});
+}
+
+TEST_CASE(
+        "Client: a size limit lowered while queued drops what it refuses",
+        "[client][auto][existing]") {
+    Backlog b{true};
+    b.arrive("a");
+    b.arrive("b");
+    b.set(AutoDownload::all, ExistingAttachments::fetch);
+    REQUIRE(b.fetching() == files{"b"});
+
+    b.c->set_auto_download_max_size(1000, await);
+    b.serve();
+    CHECK(b.fetching().empty());
+
+    b.c->set_auto_download_max_size(std::nullopt, await);
+    b.reopen(false);
+    CHECK(b.fetching().empty());
+}
+
+TEST_CASE("Client: a message deleted while queued is not fetched", "[client][auto][existing]") {
+    Backlog b{true};
+    auto older = b.arrive("a");
+    b.arrive("b");
+    b.set(AutoDownload::all, ExistingAttachments::fetch);
+    REQUIRE(b.fetching() == files{"b"});
+
+    b.c->delete_message(older, await);
+    b.serve();
+    CHECK(b.fetching().empty());
+    b.reopen(false);
+    CHECK(b.fetching().empty());
+}
+
+TEST_CASE("Client: without a cache there is nothing to fetch", "[client][auto][existing]") {
+    Backlog b{false, false};
+    b.arrive("a");
+    auto n = b.counts();
+    CHECK(n.all.count == 0);
+    CHECK(n.image_attachments.count == 0);
+
+    b.set(AutoDownload::all, ExistingAttachments::fetch);
+    CHECK(b.fetching().empty());
+    b.c->set_cache_dir(b.dir.path);
+    sync(*b.c);
+    CHECK(b.fetching().empty());
+}
+
+TEST_CASE("Client: reloading the queue does not fetch a file twice", "[client][auto][existing]") {
+    Backlog b;
+    b.c->set_auto_download_concurrency(2, await);
+    b.arrive("a");
+    b.set(AutoDownload::all, ExistingAttachments::fetch);
+    REQUIRE(b.fetching() == files{"a"});
+
+    // A second reload while `a` runs must not spend the other slot joining it.
+    b.c->set_cache_dir(b.dir.path);
+    sync(*b.c);
+    b.arrive("b");
+    CHECK(b.fetching() == files{"a", "b"});
 }

@@ -462,8 +462,8 @@ CREATE TABLE message_attachments (
     -- and this file has to describe the same column order a migrated database ends up with.
     thumbhash BLOB,
 
-    -- 1 while an auto-download still owes this file: set when the conversation's setting takes it,
-    -- cleared once it is cached or found unavailable, so eviction never makes it owed again.
+    -- 1 while an auto-download still owes this file.  Cleared once it is cached or found unavailable,
+    -- so eviction never makes it owed again, or once the conversation's setting stops taking it.
     auto_pending INTEGER,
 
     PRIMARY KEY (message, idx)

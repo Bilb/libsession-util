@@ -295,10 +295,10 @@ class Conversation {
     /// prompts on first use should call it with whatever answer it was given — `none` included,
     /// since that is not the same as never having asked, and only the latter should prompt again.
     ///
-    /// `existing` says whether the attachments already here are fetched too; without it, only
-    /// messages that arrive afterwards are.  Either way a mode change drops whatever this
-    /// conversation still had queued that the new mode does not take, so turning it off and on
-    /// again never brings back what was turned down.
+    /// `existing` says whether attachments already here and not yet downloaded are fetched too;
+    /// with `leave`, only messages that arrive afterwards are.  Either way, whatever this
+    /// conversation still had queued that the setting and the current `auto_download_max_size` no
+    /// longer take is dropped, and only a later `fetch` queues it again.
     ///
     /// @throws std::invalid_argument for `ExistingAttachments::fetch` with `AutoDownload::none`.
     void set_auto_download(AutoDownload mode, result_function<> cb);
@@ -306,8 +306,10 @@ class Conversation {
     void set_auto_download(AutoDownload mode, ExistingAttachments existing, result_function<> cb);
     void set_auto_download(AutoDownload mode, ExistingAttachments existing, await_t);
 
-    /// What `set_auto_download` with `ExistingAttachments::fetch` would queue, for each mode, under
-    /// the current `auto_download_max_size`: what a prompt offering it can say it costs.
+    /// What `set_auto_download` with `ExistingAttachments::fetch` would download, for each mode,
+    /// under the current `auto_download_max_size`: what a prompt offering it can say it costs.
+    /// Counts files rather than attachments, since a file several messages carry is fetched once,
+    /// and includes what an earlier attempt left owed.
     void existing_attachments(result_function<ExistingAttachmentCounts> cb);
     ExistingAttachmentCounts existing_attachments(await_t);
 
