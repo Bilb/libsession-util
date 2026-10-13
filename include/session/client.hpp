@@ -14,6 +14,7 @@
 #include <session/clock.hpp>
 #include <session/core.hpp>
 #include <session/util.hpp>
+#include <set>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -918,7 +919,11 @@ class Client {
     void _set_mute_until(const ConversationId& id, std::chrono::sys_seconds until);
     void _set_expiry(
             const ConversationId& id, config::expiration_mode mode, std::chrono::seconds timer);
-    void _set_auto_download(const ConversationId& id, AutoDownload mode);
+    void _set_auto_download(
+            const ConversationId& id,
+            AutoDownload mode,
+            ExistingAttachments existing = ExistingAttachments::leave);
+    ExistingAttachmentCounts _existing_attachments(const ConversationId& id);
     void _set_nickname(const ConversationId& id, std::string_view nickname);
 
     // One conversation-row column, updated where it differs and re-derived into the config if it
@@ -1309,10 +1314,21 @@ class Client {
         size_t index;
     };
 
-    // Core's loop's.  Newest at the front, and taken from there.
+    // Core's loop's.  Newest at the front, and taken from there.  What it holds is also flagged
+    // `auto_pending` in the database, which is what a restart rebuilds it from.
     std::deque<PendingAutoDownload> _auto_pending;
     size_t _auto_running = 0;
     bool _auto_pumping = false;
+    // (message, index) of each auto-download running, so a rebuild does not queue it twice.
+    std::set<std::pair<int64_t, size_t>> _auto_inflight;
+
+    // Replaces the queue with every attachment still flagged, newest message first.  Run once a
+    // cache directory and a network are both there, since nothing can be fetched before.
+    void _reload_auto_downloads();
+
+    // Whether a queued entry is still owed under the conversation's current setting and size
+    // limit, dropping its flag when the answer has become no.
+    bool _auto_still_owed(const PendingAutoDownload& entry);
 
     // Starts queued auto-downloads until as many are running as `auto_download_concurrency`
     // allows.  Does nothing when called from within itself, which an auto-download ending as soon

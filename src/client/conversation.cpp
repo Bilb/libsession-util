@@ -142,6 +142,22 @@ void Conversation::set_auto_download(AutoDownload mode, result_function<> cb) {
 void Conversation::set_auto_download(AutoDownload mode, await_t) {
     _client->call_get([this, mode] { _client->_set_auto_download(id, mode); });
 }
+void Conversation::set_auto_download(
+        AutoDownload mode, ExistingAttachments existing, result_function<> cb) {
+    _client->_async(
+            [c = _client, id = id, mode, existing] { c->_set_auto_download(id, mode, existing); },
+            std::move(cb));
+}
+void Conversation::set_auto_download(AutoDownload mode, ExistingAttachments existing, await_t) {
+    _client->call_get([this, mode, existing] { _client->_set_auto_download(id, mode, existing); });
+}
+
+void Conversation::existing_attachments(result_function<ExistingAttachmentCounts> cb) {
+    _client->_async([c = _client, id = id] { return c->_existing_attachments(id); }, std::move(cb));
+}
+ExistingAttachmentCounts Conversation::existing_attachments(await_t) {
+    return _client->call_get([this] { return _client->_existing_attachments(id); });
+}
 
 // -- Sending ------------------------------------------------------------------------------------
 
