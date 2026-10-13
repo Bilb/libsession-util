@@ -294,8 +294,22 @@ class Conversation {
     /// Calling this is also what records that the question has been asked at all, so a client that
     /// prompts on first use should call it with whatever answer it was given — `none` included,
     /// since that is not the same as never having asked, and only the latter should prompt again.
+    ///
+    /// `existing` says whether the attachments already here are fetched too; without it, only
+    /// messages that arrive afterwards are.  Either way a mode change drops whatever this
+    /// conversation still had queued that the new mode does not take, so turning it off and on
+    /// again never brings back what was turned down.
+    ///
+    /// @throws std::invalid_argument for `ExistingAttachments::fetch` with `AutoDownload::none`.
     void set_auto_download(AutoDownload mode, result_function<> cb);
     void set_auto_download(AutoDownload mode, await_t);
+    void set_auto_download(AutoDownload mode, ExistingAttachments existing, result_function<> cb);
+    void set_auto_download(AutoDownload mode, ExistingAttachments existing, await_t);
+
+    /// What `set_auto_download` with `ExistingAttachments::fetch` would queue, for each mode, under
+    /// the current `auto_download_max_size`: what a prompt offering it can say it costs.
+    void existing_attachments(result_function<ExistingAttachmentCounts> cb);
+    ExistingAttachmentCounts existing_attachments(await_t);
 
     // -- Sending ------------------------------------------------------------------------------
 
@@ -575,6 +589,7 @@ class AnyConversation {
     SESSION_CONVO_FORWARD(set_mute_until)
     SESSION_CONVO_FORWARD(set_expiry)
     SESSION_CONVO_FORWARD(set_auto_download)
+    SESSION_CONVO_FORWARD(existing_attachments)
     SESSION_CONVO_FORWARD(send_message)
     SESSION_CONVO_FORWARD(clear_messages)
     SESSION_CONVO_FORWARD(delete_conversation)

@@ -72,6 +72,26 @@ enum class AutoDownload : int {
     all = 2,                ///< Every attachment.
 };
 
+/// What turning auto-download on does about the attachments a conversation already holds.
+enum class ExistingAttachments {
+    leave,  ///< Nothing: the setting governs only messages that arrive afterwards.
+    fetch,  ///< Queues every one the setting takes that is not yet here, behind new arrivals.
+};
+
+/// Attachments already in a conversation that `ExistingAttachments::fetch` would queue.
+struct ExistingAttachmentCount {
+    size_t count = 0;
+    /// The sizes their senders declared, summed; one declaring no size adds nothing.
+    int64_t bytes = 0;
+};
+
+/// `ExistingAttachmentCount` for each mode that fetches anything, so a prompt offering both can
+/// show either without asking again.
+struct ExistingAttachmentCounts {
+    ExistingAttachmentCount all;
+    ExistingAttachmentCount image_attachments;
+};
+
 /// How an attachment transfer is going.
 ///
 /// Reported two ways, for the two kinds of transfer: handed directly to whoever called
