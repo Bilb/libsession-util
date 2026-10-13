@@ -500,6 +500,6 @@ CREATE INDEX message_attachments_url ON message_attachments(url) WHERE url IS NO
 -- are never the subject of this question.
 CREATE INDEX message_attachments_cached ON message_attachments(cached) WHERE cached IS NOT NULL;
 
--- What a restart queues again: the few rows an auto-download still owes, newest message first.
+-- What a restart queues again, and what a setting change checks: the few rows still owed.
 CREATE INDEX message_attachments_auto_pending ON message_attachments(message)
     WHERE auto_pending IS NOT NULL;
