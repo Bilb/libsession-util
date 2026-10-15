@@ -2319,7 +2319,12 @@ static bool auto_download_takes(
         const std::optional<std::string>& content_type,
         std::optional<int64_t> size,
         std::optional<int64_t> max_size) {
-    return auto_download_wants(mode, content_type) && !(max_size && (!size || *size > *max_size));
+    if (!auto_download_wants(mode, content_type))
+        return false;
+    if (!max_size)
+        return true;
+    // Under a limit, a file that declares no size is refused.
+    return size && *size <= *max_size;
 }
 
 namespace {
