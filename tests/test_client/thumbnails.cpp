@@ -147,8 +147,8 @@ struct Fixture {
     void strip_thumbnail(const std::string& url) {
         TestHelper::on_loop(c->core, [&] {
             c->core.database().conn().prepared_exec(
-                    "UPDATE attachment_cache SET size = size - thumbnail, thumbnail = NULL"
-                    " WHERE name = ? AND thumbnail IS NOT NULL",
+                    "DELETE FROM attachment_derived WHERE kind = 1"
+                    " AND entry = (SELECT id FROM attachment_cache WHERE name = ?)",
                     file(url).filename().string());
         });
         std::filesystem::remove(thumb_file(url));
@@ -179,7 +179,8 @@ struct Fixture {
     // The thumbnailer version the entry is recorded as refused under, or 0.
     int64_t refused_under(const std::string& url) {
         return db_get(
-                "SELECT coalesce(thumbnail_failed, 0) FROM attachment_cache WHERE name = ?",
+                "SELECT coalesce((SELECT d.failed FROM attachment_derived d"
+                " WHERE d.entry = c.id AND d.kind = 1), 0) FROM attachment_cache c WHERE name = ?",
                 file(url).filename().string());
     }
 };
@@ -470,13 +471,11 @@ TEST_CASE(
     // Failed under an older thumbnailer, which is what raising the version makes of it.
     TestHelper::on_loop(f.c->core, [&] {
         f.c->core.database().conn().prepared_exec(
-                "UPDATE attachment_cache SET thumbnail_failed = thumbnail_failed - 1"
-                " WHERE thumbnail_failed IS NOT NULL");
+                "UPDATE attachment_derived SET failed = failed - 1 WHERE failed IS NOT NULL");
     });
     f.reopen();
     CHECK(f.attachment(bad).has_thumbnail);
-    CHECK(f.db_get("SELECT count(*) FROM attachment_cache WHERE thumbnail_failed IS NOT NULL") ==
-          0);
+    CHECK(f.db_get("SELECT count(*) FROM attachment_derived WHERE failed IS NOT NULL") == 0);
 }
 
 TEST_CASE("Client: the sweep reconciles thumbnails", "[client][thumbnail][evict]") {
@@ -546,7 +545,7 @@ TEST_CASE(
     auto entry = f.entry(url);
     TestHelper::on_loop(f.c->core, [&] {
         f.c->core.database().conn().prepared_exec(
-                "UPDATE attachment_cache SET thumbnail_failed = ? WHERE id = ?",
+                "INSERT INTO attachment_derived (entry, kind, failed) VALUES (?2, 1, ?1)",
                 -image::thumbnailer_version,
                 entry);
     });
@@ -570,7 +569,7 @@ TEST_CASE(
     auto entry = f.entry(b_url);
     TestHelper::on_loop(f.c->core, [&] {
         f.c->core.database().conn().prepared_exec(
-                "UPDATE attachment_cache SET thumbnail_failed = ? WHERE id = ?",
+                "INSERT INTO attachment_derived (entry, kind, failed) VALUES (?2, 1, ?1)",
                 -image::thumbnailer_version,
                 entry);
     });
@@ -598,8 +597,9 @@ TEST_CASE(
     TestHelper::on_loop(f.c->core, [&] {
         auto conn = f.c->core.database().conn();
         conn.prepared_exec("UPDATE attachment_cache SET last_used = 1000 WHERE id = ?", ea);
+        conn.prepared_exec("UPDATE attachment_cache SET last_used = 2000 WHERE id = ?", eb);
         conn.prepared_exec(
-                "UPDATE attachment_cache SET last_used = 2000, thumbnail_failed = ? WHERE id = ?",
+                "INSERT INTO attachment_derived (entry, kind, failed) VALUES (?2, 1, ?1)",
                 -image::thumbnailer_version,
                 eb);
     });

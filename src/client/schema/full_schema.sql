@@ -302,23 +302,31 @@ CREATE TABLE attachment_cache (
     -- Keyed (`cache::name_for`) so that someone reading the cache directory cannot tell which
     -- files this account has fetched.
     name TEXT NOT NULL UNIQUE,
-    -- Both files when the entry has a thumbnail (see below), so that eviction and the limit see
-    -- what the entry actually costs.
+    -- The file alone; what was made from it is in attachment_derived.  Eviction and the limit
+    -- count both.
     size INTEGER NOT NULL,
-    last_used INTEGER NOT NULL,     -- ms since epoch
-    -- The bytes on disk of the entry's thumbnail, or NULL while it has none.  The thumbnail is part
-    -- of the entry rather than an entry of its own: it is made from this file, kept beside it as
-    -- `name` + `cache::THUMBNAIL_SUFFIX`, and evicted and deleted with it.  Kept apart from `size`
-    -- so that a thumbnail found missing can be taken back out of it.
-    thumbnail INTEGER,
-    -- The thumbnailer version (`image::thumbnailer_version`) under which this file was refused a
-    -- thumbnail, or NULL.  Minus it after an attempt that has not settled, whether still running
-    -- or ended with the process; a second such attempt sets the version itself, refusing the file.
-    -- A refusal is not tried again until the version changes.
-    thumbnail_failed INTEGER
+    last_used INTEGER NOT NULL      -- ms since epoch
 ) STRICT;
 
 CREATE INDEX attachment_cache_lru ON attachment_cache(last_used);
+
+-- The images made from a cached attachment, one row per kind (`cache::DERIVED_KINDS`): a thumbnail
+-- for a tile, a rendition for the viewer.  Each is part of its entry rather than an entry of its
+-- own: made from the file, kept beside it as `name` + the kind's suffix, counted with it, and
+-- evicted or deleted with it.
+CREATE TABLE attachment_derived (
+    entry INTEGER NOT NULL REFERENCES attachment_cache(id) ON DELETE CASCADE,
+    kind INTEGER NOT NULL,
+    -- The bytes on disk, or NULL while there is no file: one found missing is taken out here and
+    -- made again.
+    size INTEGER,
+    -- The version of the code that makes this kind (`image::thumbnailer_version`) under which the
+    -- file was refused, or NULL.  Minus it after an attempt that has not settled, whether still
+    -- running or ended with the process; a second such attempt sets the version itself, refusing
+    -- the file.  A refusal is not tried again until the version changes.
+    failed INTEGER,
+    PRIMARY KEY (entry, kind)
+) STRICT;
 
 -- The full decrypted Content protobuf, kept out of the messages table so that the history scan --
 -- the hot query -- does not drag it through overflow pages.  Retained so fields this schema does

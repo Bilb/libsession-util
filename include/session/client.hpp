@@ -95,6 +95,10 @@ template <typename T>
 concept ClientOption =
         core::CoreOption<T> || std::same_as<std::remove_cvref_t<T>, default_thumbnail_edge>;
 
+namespace cache {
+    enum class Derived : int;
+}
+
 class Client {
     friend class session::TestHelper;  // for unit tests
 
@@ -1180,7 +1184,7 @@ class Client {
 
     // Takes a thumbnail whose file has gone out of entry `id`'s row, and returns the messages that
     // were drawing it, or nothing if the row had none to take.
-    std::vector<int64_t> _forget_thumbnail(sqlite::Connection& c, int64_t id);
+    std::vector<int64_t> _forget_derived(sqlite::Connection& c, int64_t id, cache::Derived kind);
 
     // What the cache index says its files add up to, in bytes on disk.  The overload taking a
     // connection is for callers that already hold one and are about to write through it -- eviction
@@ -1243,53 +1247,60 @@ class Client {
     // of what is left.
     void _post_disk(std::function<void()> job);
 
-    // Where thumbnails are made: a thread of their own, used one thumbnail at a time, since making
-    // one decodes a whole picture and neither Core's loop nor the disk loop can wait for that.
-    // libvips spreads each one over its own worker threads, so one at a time still uses the cores.
-    // Placed, emplaced and stopped as the disk loop is, for the same reasons.
-    std::shared_ptr<oxen::quic::Loop> _thumb_loop;
-    std::optional<oxen::quic::JobQueue> _thumb_jq;
+    // Where derived images (thumbnails, renditions) are made: a thread of their own, used for one
+    // at a time, since making one decodes a whole picture and neither Core's loop nor the disk loop
+    // can wait for that.  libvips spreads each one over its own worker threads, so one at a time
+    // still uses the cores.  Placed, emplaced and stopped as the disk loop is, for the same
+    // reasons.
+    std::shared_ptr<oxen::quic::Loop> _derive_loop;
+    std::optional<oxen::quic::JobQueue> _derive_jq;
     // False once the queue has stopped.
-    bool _post_thumbnail(std::function<void()> job);
+    bool _post_derive(std::function<void()> job);
 
-    // Cache entries waiting for a thumbnail, next first, and whether one is being made.  Core's
-    // loop's.  One at a time end to end -- made, written on the disk loop, recorded -- which is
-    // what keeps a thumbnail written for an entry evicted meanwhile from racing the eviction.
-    struct PendingThumbnail {
+    // Cache entries waiting for a derived image of some kind, next first, and whether one is being
+    // made.  Core's loop's.  One at a time end to end -- made, written on the disk loop, recorded
+    // -- which is what keeps one written for an entry evicted meanwhile from racing the eviction.
+    struct PendingDerived {
         int64_t entry;
+        cache::Derived kind;
         std::optional<std::filesystem::path> plain;  // as `_record_cached`'s
     };
-    std::deque<PendingThumbnail> _thumb_pending;
-    bool _thumb_running = false;
+    std::deque<PendingDerived> _derived_pending;
+    bool _derived_running = false;
 
-    // The entry being decoded, whose row is marked until `_thumbnail_made` settles it.
-    std::optional<int64_t> _thumb_attempt;
+    // The entry and kind being decoded, whose row is marked until `_derived_made` settles it.
+    std::optional<std::pair<int64_t, cache::Derived>> _derived_attempt;
 
-    void _queue_thumbnail(int64_t entry, std::optional<std::filesystem::path> plain = std::nullopt);
+    void _queue_derived(
+            int64_t entry,
+            cache::Derived kind,
+            std::optional<std::filesystem::path> plain = std::nullopt);
 
     // Moves it to the front of the queue, if it is queued: a display is waiting for it.  One that
     // is not has been tried already, or is not to be.
-    void _hurry_thumbnail(int64_t entry);
+    void _hurry_derived(int64_t entry, cache::Derived kind);
 
-    void _unmark_thumbnail_attempt(int64_t entry);
+    void _unmark_derived_attempt(int64_t entry, cache::Derived kind);
 
     // Starts the next queued thumbnail unless one is being made, skipping entries that have gone
     // since they were queued, or that now have a thumbnail or a recorded failure to make one.
-    void _pump_thumbnails();
+    void _pump_derived();
 
     // Back from the thumbnail thread with what it made: writes it beside the entry if the entry
     // still wants it.  Nullopt is a refusal, which stays recorded until
     // `image::thumbnailer_version` changes; `failed`, an exception, which may not happen again and
     // so is retried at next start.
-    void _thumbnail_made(
+    void _derived_made(
             int64_t entry,
+            cache::Derived kind,
             std::string name,
             std::optional<std::vector<std::byte>> jpeg,
             bool failed);
 
     // Records a thumbnail written beside entry `entry`, and tells the messages showing it; or, if
     // the entry has gone meanwhile, removes the thumbnail again.
-    void _record_thumbnail(int64_t entry, const std::string& name, int64_t on_disk);
+    void _record_derived(
+            int64_t entry, cache::Derived kind, const std::string& name, int64_t on_disk);
 
     // Queues a thumbnail for every cached picture with neither a thumbnail nor a recorded failure
     // to make one.  Run at every start because the queue is not kept: this is what picks up
@@ -1372,6 +1383,7 @@ class Client {
 
     // The edge new thumbnails are made at: the stored setting, or failing that the constructor's.
     uint32_t _thumbnail_edge();
+    uint32_t _derived_edge(cache::Derived kind);
 
     // Decides what an arriving message's attachments are worth fetching unasked, and starts
     // whatever it decided on.  Does nothing without a cache directory: the point of fetching early

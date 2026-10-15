@@ -23,6 +23,8 @@
 #include <session/util.hpp>
 #include <span>
 
+#include "../src/client/download_cache.hpp"
+
 namespace session {
 
 // nlohmann can't parse a std::byte range directly: libc++'s std::char_traits has no std::byte
@@ -472,14 +474,14 @@ class TestHelper {
     /// coming, rather than that nothing has come yet.
     template <typename Client>
     static bool thumbnails_idle(Client& c) {
-        return c.core.call_get([&c] { return !c._thumb_running && c._thumb_pending.empty(); });
+        return c.core.call_get([&c] { return !c._derived_running && c._derived_pending.empty(); });
     }
 
     /// Makes a Client act as though a thumbnail were being made, so that whatever is queued from
     /// now on stays queued: what the process ending with thumbnails still to make leaves behind.
     template <typename Client>
     static void stall_thumbnails(Client& c) {
-        c.core.call_get([&c] { c._thumb_running = true; });
+        c.core.call_get([&c] { c._derived_running = true; });
     }
 
     /// Queues what a Client queues at open.
@@ -492,21 +494,21 @@ class TestHelper {
     template <typename Client>
     static void pretend_thumbnail_attempt(Client& c, int64_t entry) {
         c.core.call_get([&c, entry] {
-            c._thumb_running = true;
-            c._thumb_attempt = entry;
+            c._derived_running = true;
+            c._derived_attempt.emplace(entry, client::cache::Derived::thumbnail);
         });
     }
 
     template <typename Client>
     static size_t thumbnails_queued(Client& c) {
-        return c.core.call_get([&c] { return c._thumb_pending.size(); });
+        return c.core.call_get([&c] { return c._derived_pending.size(); });
     }
 
     template <typename Client>
     static std::vector<int64_t> thumbnails_pending(Client& c) {
         return c.core.call_get([&c] {
             std::vector<int64_t> entries;
-            for (const auto& p : c._thumb_pending)
+            for (const auto& p : c._derived_pending)
                 entries.push_back(p.entry);
             return entries;
         });
@@ -517,7 +519,7 @@ class TestHelper {
     template <typename Client>
     static std::shared_ptr<std::promise<void>> hold_thumbnail_thread(Client& c) {
         auto release = std::make_shared<std::promise<void>>();
-        c._post_thumbnail([f = release->get_future().share()] { f.wait(); });
+        c._post_derive([f = release->get_future().share()] { f.wait(); });
         return release;
     }
     template <typename Client>
