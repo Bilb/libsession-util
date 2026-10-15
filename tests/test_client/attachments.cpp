@@ -1608,7 +1608,8 @@ TEST_CASE("Client: a conversation set to auto-download fetches on arrival", "[cl
         arrive("h1", false);
         CHECK(net->downloads.empty());
         CHECK(progress.empty());
-        CHECK_FALSE(c->conversation(convo, await)->messages(await)[0].gallery);
+        // A gallery all the same: what is shown as one and what is fetched are different questions.
+        CHECK(c->conversation(convo, await)->messages(await)[0].gallery);
     }
 
     SECTION("images only fetches the image and leaves the document") {
