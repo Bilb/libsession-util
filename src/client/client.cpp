@@ -736,7 +736,6 @@ bool Client::delete_message(int64_t message_id, await_t) {
 void Client::set_cache_dir(std::filesystem::path dir) {
     _cache_dir = std::move(dir);
     _sweep_cache();
-    call([this] { _thumbnail_pass(); });
 }
 
 Client::~Client() {
@@ -789,6 +788,7 @@ void Client::_sweep_cache() {
                 _reconcile_cache(std::move(attachments), std::move(pictures));
             } catch (const std::exception& e) {
                 log::warning(cat, "Cache sweep failed: {}", e.what());
+                _thumbnail_pass();
             }
         });
     });
@@ -895,9 +895,10 @@ void Client::_reconcile_cache(
             for (auto id : thumbs_gone) {
                 auto showing = _forget_thumbnail(c, id);
                 affected.insert(affected.end(), showing.begin(), showing.end());
-                _queue_thumbnail(id);
             }
             _emit_messages_showing(c, affected);
+            // After the reconcile, so a thumbnail it found missing is queued here with the rest.
+            _thumbnail_pass();
 
             if (dropped_files || !gone.empty() || !thumbs_gone.empty() || dropped_pictures)
                 log::info(
