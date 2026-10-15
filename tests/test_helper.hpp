@@ -541,11 +541,11 @@ class TestHelper {
     template <typename Client>
     static std::shared_ptr<std::promise<void>> hold_thumbnail_thread(Client& c) {
         auto release = std::make_shared<std::promise<void>>();
+        // Let go when the job is destroyed, run or dropped by a queue that stopped first: the
+        // count must not outlive the Client it was taken on.
         ++derive_holds;
-        c._post_derive([f = release->get_future().share()] {
-            f.wait();
-            --derive_holds;
-        });
+        std::shared_ptr<void> held{nullptr, [](void*) { --derive_holds; }};
+        c._post_derive([f = release->get_future().share(), held] { f.wait(); });
         return release;
     }
     template <typename Client>

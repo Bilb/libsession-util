@@ -5553,10 +5553,10 @@ bool Client::_retry_send(int64_t client_id, Conversation::upload_progress on_upl
             client_id,
             has_uploads_left ? " (attachments still to upload)" : "");
 
-    // Resumes wherever it was left: _upload_next takes the first attachment with no url, so the
-    // ones that already got up are not sent again, and a message needing none goes straight to
-    // being dispatched.  Through the derive stage, which a run that ended before it could leave
-    // undone, and which skips what is already there.
+    // Resumes wherever it was left, through the derive stage, which a run that ended before it
+    // could leave undone and which skips what is already there; then _upload_next takes the first
+    // attachment with no url, so the ones that already got up are not sent again, and a message
+    // needing none goes straight to being dispatched.
     _derive_outgoing(client_id, std::move(on_upload));
     return true;
 }
