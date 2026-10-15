@@ -51,6 +51,7 @@ set(LIB_SESSION_UTESTS_SOURCES
     test_image_platform.cpp
     test_image_probe.cpp
     test_image_thumbhash.cpp
+    test_image_rendition.cpp
     test_image_thumbnail.cpp
     test_image_vips.cpp
     #test_logging.cpp  # Handled separately, see below
