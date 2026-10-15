@@ -5217,7 +5217,7 @@ void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress o
     struct Wanted {
         int64_t idx;
         std::string path;
-        bool size, placeholder;
+        bool needs_size, needs_placeholder;
     };
     std::vector<Wanted> wanted;
     {
@@ -5254,10 +5254,10 @@ void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress o
             Derived d{want.idx};
             try {
                 image::Source source{std::filesystem::path{want.path}};
-                if (want.size)
+                if (want.needs_size)
                     if (auto info = image::probe(source); info && info->width && info->height)
                         d.size = std::pair{info->width, info->height};
-                if (want.placeholder)
+                if (want.needs_placeholder)
                     d.placeholder = image::thumbhash::of_picture(source);
             } catch (const std::exception& e) {
                 log::debug(
@@ -5555,8 +5555,9 @@ bool Client::_retry_send(int64_t client_id, Conversation::upload_progress on_upl
 
     // Resumes wherever it was left: _upload_next takes the first attachment with no url, so the
     // ones that already got up are not sent again, and a message needing none goes straight to
-    // being dispatched.
-    _upload_next(client_id, std::move(on_upload));
+    // being dispatched.  Through the derive stage, which a run that ended before it could leave
+    // undone, and which skips what is already there.
+    _derive_outgoing(client_id, std::move(on_upload));
     return true;
 }
 

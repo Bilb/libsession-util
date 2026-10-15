@@ -513,3 +513,47 @@ TEST_CASE("Client: a picture we send carries its own placeholder", "[client][sen
 
     std::filesystem::remove_all(dir);
 }
+
+TEST_CASE(
+        "Client: a retried send reads what a picture still lacks", "[client][send][placeholder]") {
+    TempClient c;
+    auto me = own_sid(*c);
+    TestHelper::seed_pfs_nak(c->core, me);
+    auto dir = std::filesystem::temp_directory_path() / random::unique_id("test_placeholder", 7);
+    std::filesystem::create_directories(dir);
+    auto photo = dir / "photo.jpg";
+    {
+        auto bytes = picture(640, 480, ".jpg");
+        std::ofstream out{photo, std::ios::binary};
+        out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    }
+
+    // No network: the upload fails, and the message waits to be retried.
+    auto id = c->send_message(
+            ConversationId::dm(me), {.attachments = {OutgoingAttachment{.path = photo}}}, await);
+    sync(*c);
+    REQUIRE(c->message(id, await)->send_state == SendState::failed);
+
+    // As a row left by a run that ended before the derive stage.
+    TestHelper::on_loop(c->core, [&] {
+        c->core.database().conn().prepared_exec(
+                "UPDATE message_attachments SET width = NULL, height = NULL, thumbhash = NULL"
+                " WHERE message = ?",
+                id);
+    });
+    REQUIRE_FALSE(c->message(id, await)->attachments.at(0).thumbhash);
+
+    auto* net = attach_mock_network(c->core);
+    REQUIRE(c->retry_send(id, nullptr, await));
+    sync(*c);
+    REQUIRE(accept_stores(*net) == 1);
+    sync(*c);
+    auto a = c->message(id, await)->attachments.at(0);
+    CHECK(a.width == 640);
+    CHECK(a.height == 480);
+    REQUIRE(a.thumbhash);
+    CHECK(image::thumbhash::valid(*a.thumbhash));
+    CHECK(a.uploaded);
+
+    std::filesystem::remove_all(dir);
+}
