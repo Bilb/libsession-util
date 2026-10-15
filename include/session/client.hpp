@@ -1488,6 +1488,11 @@ class Client {
     // a time and resumes wherever it was left -- which is also what a retry does.
     void _upload_next(int64_t client_id, Conversation::upload_progress on_upload);
 
+    // The stage before the uploads: for each picture Session displays whose width, height or
+    // thumbhash the caller did not supply, probes and encodes them on the derive loop and writes
+    // them into the row, so the pointer carries a placeholder.  Then `_upload_next`.
+    void _derive_outgoing(int64_t client_id, Conversation::upload_progress on_upload);
+
     // The rest of `_upload_next`, once the disk loop has looked at the file: uploads attachment
     // `index` from `path`, or fails the message for good if `file_size` says the file is gone.
     void _upload_one(

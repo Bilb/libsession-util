@@ -28,6 +28,9 @@ bool acceptable(const Info& info);
 // to sRGB from any embedded profile.
 image_ptr scaled(Source& source, const Info& info, uint32_t width, uint32_t height, bool crop);
 
+// `img` as 8-bit sRGB, converted from any embedded profile.
+image_ptr to_srgb8(VipsImage* img);
+
 // Transparency drawn over `backdrop`, encoded as a JPEG with no metadata.
 std::vector<std::byte> finish(image_ptr img, Backdrop backdrop, int quality);
 

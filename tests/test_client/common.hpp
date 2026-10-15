@@ -268,6 +268,7 @@ inline void sync(Client& c) {
     // covers the longest such exchange.
     for (int i = 0; i < 3; i++) {
         c.core.disk_loop()->call_get([] { return 0; });
+        TestHelper::drain_derive_loop(c);
         c.core.loop().call_get([] { return 0; });
     }
 }

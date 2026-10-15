@@ -1,3 +1,5 @@
+#include <session/image/thumbhash.hpp>
+
 #include "derived_fixture.hpp"
 
 using namespace derived_test;
@@ -451,4 +453,63 @@ TEST_CASE("Client: a thumbnail asked for before it is made is made next", "[clie
     settle(*f.c);
     for (const auto& [id, url] : arrived)
         CHECK(f.attachment(id).has_thumbnail);
+}
+
+TEST_CASE("Client: a picture we send carries its own placeholder", "[client][send][placeholder]") {
+    TempClient c;
+    auto* net = attach_mock_network(c->core);
+    auto me = own_sid(*c);
+    TestHelper::seed_pfs_nak(c->core, me);
+
+    auto dir = std::filesystem::temp_directory_path() / random::unique_id("test_placeholder", 7);
+    std::filesystem::create_directories(dir);
+    auto write = [&](std::string_view name, std::span<const std::byte> bytes) {
+        auto p = dir / name;
+        std::ofstream out{p, std::ios::binary};
+        out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        return p;
+    };
+    auto photo = write("photo.jpg", picture(640, 480, ".jpg"));
+    auto doc = write("notes.pdf", std::vector<std::byte>(300, std::byte{1}));
+    auto junk = write("junk.png", std::vector<std::byte>(300, std::byte{2}));
+    auto supplied = std::vector<std::byte>(5, std::byte{9});
+
+    auto id = c->send_message(
+            ConversationId::dm(me),
+            {.attachments =
+                     {OutgoingAttachment{.path = photo},
+                      OutgoingAttachment{.path = doc},
+                      OutgoingAttachment{.path = junk, .content_type = "image/png"},
+                      OutgoingAttachment{
+                              .path = photo, .width = 4, .height = 3, .thumbhash = supplied}}},
+            await);
+    sync(*c);
+    REQUIRE(accept_stores(*net) == 1);
+    sync(*c);
+
+    auto msg = c->message(id, await);
+    REQUIRE(msg);
+    REQUIRE(msg->attachments.size() == 4);
+
+    // Read from the file, and sent: the row is what the content was built from.
+    const auto& a = msg->attachments[0];
+    CHECK(a.width == 640);
+    CHECK(a.height == 480);
+    REQUIRE(a.thumbhash);
+    CHECK(image::thumbhash::valid(*a.thumbhash));
+    CHECK(a.uploaded);
+
+    // Not a picture: nothing is read.  A picture that cannot be decoded is sent without.
+    CHECK_FALSE(msg->attachments[1].width);
+    CHECK_FALSE(msg->attachments[1].thumbhash);
+    CHECK_FALSE(msg->attachments[2].width);
+    CHECK_FALSE(msg->attachments[2].thumbhash);
+    CHECK(msg->attachments[2].uploaded);
+
+    // What the caller supplied is theirs.
+    CHECK(msg->attachments[3].width == 4);
+    CHECK(msg->attachments[3].height == 3);
+    CHECK(msg->attachments[3].thumbhash == supplied);
+
+    std::filesystem::remove_all(dir);
 }

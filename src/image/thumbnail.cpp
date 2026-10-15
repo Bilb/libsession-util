@@ -8,6 +8,7 @@
 #include "jpeg_encode.hpp"
 #include "platform.hpp"
 #include "session/image/probe.hpp"
+#include "session/image/thumbhash.hpp"
 #include "source_internal.hpp"
 #include "thumbnail_internal.hpp"
 #include "vips_internal.hpp"
@@ -15,6 +16,19 @@
 namespace session::image {
 
 namespace detail {
+
+    image_ptr to_srgb8(VipsImage* img) {
+        VipsImage* out;
+        if (vips_colourspace(img, &out, VIPS_INTERPRETATION_sRGB, nullptr))
+            throw_vips_error("thumbnail: colour conversion failed");
+        image_ptr srgb{out};
+        if (srgb->BandFmt != VIPS_FORMAT_UCHAR) {
+            if (vips_cast_uchar(srgb.get(), &out, nullptr))
+                throw_vips_error("thumbnail: conversion to 8 bits failed");
+            srgb.reset(out);
+        }
+        return srgb;
+    }
 
     namespace {
 
@@ -34,19 +48,6 @@ namespace detail {
                 case Format::avif: return deep ? 27 : 15;
             }
             return 27;
-        }
-
-        image_ptr to_srgb8(VipsImage* img) {
-            VipsImage* out;
-            if (vips_colourspace(img, &out, VIPS_INTERPRETATION_sRGB, nullptr))
-                throw_vips_error("thumbnail: colour conversion failed");
-            image_ptr srgb{out};
-            if (srgb->BandFmt != VIPS_FORMAT_UCHAR) {
-                if (vips_cast_uchar(srgb.get(), &out, nullptr))
-                    throw_vips_error("thumbnail: conversion to 8 bits failed");
-                srgb.reset(out);
-            }
-            return srgb;
         }
 
         // Blended by hand rather than with vips_composite: at thumbnail size the pixels fit in a
@@ -213,6 +214,35 @@ namespace detail {
 
 std::optional<std::vector<std::byte>> thumbnail(Source& source, uint32_t edge) {
     return detail::thumbnail(source, edge, detail::Backdrop::checkerboard);
+}
+
+std::optional<std::vector<std::byte>> thumbhash::of_picture(Source& source) {
+    auto info = probe(source);
+    if (!info || !detail::acceptable(*info))
+        return std::nullopt;
+    auto box = std::min(thumbhash::max_input_dimension, std::max(info->width, info->height));
+
+    try {
+        auto img = detail::to_srgb8(detail::scaled(source, *info, box, box, false).get());
+        if (!vips_image_hasalpha(img.get())) {
+            VipsImage* out;
+            if (vips_addalpha(img.get(), &out, nullptr))
+                detail::throw_vips_error("placeholder: adding alpha failed");
+            img.reset(out);
+        }
+        size_t len = 0;
+        std::unique_ptr<uint8_t, decltype(&g_free)> px{
+                static_cast<uint8_t*>(vips_image_write_to_memory(img.get(), &len)), &g_free};
+        if (!px)
+            detail::throw_vips_error("placeholder: decoding failed");
+        return thumbhash::encode(
+                {reinterpret_cast<const std::byte*>(px.get()), len},
+                static_cast<uint32_t>(img->Xsize),
+                static_cast<uint32_t>(img->Ysize));
+    } catch (...) {
+        detail::source_access::rethrow_error(source);
+        throw;
+    }
 }
 
 }  // namespace session::image
