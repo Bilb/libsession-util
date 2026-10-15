@@ -194,8 +194,9 @@ struct Message {
     /// Whether it *is* being shown that way.
     ///
     /// Stored, because it is a decision rather than a property: on from the start for every
-    /// message that can be shown that way, whatever the conversation auto-downloads, and a
-    /// client's `set_gallery` may say otherwise later, which recomputing it would discard.
+    /// message stored under this rule that can be shown that way, whatever the conversation
+    /// auto-downloads, and a client's `set_gallery` may say otherwise later, which recomputing it
+    /// would discard.  A message stored before the rule keeps the decision it was stored with.
     ///
     /// Never true when `gallery_viewable` is false: a stored decision that no longer agrees with
     /// the current rule is dropped rather than honoured, so a message that qualified under an older
