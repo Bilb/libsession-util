@@ -6848,8 +6848,7 @@ void Client::_on_message_received(core::ReceivedMessage&& msg) {
         for (const auto& url : arrived_urls)
             _clear_resendable(url);
 
-        // Before the message is announced, so that a display reacting to it already sees whether
-        // this is a gallery rather than being told once and corrected a moment later.
+        // Before the message is announced, so that what it starts fetching is reported with it.
         _auto_download(convo_id, client_id);
         _emit_message(true, client_id);
     }
