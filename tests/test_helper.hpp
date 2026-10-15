@@ -484,6 +484,15 @@ class TestHelper {
         c.core.call_get([&c] { c._derived_running = true; });
     }
 
+    /// Undoes `stall_thumbnails`: whatever queued meanwhile is made now.
+    template <typename Client>
+    static void resume_thumbnails(Client& c) {
+        c.core.call_get([&c] {
+            c._derived_running = false;
+            c._pump_derived();
+        });
+    }
+
     /// Queues what a Client queues at open.
     template <typename Client>
     static void thumbnail_pass(Client& c) {

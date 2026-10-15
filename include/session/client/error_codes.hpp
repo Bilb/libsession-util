@@ -24,6 +24,10 @@ inline constexpr std::string_view attachment_not_found = "attachment.not_found";
 /// advance which answer to expect.
 inline constexpr std::string_view no_thumbnail = "attachment.no_thumbnail";
 
+/// `Client::attachment_rendition` has none to serve yet, or never will: not cached, not a picture
+/// Session displays, or refused.  One being made is reported through `messages_updated`.
+inline constexpr std::string_view no_rendition = "attachment.no_rendition";
+
 /// The local file an outgoing attachment was made from is no longer there, so the message cannot
 /// be sent.
 inline constexpr std::string_view attachment_file_missing = "attachment.file_missing";

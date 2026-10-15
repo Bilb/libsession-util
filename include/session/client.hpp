@@ -89,11 +89,23 @@ struct default_thumbnail_edge {
     uint32_t px;
 };
 
+/// The rendition edge used when neither the application nor a stored setting gives one: a box a
+/// 1080p screen fills.  An application passes its own longest screen side, at its density, through
+/// `default_rendition_edge`.
+inline constexpr uint32_t DEFAULT_RENDITION_EDGE = 1920;
+
+/// As `default_thumbnail_edge`, for the renditions `Client::attachment_rendition` serves: the box
+/// they are made to fit, for as long as none has been stored with `Client::set_rendition_edge`.
+struct default_rendition_edge {
+    uint32_t px;
+};
+
 /// Anything a Client constructor accepts after the database path: everything `core::Core` takes,
 /// which is forwarded to it, and Client's own options.
 template <typename T>
 concept ClientOption =
-        core::CoreOption<T> || std::same_as<std::remove_cvref_t<T>, default_thumbnail_edge>;
+        core::CoreOption<T> || std::same_as<std::remove_cvref_t<T>, default_thumbnail_edge> ||
+        std::same_as<std::remove_cvref_t<T>, default_rendition_edge>;
 
 namespace cache {
     enum class Derived : int;
@@ -112,8 +124,8 @@ class Client {
     /// takes (database encryption, predefined_seed, …) and forwards them — with the one exception
     /// of `core::callbacks`, which a Client's application cannot supply: those are Client's own
     /// wiring, and the static_assert below rejects an attempt to pass a set rather than letting it
-    /// be silently overwritten.  Client's own options (`default_thumbnail_edge`) are taken from the
-    /// same list and not forwarded.
+    /// be silently overwritten.  Client's own options (`default_thumbnail_edge`,
+    /// `default_rendition_edge`) are taken from the same list and not forwarded.
     ///
     /// What an application is told is `client::callbacks`, given as the `cbs` argument of the
     /// overloads below and reported through the dispatcher.  Anything an application needs that
@@ -142,6 +154,10 @@ class Client {
             _default_thumbnail_edge{
                     core::detail::maybe_instance<default_thumbnail_edge>(opts...)
                             .value_or(default_thumbnail_edge{DEFAULT_THUMBNAIL_EDGE})
+                            .px},
+            _default_rendition_edge{
+                    core::detail::maybe_instance<default_rendition_edge>(opts...)
+                            .value_or(default_rendition_edge{DEFAULT_RENDITION_EDGE})
                             .px},
             core{_make_core(std::move(db_path), _core_callbacks(), std::forward<Opts>(opts)...)} {
         static_assert(
@@ -464,6 +480,30 @@ class Client {
             int64_t message_id, size_t index, result_function<std::vector<std::byte>> cb);
     std::vector<std::byte> attachment_thumbnail(int64_t message_id, size_t index, await_t);
 
+    /// An attachment's rendition: the whole picture as a JPEG fitting inside a `rendition_edge`
+    /// box, for a viewer to draw in place of the original whatever format that was.  See
+    /// `image::rendition` for exactly what it is.
+    ///
+    /// **From the cache only, never the network**, and made only when first asked for: nothing
+    /// decodes a picture nobody opened.  Asked for a cached picture that has none yet, this queues
+    /// it ahead of everything else waiting to be made and fails with `err::no_rendition`; when it
+    /// is made, `messages_updated` reports `Attachment::has_rendition` true, and asking again
+    /// serves it.  Nothing waits on the decode, which runs on another thread and would otherwise
+    /// deadlock a caller on Core's loop.  Until then, the thumbnail is what there is to draw.
+    ///
+    /// Kept, evicted, counted and read as a thumbnail is: part of the file's cache entry, gone
+    /// with it, and marking the file used when read.  A picture no rendition can be made of is
+    /// refused under `image::renderer_version` and not tried again until that rises.
+    ///
+    /// Fails with:
+    ///
+    /// - `err::message_not_found`, `err::attachment_not_found` — there is no such attachment.
+    /// - `err::no_rendition` — none yet, or none ever: not cached, not a picture Session
+    ///   displays, or refused.
+    void attachment_rendition(
+            int64_t message_id, size_t index, result_function<std::vector<std::byte>> cb);
+    std::vector<std::byte> attachment_rendition(int64_t message_id, size_t index, await_t);
+
     /// Withdraws one request made by `attachment_data` or `save_attachment`, by the token it
     /// returned or that its progress reports carry: its callback, and the last progress report it
     /// gets, fail with `err::download_cancelled`, and a save leaves nothing behind.  An
@@ -785,6 +825,15 @@ class Client {
     void thumbnail_edge(result_function<uint32_t> cb);
     uint32_t thumbnail_edge(await_t);
 
+    /// The box, in pixels a side, that renditions made from now on fit inside (see
+    /// `attachment_rendition`): as `thumbnail_edge`, with `default_rendition_edge` and
+    /// `DEFAULT_RENDITION_EDGE` as the fallbacks, clamped to [`image::min_rendition_edge`,
+    /// `image::max_rendition_edge`].  Renditions already made keep their size.
+    void set_rendition_edge(std::optional<uint32_t> px, result_function<> cb);
+    void set_rendition_edge(std::optional<uint32_t> px, await_t);
+    void rendition_edge(result_function<uint32_t> cb);
+    uint32_t rendition_edge(await_t);
+
     // -- Our own account ----------------------------------------------------------------------
     //
     // These read and write the UserProfile config, which follows the account between devices.  They
@@ -857,6 +906,7 @@ class Client {
 
     // Above `core`, which the constructor initialises after it from the same options.
     uint32_t _default_thumbnail_edge;
+    uint32_t _default_rendition_edge;
 
     // Core, built from the options that are Core's: everything but Client's own.
     template <ClientOption... Opts>
@@ -1379,10 +1429,12 @@ class Client {
     // These read on the disk loop and hand the answer to `done` on Core's loop.  They throw
     // `session::error` rather than calling `done` when there is plainly nothing to read.
     void _attachment_thumbnail(int64_t message_id, size_t index, bytes_answer done, bool wait);
+    void _attachment_rendition(int64_t message_id, size_t index, bytes_answer done, bool wait);
     void _attachment_data_cached(int64_t message_id, size_t index, bytes_answer done, bool wait);
 
     // The edge new thumbnails are made at: the stored setting, or failing that the constructor's.
     uint32_t _thumbnail_edge();
+    uint32_t _rendition_edge();
     uint32_t _derived_edge(cache::Derived kind);
 
     // Decides what an arriving message's attachments are worth fetching unasked, and starts

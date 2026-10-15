@@ -133,7 +133,7 @@ class Writer {
 inline constexpr std::string_view PARTIAL_SUFFIX = ".part";
 
 /// The images made from a cached attachment, as `attachment_derived.kind` stores them.
-enum class Derived : int { thumbnail = 1 };
+enum class Derived : int { thumbnail = 1, rendition = 2 };
 
 /// What a derived image is called: its file's name with the kind's suffix appended, beside it.  A
 /// sweep reads a name with one of these suffixes as belonging to the entry named by the rest.
@@ -141,7 +141,8 @@ struct DerivedKind {
     Derived kind;
     std::string_view suffix;
 };
-inline constexpr std::array DERIVED_KINDS{DerivedKind{Derived::thumbnail, ".thumb"}};
+inline constexpr std::array DERIVED_KINDS{
+        DerivedKind{Derived::thumbnail, ".thumb"}, DerivedKind{Derived::rendition, ".view"}};
 
 inline constexpr std::string_view THUMBNAIL_SUFFIX = DERIVED_KINDS[0].suffix;
 

@@ -21,6 +21,7 @@
 #include <session/format.hpp>
 #include <session/hash.hpp>
 #include <session/image/content_types.hpp>
+#include <session/image/rendition.hpp>
 #include <session/image/thumbnail.hpp>
 #include <session/network/backends/session_file_server.hpp>
 #include <session/network/session_network.hpp>
@@ -1022,6 +1023,7 @@ namespace {
     constexpr auto REQUESTED_MAX_KEY = "client:requested_cache_max_size";
     constexpr auto AUTO_DL_CONCURRENCY_KEY = "client:auto_download_concurrency";
     constexpr auto THUMBNAIL_EDGE_KEY = "client:thumbnail_edge";
+    constexpr auto RENDITION_EDGE_KEY = "client:rendition_edge";
     constexpr int DEFAULT_AUTO_DL_CONCURRENCY = 4;
 }  // namespace
 
@@ -1227,6 +1229,36 @@ uint32_t Client::thumbnail_edge(await_t) {
     return call_get([this] { return _thumbnail_edge(); });
 }
 
+static uint32_t clamped_rendition_edge(int64_t px) {
+    return static_cast<uint32_t>(
+            std::clamp<int64_t>(px, image::min_rendition_edge, image::max_rendition_edge));
+}
+
+uint32_t Client::_rendition_edge() {
+    return clamped_rendition_edge(
+            core.globals.get_integer(RENDITION_EDGE_KEY).value_or(_default_rendition_edge));
+}
+
+static void set_rendition_edge_in(core::Globals& g, std::optional<uint32_t> px) {
+    set_limit(
+            g,
+            RENDITION_EDGE_KEY,
+            px ? std::optional{int64_t{clamped_rendition_edge(*px)}} : std::nullopt);
+}
+
+void Client::set_rendition_edge(std::optional<uint32_t> px, result_function<> cb) {
+    _async([this, px] { set_rendition_edge_in(core.globals, px); }, std::move(cb));
+}
+void Client::set_rendition_edge(std::optional<uint32_t> px, await_t) {
+    call_get([this, px] { set_rendition_edge_in(core.globals, px); });
+}
+void Client::rendition_edge(result_function<uint32_t> cb) {
+    _async([this] { return _rendition_edge(); }, std::move(cb));
+}
+uint32_t Client::rendition_edge(await_t) {
+    return call_get([this] { return _rendition_edge(); });
+}
+
 bool Client::_caches_requested(std::optional<int64_t> size) {
     if (_cache_dir.empty())
         return false;
@@ -1374,6 +1406,20 @@ std::vector<std::byte> Client::attachment_thumbnail(int64_t message_id, size_t i
     });
 }
 
+void Client::attachment_rendition(
+        int64_t message_id, size_t index, result_function<std::vector<std::byte>> cb) {
+    _answer_bytes(
+            [this, message_id, index](bytes_answer done, bool wait) {
+                _attachment_rendition(message_id, index, std::move(done), wait);
+            },
+            std::move(cb));
+}
+std::vector<std::byte> Client::attachment_rendition(int64_t message_id, size_t index, await_t) {
+    return _await_bytes([this, message_id, index](bytes_answer done, bool wait) {
+        _attachment_rendition(message_id, index, std::move(done), wait);
+    });
+}
+
 void Client::attachment_data_cached(
         int64_t message_id, size_t index, result_function<std::vector<std::byte>> cb) {
     _answer_bytes(
@@ -1497,6 +1543,66 @@ void Client::_attachment_thumbnail(int64_t message_id, size_t index, bytes_answe
                 _queue_derived(entry, kind);
                 _hurry_derived(entry, kind);
                 done(unexpected{no_thumbnail(message_id, index).err()});
+            });
+}
+
+static session::error no_rendition(int64_t message_id, size_t index) {
+    return session::error{
+            err::no_rendition,
+            "Attachment {} of message {} has no rendition"_format(index, message_id)};
+}
+
+void Client::_attachment_rendition(int64_t message_id, size_t index, bytes_answer done, bool wait) {
+    auto c = core.database().conn();
+    constexpr auto kind = cache::Derived::rendition;
+    // One-shot, leaving no statement open: with `wait`, the answer below writes before this
+    // returns.
+    auto row = c.prepared_maybe_get<
+            std::optional<int64_t>,
+            std::optional<std::string>,
+            std::optional<int64_t>,
+            int64_t>(
+            R"(
+        SELECT c.id, c.name,
+               (SELECT d.size FROM attachment_derived d WHERE d.entry = c.id AND d.kind = ?3),
+               a.content_type IS NOT NULL AND {}
+        FROM message_attachments a LEFT JOIN attachment_cache c ON c.id = a.cached
+        WHERE a.message = ?1 AND a.idx = ?2
+    )"_format(DISPLAYABLE_IMAGE_SQL),
+            message_id,
+            static_cast<int64_t>(index),
+            static_cast<int>(kind));
+    if (!row)
+        throw_missing_attachment(c, message_id, index);
+    auto& [entry, name, rendition, picture] = *row;
+    if (_cache_dir.empty())
+        throw no_rendition(message_id, index);
+    if (!rendition) {
+        // Made only on demand, so this ask is what queues it: at the front, since somebody is
+        // looking.  Not for a file that is not here or not a picture, nor one already refused,
+        // which the pump turns away.
+        if (entry && picture) {
+            _queue_derived(*entry, kind);
+            _hurry_derived(*entry, kind);
+        }
+        throw no_rendition(message_id, index);
+    }
+
+    _read_cache_file(
+            _cache_dir / cache::ATTACHMENT_DIR / cache::derived_name(*name, kind),
+            wait,
+            [this, entry = *entry, message_id, index, done = std::move(done)](auto bytes) {
+                if (bytes) {
+                    _touch_cached(entry);
+                    return done(std::move(*bytes));
+                }
+                // Gone from under us, or unreadable and so removed by the read: made again, since
+                // the file it came from may well be fine.
+                auto c = core.database().conn();
+                _emit_messages_showing(c, _forget_derived(c, entry, kind));
+                _queue_derived(entry, kind);
+                _hurry_derived(entry, kind);
+                done(unexpected{no_rendition(message_id, index).err()});
             });
 }
 
@@ -4308,10 +4414,14 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
         SELECT a.message, a.idx, a.content_type, a.filename, a.flags, a.width, a.height,
                a.thumbhash, a.size, a.url, a.unavailable, a.cached, a.saved_at,
                EXISTS(SELECT 1 FROM attachment_derived d
+                      WHERE d.entry = c.id AND d.kind = {} AND d.size IS NOT NULL),
+               EXISTS(SELECT 1 FROM attachment_derived d
                       WHERE d.entry = c.id AND d.kind = {} AND d.size IS NOT NULL)
         FROM message_attachments a LEFT JOIN attachment_cache c ON c.id = a.cached
         WHERE a.message IN ({}) ORDER BY a.message, a.idx
-    )"_format(static_cast<int>(cache::Derived::thumbnail), sqlite::placeholders(msgs.size())));
+    )"_format(static_cast<int>(cache::Derived::thumbnail),
+              static_cast<int>(cache::Derived::rendition),
+              sqlite::placeholders(msgs.size())));
 
     int n = 1;
     for (const auto& m : msgs)
@@ -4330,7 +4440,8 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
                  unavailable,
                  cached,
                  saved_at,
-                 thumbnail] :
+                 thumbnail,
+                 rendition] :
          sqlite::IterableStatementWrapper<
                  int64_t,
                  int64_t,
@@ -4347,6 +4458,7 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
                  std::optional<Unavailable>,
                  std::optional<int64_t>,
                  std::optional<int64_t>,
+                 int,
                  int>{std::move(st)}) {
         auto found = by_id.find(message);
         if (found == by_id.end())
@@ -4375,6 +4487,7 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
                 .fetch_done = status.done,
                 .fetch_total = status.total,
                 .has_thumbnail = thumbnail != 0,
+                .has_rendition = rendition != 0,
                 .saved_at = saved_at ? std::optional{from_epoch_ms(*saved_at)} : std::nullopt});
     }
 }
@@ -6076,6 +6189,7 @@ void Client::_touch_cached(int64_t id) {
 static int derived_version(cache::Derived kind) {
     switch (kind) {
         case cache::Derived::thumbnail: return image::thumbnailer_version;
+        case cache::Derived::rendition: return image::renderer_version;
     }
     return 0;
 }
@@ -6084,6 +6198,7 @@ static std::optional<std::vector<std::byte>> make_derived(
         cache::Derived kind, image::Source& source, uint32_t edge) {
     switch (kind) {
         case cache::Derived::thumbnail: return image::thumbnail(source, edge);
+        case cache::Derived::rendition: return image::rendition(source, edge);
     }
     return std::nullopt;
 }
@@ -6091,12 +6206,18 @@ static std::optional<std::vector<std::byte>> make_derived(
 uint32_t Client::_derived_edge(cache::Derived kind) {
     switch (kind) {
         case cache::Derived::thumbnail: return _thumbnail_edge();
+        case cache::Derived::rendition: return _rendition_edge();
     }
     return 0;
 }
 
 void Client::_queue_derived(
         int64_t entry, cache::Derived kind, std::optional<std::filesystem::path> plain) {
+    // Once: a second ask for the same one would only have the pump find it already made.
+    if (std::ranges::any_of(_derived_pending, [&](const PendingDerived& p) {
+            return p.entry == entry && p.kind == kind;
+        }))
+        return;
     _derived_pending.push_back({entry, kind, std::move(plain)});
     _pump_derived();
 }
