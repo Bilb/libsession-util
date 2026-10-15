@@ -2643,12 +2643,14 @@ static std::vector<UnfetchedAttachment> existing_unfetched(sqlite::Connection& c
     return found;
 }
 
-// Whether the row was owed nothing before: a file already here, or known to be gone, never is.
+// Whether the row was owed nothing before: a file already here, known to be gone, or that no url
+// names (nothing could fetch it, and nothing would ever clear the flag) never is.
 static bool flag_auto(sqlite::Connection& c, int64_t message, int64_t idx) {
     return c.prepared_exec(
                    R"(
         UPDATE message_attachments SET auto_pending = 1
-        WHERE message = ? AND idx = ? AND cached IS NULL AND unavailable IS NULL
+        WHERE message = ? AND idx = ? AND url IS NOT NULL AND cached IS NULL
+          AND unavailable IS NULL
     )",
                    message,
                    idx) > 0;

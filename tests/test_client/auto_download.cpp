@@ -500,3 +500,30 @@ TEST_CASE("Client: a file found unavailable is no longer owed", "[client][auto][
         CHECK(b.owed() == 0);
     }
 }
+
+TEST_CASE("Client: a pointer with no url is never owed", "[client][auto][existing]") {
+    Backlog b;
+    b.set(AutoDownload::all);
+    deliver(*b.c,
+            b.peer,
+            "",
+            from_epoch_ms(b.when++),
+            "nourl",
+            "",
+            std::nullopt,
+            [&](SessionProtos::DataMessage& d) {
+                auto* a = d.add_attachments();
+                a->set_id(1);
+                a->set_size(100);
+                a->set_contenttype("image/png");
+            });
+    sync(*b.c);
+    CHECK(b.owed() == 0);
+    CHECK(b.fetching().empty());
+
+    b.fetch_existing();
+    CHECK(b.owed() == 0);
+    b.reopen(false);
+    CHECK(b.owed() == 0);
+    CHECK(b.fetching().empty());
+}
