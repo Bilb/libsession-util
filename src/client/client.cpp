@@ -5705,8 +5705,16 @@ void Client::_save_from_cache(
             // Gone, or unreadable: back to where the save started, to be fetched instead.
             _save_discard(*s);
 
-        call([this, s = std::move(s), entry_id, result = std::move(result)]() mutable {
+        call([this,
+              s = std::move(s),
+              entry_id,
+              name = file.filename().string(),
+              result = std::move(result)]() mutable {
             if (!result) {
+                // Gone, or unreadable and so removed by the read: the entry indexes nothing now,
+                // whatever becomes of the save.
+                if (entry_id)
+                    _drop_unreadable(*entry_id, name);
                 // Unless it was withdrawn meanwhile, in which case the cancel on its way to the
                 // disk loop is its ending.
                 if (!s->cancelled)
