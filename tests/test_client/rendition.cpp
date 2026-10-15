@@ -214,6 +214,8 @@ TEST_CASE("Client: a rendition whose decode fails gets one more try", "[client][
     CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
     settle(*f.c);
     CHECK(refused() == image::renderer_version);
+    // Turned away rather than tried: an attempt would have marked it -version again.
     CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
-    CHECK(TestHelper::thumbnails_queued(*f.c) == 0);
+    settle(*f.c);
+    CHECK(refused() == image::renderer_version);
 }
