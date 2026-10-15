@@ -309,6 +309,9 @@ class Conversation {
     /// already in this chat" calls once `set_auto_download` has recorded the answer.  Does nothing
     /// without a cache directory.
     ///
+    /// New arrivals stay ahead only until the queue is next rebuilt -- a restart, a network
+    /// attached, or a later call -- which orders everything owed by send time, newest first.
+    ///
     /// @throws std::invalid_argument if auto-download is unset or `none` here (through `cb` for the
     /// handler form, which needs the database to know).
     void download_existing_attachments(result_function<> cb);
