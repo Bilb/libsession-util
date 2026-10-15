@@ -1332,14 +1332,14 @@ class Client {
 
     void _unmark_derived_attempt(int64_t entry, cache::Derived kind);
 
-    // Starts the next queued thumbnail unless one is being made, skipping entries that have gone
-    // since they were queued, or that now have a thumbnail or a recorded failure to make one.
+    // Starts the next queued derived image unless one is being made, skipping entries that have
+    // gone since they were queued, or that now have that kind or a recorded failure to make it.
     void _pump_derived();
 
-    // Back from the thumbnail thread with what it made: writes it beside the entry if the entry
-    // still wants it.  Nullopt is a refusal, which stays recorded until
-    // `image::thumbnailer_version` changes; `failed`, an exception, which may not happen again and
-    // so is retried at next start.
+    // Back from the derive thread with what it made: writes it beside the entry if the entry
+    // still wants it.  Nullopt is a refusal, which stays recorded until the kind's version
+    // changes; `failed`, an exception, which may not happen again: a thumbnail is retried at the
+    // next start, a rendition at the next ask, once.
     void _derived_made(
             int64_t entry,
             cache::Derived kind,
@@ -1347,8 +1347,8 @@ class Client {
             std::optional<std::vector<std::byte>> jpeg,
             bool failed);
 
-    // Records a thumbnail written beside entry `entry`, and tells the messages showing it; or, if
-    // the entry has gone meanwhile, removes the thumbnail again.
+    // Records a derived image written beside entry `entry`, and tells the messages showing it; or,
+    // if the entry has gone meanwhile, removes the file again.
     void _record_derived(
             int64_t entry, cache::Derived kind, const std::string& name, int64_t on_disk);
 

@@ -190,3 +190,30 @@ TEST_CASE("Client: asking twice for one rendition queues it once", "[client][ren
     CHECK(f.attachment(id).has_rendition);
     CHECK(TestHelper::thumbnails_queued(*f.c) == 0);
 }
+
+TEST_CASE("Client: a rendition whose decode fails gets one more try", "[client][rendition]") {
+    Fixture f;
+    auto [id, url] = f.arrive(picture(400, 300));
+    auto refused = [&] {
+        return f.db_get(
+                "SELECT coalesce((SELECT failed FROM attachment_derived d WHERE d.entry = c.id"
+                " AND d.kind = ?), 0) FROM attachment_cache c WHERE c.name = ?",
+                rendition_kind,
+                f.file(url).filename().string());
+    };
+
+    // The cached file damaged from outside, so that reading it throws rather than refuses.
+    std::vector<std::byte> junk(3000);
+    random::fill(junk);
+    overwrite(f.file(url), junk);
+    CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
+    settle(*f.c);
+    CHECK(refused() == -image::renderer_version);
+
+    // Asked again: the second strike, after which it is refused and not tried again.
+    CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
+    settle(*f.c);
+    CHECK(refused() == image::renderer_version);
+    CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
+    CHECK(TestHelper::thumbnails_queued(*f.c) == 0);
+}

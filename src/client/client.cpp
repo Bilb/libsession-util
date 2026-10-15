@@ -850,6 +850,7 @@ void Client::_reconcile_cache(
                  R"(
         SELECT c.id, c.name, d.kind FROM attachment_cache c
         LEFT JOIN attachment_derived d ON d.entry = c.id AND d.size IS NOT NULL
+        ORDER BY c.id
     )")) {
         if (!listed.contains(name)) {
             if (unlisted.empty() || unlisted.back().first != id)
@@ -6334,9 +6335,12 @@ void Client::_derived_made(
     _derived_attempt.reset();
     auto c = core.database().conn();
     const int k = static_cast<int>(kind);
-    if (jpeg || failed)
+    // An exception may not happen again.  A thumbnail is unmarked and tried again at the next
+    // start, by the pass; a rendition, which only an ask queues, keeps its strike, so the next ask
+    // is its last try rather than every open decoding it again.
+    if (jpeg || (failed && kind == cache::Derived::thumbnail))
         _unmark_derived_attempt(entry, kind);
-    else
+    else if (!failed)
         c.prepared_exec(
                 "UPDATE attachment_derived SET failed = ? WHERE entry = ? AND kind = ?",
                 derived_version(kind),
