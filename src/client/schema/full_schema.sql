@@ -321,8 +321,8 @@ CREATE TABLE attachment_derived (
     -- The bytes on disk, or NULL while there is no file: one found missing is taken out here and
     -- made again.
     size INTEGER,
-    -- The version of the code that makes this kind (`image::thumbnailer_version`) under which the
-    -- file was refused, or NULL.  Minus it after an attempt that has not settled, whether still
+    -- The version of the code that makes this kind (`image::thumbnailer_version`,
+    -- `image::renderer_version`) under which the file was refused, or NULL.  Minus it after an attempt that has not settled, whether still
     -- running or ended with the process; a second such attempt sets the version itself, refusing
     -- the file.  A refusal is not tried again until the version changes.
     failed INTEGER,
