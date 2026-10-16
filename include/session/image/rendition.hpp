@@ -5,6 +5,7 @@
 #include <optional>
 #include <vector>
 
+#include "probe.hpp"
 #include "source.hpp"
 
 namespace session::image {
@@ -31,9 +32,18 @@ inline constexpr int renderer_version = 2;
 /// - 8-bit sRGB at `thumbnail_quality`, with no metadata at all.
 ///
 /// Returns nullopt for anything that is not an image we accept, under the same rules as
-/// `thumbnail`.  The same image always gets the same answer from the same `renderer_version`.
+/// `thumbnail`, and for an animation whose frames together exceed `max_total_pixels`.  The same
+/// image always gets the same answer from the same `renderer_version`.
 ///
 /// Throws std::runtime_error as `thumbnail` does.
 std::optional<std::vector<std::byte>> rendition(Source& source, uint32_t edge);
+
+/// API: image/rendition_is_original
+///
+/// Whether the picture `probe` described as `info` is already what `rendition` would make for
+/// `edge`, give or take the encoder: a JPEG or WebP, upright, 8 bits a sample, no larger than the
+/// clamped edge.  What a picture sent by a client that re-encodes (`sendable`) is, so a viewer can
+/// draw the original rather than a second copy of it.
+bool rendition_is_original(const Info& info, uint32_t edge);
 
 }  // namespace session::image

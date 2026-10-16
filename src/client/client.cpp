@@ -855,7 +855,7 @@ void Client::_reconcile_cache(
     for (auto&& [id, name, kind] : c.prepared_results<int64_t, std::string, std::optional<int>>(
                  R"(
         SELECT c.id, c.name, d.kind FROM attachment_cache c
-        LEFT JOIN attachment_derived d ON d.entry = c.id AND d.size IS NOT NULL
+        LEFT JOIN attachment_derived d ON d.entry = c.id AND d.size > 0
         ORDER BY c.id
     )")) {
         if (!listed.contains(name)) {
@@ -1236,6 +1236,8 @@ uint32_t Client::thumbnail_edge(await_t) {
     return call_get([this] { return _thumbnail_edge(); });
 }
 
+static_assert(DEFAULT_RENDITION_EDGE == image::sendable_edge);
+
 static uint32_t clamped_rendition_edge(int64_t px) {
     return static_cast<uint32_t>(
             std::clamp<int64_t>(px, image::min_rendition_edge, image::max_rendition_edge));
@@ -1585,9 +1587,9 @@ void Client::_attachment_rendition(int64_t message_id, size_t index, bytes_answe
     if (_cache_dir.empty())
         throw no_rendition(message_id, index);
     if (!rendition) {
-        // Not made yet, for a file cached before renditions were made on arrival or evicted and
-        // fetched back: at the front, since somebody is looking.  Not for a file that is not here
-        // or not a picture to open, nor one already refused, which the pump turns away.
+        // None yet, made unasked only after a thumbnail: queued here at the front, since somebody
+        // is looking.  Not for a file that is not here or not a picture to open, nor one already
+        // refused, which the pump turns away.
         if (entry && picture) {
             _queue_derived(*entry, kind);
             _hurry_derived(*entry, kind);
@@ -1595,8 +1597,10 @@ void Client::_attachment_rendition(int64_t message_id, size_t index, bytes_answe
         throw no_rendition(message_id, index);
     }
 
+    // Size 0: the original is already what a viewer draws.
     _read_cache_file(
-            _cache_dir / cache::ATTACHMENT_DIR / cache::derived_name(*name, kind),
+            _cache_dir / cache::ATTACHMENT_DIR /
+                    (*rendition == 0 ? *name : cache::derived_name(*name, kind)),
             wait,
             [this, entry = *entry, message_id, index, done = std::move(done)](auto bytes) {
                 if (bytes) {
@@ -6589,7 +6593,13 @@ void Client::_queue_derived(
             return p.entry == entry && p.kind == kind;
         }))
         return;
-    _derived_pending.push_back({entry, kind, std::move(plain)});
+    // A thumbnail goes ahead of every rendition waiting: a tile on screen matters more than a
+    // picture a viewer may open, and a rendition can take seconds.
+    auto at = kind == cache::Derived::thumbnail
+                    ? std::ranges::find(
+                              _derived_pending, cache::Derived::rendition, &PendingDerived::kind)
+                    : _derived_pending.end();
+    _derived_pending.insert(at, {entry, kind, std::move(plain)});
     _pump_derived();
 }
 
@@ -6658,7 +6668,7 @@ void Client::_pump_derived() {
                                     plain = std::move(next.plain),
                                     key = _cache_encryption_key(),
                                     edge = _derived_edge(next.kind)]() mutable {
-            std::optional<std::vector<std::byte>> jpeg;
+            std::optional<std::vector<std::byte>> made;
             std::optional<PictureFacts> facts;
             bool failed = false;
             try {
@@ -6671,9 +6681,15 @@ void Client::_pump_derived() {
                     local.emplace(*plain);
                 auto& source = local ? *local : cached;
                 facts.emplace();
-                if (auto info = image::probe(source))
+                auto info = image::probe(source);
+                if (info)
                     facts = PictureFacts{info->width, info->height, info->frames};
-                jpeg = make_derived(kind, source, edge);
+                // Empty: the original is already what a viewer draws, and is served instead.
+                if (kind == cache::Derived::rendition && info &&
+                    image::rendition_is_original(*info, edge))
+                    made.emplace();
+                else
+                    made = make_derived(kind, source, edge);
             } catch (const std::exception& e) {
                 failed = true;
                 log::warning(
@@ -6687,10 +6703,10 @@ void Client::_pump_derived() {
                   entry,
                   kind,
                   name = std::move(name),
-                  jpeg = std::move(jpeg),
+                  made = std::move(made),
                   failed,
                   facts]() mutable {
-                _derived_made(entry, kind, std::move(name), std::move(jpeg), failed, facts);
+                _derived_made(entry, kind, std::move(name), std::move(made), failed, facts);
             });
         });
         if (!posted) {
@@ -6706,7 +6722,7 @@ void Client::_derived_made(
         int64_t entry,
         cache::Derived kind,
         std::string name,
-        std::optional<std::vector<std::byte>> jpeg,
+        std::optional<std::vector<std::byte>> made,
         bool failed,
         std::optional<PictureFacts> facts) {
     _derived_attempt.reset();
@@ -6738,10 +6754,10 @@ void Client::_derived_made(
             _emit_messages_showing(c, showing);
         }
     }
-    // A picture's rendition is queued once its thumbnail is made, so every tile is drawn before any
-    // viewer copy is decoded; not for a picture only ever sent as its original file, which nobody
-    // opens, nor one whose thumbnail was refused.
-    if (jpeg && kind == cache::Derived::thumbnail &&
+    // A picture's rendition is queued once its thumbnail is made, behind every thumbnail waiting;
+    // not for a picture only ever sent as its original file, which nobody opens, nor one whose
+    // thumbnail was refused.
+    if (made && kind == cache::Derived::thumbnail &&
         c.prepared_get<int64_t>(
                 "SELECT EXISTS(SELECT 1 FROM message_attachments"
                 " WHERE cached = ? AND {} AND flags & {} = 0)"_format(
@@ -6752,7 +6768,7 @@ void Client::_derived_made(
     // An exception may not happen again.  A thumbnail is unmarked and tried again at the next
     // start, by the pass; a rendition keeps its strike, so the next ask is its last try rather
     // than every open decoding it again.
-    if (jpeg || (failed && kind == cache::Derived::thumbnail))
+    if (made || (failed && kind == cache::Derived::thumbnail))
         _unmark_derived_attempt(entry, kind);
     else if (!failed)
         c.prepared_exec(
@@ -6762,7 +6778,7 @@ void Client::_derived_made(
                 k);
 
     // Checked here and again once it is written: an eviction can land on either side of the write.
-    bool wanted = jpeg && c.prepared_get<int64_t>(
+    bool wanted = made && c.prepared_get<int64_t>(
                                   R"(
         SELECT EXISTS(SELECT 1 FROM attachment_cache c WHERE c.id = ?1 AND c.name = ?2
             AND NOT EXISTS(SELECT 1 FROM attachment_derived d
@@ -6775,6 +6791,12 @@ void Client::_derived_made(
         _derived_running = false;
         return _pump_derived();
     }
+    // Recorded with no file of its own: size 0 says the original is the rendition.
+    if (made->empty()) {
+        _record_derived(entry, kind, name, 0);
+        _derived_running = false;
+        return _pump_derived();
+    }
 
     auto file = _cache_dir / cache::ATTACHMENT_DIR / cache::derived_name(name, kind);
     _post_disk([this,
@@ -6783,10 +6805,10 @@ void Client::_derived_made(
                 name = std::move(name),
                 file = std::move(file),
                 key = _cache_encryption_key(),
-                jpeg = std::move(*jpeg)] {
+                made = std::move(*made)] {
         std::optional<int64_t> on_disk;
         try {
-            cache::write(file, key, jpeg);
+            cache::write(file, key, made);
             on_disk = static_cast<int64_t>(std::filesystem::file_size(file));
         } catch (const std::exception& e) {
             log::warning(

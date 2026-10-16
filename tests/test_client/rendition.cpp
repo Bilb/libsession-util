@@ -33,7 +33,8 @@ std::vector<std::byte> ask_until_made(Fixture& f, int64_t id) {
 TEST_CASE("Client: a rendition is made once a picture is cached, and kept", "[client][rendition]") {
     Fixture f;
     f.rec.msg_updated.clear();
-    auto [id, url] = f.arrive(picture(1600, 1200, ".jpg"));
+    // A PNG, so the rendition is a copy of its own rather than the original itself.
+    auto [id, url] = f.arrive(picture(1600, 1200));
     settle(*f.c);
     REQUIRE(f.attachment(id).has_thumbnail);
     CHECK(f.attachment(id).has_rendition);
@@ -235,4 +236,33 @@ TEST_CASE("Client: a rendition whose decode fails gets one more try", "[client][
     CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
     settle(*f.c);
     CHECK(refused() == image::renderer_version);
+}
+
+TEST_CASE("Client: which pictures get which rendition", "[client][rendition]") {
+    Fixture f;
+
+    SECTION("one already as a viewer draws it is its own, with no copy") {
+        auto photo = picture(400, 300, ".jpg");
+        auto [id, url] = f.arrive(photo, "image/jpeg");
+        settle(*f.c);
+        CHECK(f.attachment(id).has_rendition);
+        CHECK(f.c->attachment_rendition(id, 0, await) == photo);
+        CHECK_FALSE(std::filesystem::exists(view_file(f, url)));
+        CHECK(f.db_get("SELECT size FROM attachment_derived WHERE kind = ?", rendition_kind) == 0);
+    }
+
+    SECTION("a large one is drawn at the default edge") {
+        auto [id, url] = f.arrive(picture(4000, 3000));
+        settle(*f.c);
+        CHECK(jpeg_size(f.c->attachment_rendition(id, 0, await)) == std::pair{2048, 1536});
+    }
+
+    SECTION("one sent as its original file gets a thumbnail and no rendition") {
+        auto [id, url] = f.arrive(picture(400, 300), "image/png", true, /*ORIGINAL_FILE*/ 2);
+        settle(*f.c);
+        CHECK(f.attachment(id).has_thumbnail);
+        CHECK_FALSE(f.attachment(id).has_rendition);
+        CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
+        CHECK(TestHelper::thumbnails_queued(*f.c) == 0);
+    }
 }

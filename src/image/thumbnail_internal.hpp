@@ -12,12 +12,12 @@
 namespace session::image::detail {
 
 // What transparency is drawn over.  `white` exists for the benchmark that justifies the
-// checkerboard's cost; thumbnails and renditions are always made on the checkerboard.
+// checkerboard's cost; thumbnails are always made on the checkerboard.
 enum class Backdrop { checkerboard, white };
 
 std::optional<std::vector<std::byte>> thumbnail(Source& source, uint32_t edge, Backdrop backdrop);
 
-// Shared by `thumbnail` and `rendition`, which differ only in how the picture is fitted.
+// Shared by `thumbnail`, `rendition` and `sendable`.
 
 // Whether a probed image is one we decode at all: decodable, within the pixel limits, and within
 // `max_whole_decode_bytes` if its format decodes whole.

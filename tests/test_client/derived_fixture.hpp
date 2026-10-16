@@ -144,7 +144,8 @@ struct Fixture {
     std::pair<int64_t, std::string> arrive(
             std::span<const std::byte> data,
             std::string_view content_type = "image/png",
-            bool thumbnails = true) {
+            bool thumbnails = true,
+            uint32_t flags = 0) {
         auto [ct, key] = attachment::encrypt(seed, data, attachment::Domain::ATTACHMENT);
         auto file_id = "f{}"_format(sent);
         net->served[file_id] = ct;
@@ -163,6 +164,8 @@ struct Fixture {
                     a->set_key(std::string{reinterpret_cast<const char*>(key.data()), key.size()});
                     a->set_size(data.size());
                     a->set_contenttype(std::string{content_type});
+                    if (flags)
+                        a->set_flags(flags);
                 });
         sent++;
         sync(*c);

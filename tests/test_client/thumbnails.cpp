@@ -33,7 +33,9 @@ TEST_CASE("Client: a downloaded picture gets a thumbnail", "[client][thumbnail]"
     CHECK(f.db_get("SELECT count(*) FROM attachment_cache") == 1);
     CHECK(f.c->attachment_cache_size(await) ==
           static_cast<int64_t>(std::filesystem::file_size(f.file(url)) + on_disk) +
-                  f.db_get("SELECT size FROM attachment_derived WHERE kind = 2"));
+                  f.db_get(
+                          "SELECT size FROM attachment_derived WHERE kind = ?",
+                          static_cast<int>(cache::Derived::rendition)));
 
     // The handler form answers the same, through the dispatcher.
     std::promise<Expected<std::vector<std::byte>>> got;

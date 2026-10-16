@@ -496,8 +496,8 @@ class Client {
     /// with it, and marking the file used when read.  A picture no rendition can be made of is
     /// refused under `image::renderer_version` and not tried again until that rises.
     ///
-    /// An attachment sent as its original file (`Attachment::original_file`) gets none, and
-    /// asking queues nothing: it is a file to export, not a picture to open.
+    /// For an attachment sent as its original file (`Attachment::original_file`) asking never
+    /// queues one: it is a file to export, not a picture to open.
     ///
     /// Fails with:
     ///
@@ -1359,7 +1359,7 @@ class Client {
             int64_t entry,
             cache::Derived kind,
             std::string name,
-            std::optional<std::vector<std::byte>> jpeg,
+            std::optional<std::vector<std::byte>> made,
             bool failed,
             std::optional<PictureFacts> facts);
 
