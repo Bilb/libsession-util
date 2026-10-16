@@ -15,6 +15,7 @@
 #include <session/client/message.hpp>
 #include <session/clock.hpp>
 #include <session/core.hpp>
+#include <session/image/sendable.hpp>
 #include <session/util.hpp>
 #include <string>
 #include <string_view>
@@ -317,6 +318,23 @@ class Client {
             Conversation::upload_progress on_upload,
             await_t);
     int64_t send_message(const ConversationId& id, OutgoingMessage msg, await_t);
+
+    /// What sending the file at `path` as an attachment would do with it, decided from its header
+    /// alone exactly as the send will decide it (`image::send_plan`), under the file server's
+    /// limit: for a staging screen to say before sending that a file will be refused, or will go
+    /// as the original rather than re-encoded.  `content_type` is the attachment's label, inferred
+    /// from the extension when unset as `send_message` infers it.  Says nothing about an attachment
+    /// marked `OutgoingAttachment::original_file`, which is sent as it is whatever it holds.
+    ///
+    /// The await form reads the file on the calling thread; the callback form on the disk thread.
+    void attachment_send_plan(
+            std::filesystem::path path,
+            std::optional<std::string> content_type,
+            result_function<image::SendPlan> cb);
+    image::SendPlan attachment_send_plan(
+            const std::filesystem::path& path,
+            const std::optional<std::string>& content_type,
+            await_t);
 
     /// Sends a failed message again, resuming rather than restarting: attachments that already
     /// reached the file server are left alone and only the ones that did not are uploaded, because
@@ -1584,8 +1602,11 @@ class Client {
             size_t index,
             std::string path,
             int64_t file_size,
-            bool declared_image,
+            std::optional<std::string> content_type,
             Conversation::upload_progress on_upload);
+
+    // The file server's limit on one file, which an attachment sent as it is must be within.
+    uint64_t _attachment_size_limit();
 
     // The rest of `_upload_next`, once the file is known: uploads attachment `index` from `path`,
     // or from `body` when that is set, or fails the message for good if `file_size` says the file

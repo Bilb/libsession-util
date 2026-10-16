@@ -178,6 +178,20 @@ TEST_CASE(
         CHECK(!!(s.c->attachment_data_cached(id, i, await) == expected));
         // The application's file is never rewritten.
         CHECK(!!(read_all(s.dir / cs.name) == cs.file));
+
+        // Told beforehand, from the header alone, what the send then did.
+        if (cs.original_file)
+            continue;
+        auto plan = s.c->attachment_send_plan(s.dir / cs.name, cs.declared, await);
+        switch (cs.sent) {
+            case Sent::converted: CHECK(plan == image::SendPlan::reencoded); break;
+            case Sent::as_is: CHECK(plan == image::SendPlan::as_is); break;
+            case Sent::original_file:
+                CHECK(plan == (std::string_view{cs.name}.starts_with("wave.")
+                                       ? image::SendPlan::original_animated_png
+                                       : image::SendPlan::original_cannot_decode));
+                break;
+        }
     }
 }
 
@@ -206,7 +220,10 @@ TEST_CASE(
                             .find("IDAT");
         REQUIRE(idat != std::string_view::npos);
         damaged[idat + 4] ^= std::byte{0xFF};
-        auto id = send(s, s.write("damaged.png", damaged));
+        // Only decoding it finds that out.
+        CHECK(s.c->attachment_send_plan(s.write("damaged.png", damaged), std::nullopt, await) ==
+              image::SendPlan::reencoded);
+        auto id = send(s, s.dir / "damaged.png");
         until(s.c, [&] { return state(s, id) == SendState::failed; });
         CHECK(codes == std::vector<std::string_view>{err::attachment_unreadable});
         CHECK(s.net->served.empty());
@@ -224,7 +241,9 @@ TEST_CASE(
                     "\xFF\xC0"sv);
         REQUIRE(sof != std::string_view::npos);
         photo.resize(sof);
-        auto id = send(s, s.write("cut.jpg", photo));
+        CHECK(s.c->attachment_send_plan(s.write("cut.jpg", photo), std::nullopt, await) ==
+              image::SendPlan::unreadable);
+        auto id = send(s, s.dir / "cut.jpg");
         until(s.c, [&] { return state(s, id) == SendState::failed; });
         CHECK(codes == std::vector<std::string_view>{err::attachment_unreadable});
         CHECK(s.net->served.empty());
@@ -233,7 +252,10 @@ TEST_CASE(
     SECTION("a picture past the decode limits is refused, not sent as it is") {
         Sandbox s;
         std::span<const std::byte> avif{image_fixtures::avif8_4900x4900};
-        auto id = send(s, s.write("huge.avif", bytes{avif.begin(), avif.end()}));
+        CHECK(s.c->attachment_send_plan(
+                      s.write("huge.avif", bytes{avif.begin(), avif.end()}), std::nullopt, await) ==
+              image::SendPlan::too_large_to_decode);
+        auto id = send(s, s.dir / "huge.avif");
         until(s.c, [&] { return state(s, id) == SendState::unsendable; });
         CHECK(codes == std::vector<std::string_view>{err::attachment_too_large});
         CHECK(s.net->served.empty());
@@ -254,13 +276,40 @@ TEST_CASE(
         network::config::Config config;
         config.custom_file_server_max_file_size = 2'000;
         Sandbox s{config};
-        auto photo = send(s, s.write("photo.jpg", derived_test::picture(640, 480, ".jpg")));
+        // Only re-encoding it finds that it cannot be made small enough.
+        CHECK(s.c->attachment_send_plan(
+                      s.write("photo.jpg", derived_test::picture(640, 480, ".jpg")),
+                      std::nullopt,
+                      await) == image::SendPlan::reencoded);
+        auto photo = send(s, s.dir / "photo.jpg");
         until(s.c, [&] { return state(s, photo) == SendState::unsendable; });
         // Not a picture, so nothing can make it smaller.
-        auto pdf = send(s, s.write("big.pdf", bytes(3000, std::byte{1})));
+        CHECK(s.c->attachment_send_plan(
+                      s.write("big.pdf", bytes(3000, std::byte{1})), std::nullopt, await) ==
+              image::SendPlan::too_large_for_server);
+        CHECK(s.c->attachment_send_plan(s.dir / "big.pdf", "IMAGE/PNG; x=y", await) ==
+              image::SendPlan::too_large_for_server);
+        auto pdf = send(s, s.dir / "big.pdf");
         until(s.c, [&] { return state(s, pdf) == SendState::unsendable; });
         CHECK(codes ==
               std::vector<std::string_view>{err::attachment_too_large, err::attachment_too_large});
         CHECK(s.net->served.empty());
     }
+}
+
+TEST_CASE("Client: a send plan for a file that is not there", "[client][send][pictures]") {
+    Sandbox s;
+    CHECK(s.c->attachment_send_plan(s.dir / "nothing.jpg", std::nullopt, await) ==
+          image::SendPlan::missing);
+    CHECK(s.c->attachment_send_plan(s.dir, std::nullopt, await) == image::SendPlan::missing);
+
+    // The handler form answers the same, read on the disk thread.
+    std::promise<Expected<image::SendPlan>> got;
+    s.c->attachment_send_plan(
+            s.write("photo.jpg", derived_test::picture(64, 48, ".jpg")), std::nullopt, [&](auto r) {
+                got.set_value(std::move(r));
+            });
+    auto r = got.get_future().get();
+    REQUIRE(r);
+    CHECK(*r == image::SendPlan::reencoded);
 }

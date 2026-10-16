@@ -5691,9 +5691,6 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
     }
     auto path = utf8_string(_attachment_file(stored));
     const bool original = (flags & ATTACHMENT_FLAG_ORIGINAL_FILE) != 0;
-    const bool declared_image =
-            content_type &&
-            string_iequal(image::mime_essence(*content_type).substr(0, 6), "image/");
 
     // Checked here rather than only at send_message, because that check is on the other side of
     // however long the message sat waiting: a file present when it was attached can be gone by the
@@ -5704,7 +5701,7 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
                 index = static_cast<size_t>(idx),
                 path = std::move(path),
                 original,
-                declared_image,
+                content_type = std::move(content_type),
                 on_upload = std::move(on_upload)]() mutable {
         std::optional<int64_t> size;
         std::error_code ec;
@@ -5717,7 +5714,7 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
               path = std::move(path),
               size,
               original,
-              declared_image,
+              content_type = std::move(content_type),
               on_upload = std::move(on_upload)]() mutable {
             // TODO: remove a video's metadata (MP4/MOV location) before sending; it goes out as
             // picked.
@@ -5725,7 +5722,12 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
                 return _upload_one(
                         client_id, index, std::move(path), size, nullptr, std::move(on_upload));
             _convert_outgoing(
-                    client_id, index, std::move(path), *size, declared_image, std::move(on_upload));
+                    client_id,
+                    index,
+                    std::move(path),
+                    *size,
+                    std::move(content_type),
+                    std::move(on_upload));
         });
     });
 }
@@ -5735,7 +5737,7 @@ void Client::_convert_outgoing(
         size_t index,
         std::string path,
         int64_t file_size,
-        bool declared_image,
+        std::optional<std::string> content_type,
         Conversation::upload_progress on_upload) {
     enum class Outcome { as_is, original, converted, too_large, unreadable };
     struct Converted {
@@ -5750,11 +5752,9 @@ void Client::_convert_outgoing(
         bool undecodable = false;
     };
 
-    // The limit the upload itself is held to; without a network the upload fails regardless.
-    auto net = core.network();
-    const size_t max_size = net ? net->file_server_config.max_file_size : 10'000'000;
+    const uint64_t max_size = _attachment_size_limit();
 
-    auto convert = [path, file_size, declared_image, max_size, client_id, index] {
+    auto convert = [path, file_size, content_type, max_size, client_id, index] {
         Converted out;
         try {
             // Held whole when it could be sent as it is, so that what is sent is what was looked
@@ -5768,27 +5768,20 @@ void Client::_convert_outgoing(
                 out = Converted{.outcome = Outcome::too_large};
                 return out;
             };
-            auto info = image::probe(source);
-            if (!info) {
-                // A picture whose header is damaged: never sent as it is.
-                if (image::recognized(source))
+            switch (image::send_plan(source, content_type, max_size)) {
+                case image::SendPlan::unreadable:
+                case image::SendPlan::missing:
                     throw std::runtime_error{"its header cannot be read"};
-                if (!fits)
-                    return refuse();
-                // Not a picture libvips knows; one that says it is a picture is shown as a file.
-                out.outcome = declared_image ? Outcome::original : Outcome::as_is;
-                return out;
-            }
-            switch (image::sendable_verdict(*info)) {
-                case image::SendableVerdict::cannot_decode:
-                    if (!fits)
-                        return refuse();
-                    out.outcome = Outcome::original;
-                    return out;
-                case image::SendableVerdict::too_large:
+                case image::SendPlan::too_large_for_server: return refuse();
+                case image::SendPlan::too_large_to_decode:
                     out = Converted{.outcome = Outcome::too_large, .undecodable = true};
                     return out;
-                case image::SendableVerdict::encode: break;
+                case image::SendPlan::original_cannot_decode:
+                case image::SendPlan::original_animated_png:
+                    out.outcome = Outcome::original;
+                    return out;
+                case image::SendPlan::as_is: return out;
+                case image::SendPlan::reencoded: break;
             }
             auto sendable = image::sendable(source, max_size);
             if (!sendable)
@@ -5903,6 +5896,56 @@ void Client::_convert_outgoing(
                     unexpected{Error{err::upload_failed, "the client is shutting down"}});
         _fail_attachment_send(client_id);
     }
+}
+
+uint64_t Client::_attachment_size_limit() {
+    // Without a network the upload fails regardless.
+    auto net = core.network();
+    return net ? net->file_server_config.max_file_size : 10'000'000;
+}
+
+static image::SendPlan send_plan_of(
+        const std::filesystem::path& path,
+        const std::optional<std::string>& content_type,
+        uint64_t max_size) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec) || ec)
+        return image::SendPlan::missing;
+    try {
+        image::Source source{path};
+        return image::send_plan(
+                source, content_type ? *content_type : infer_content_type(path), max_size);
+    } catch (const std::exception&) {
+        return image::SendPlan::unreadable;
+    }
+}
+
+void Client::attachment_send_plan(
+        std::filesystem::path path,
+        std::optional<std::string> content_type,
+        result_function<image::SendPlan> cb) {
+    call([this,
+          path = std::move(path),
+          content_type = std::move(content_type),
+          cb = std::move(cb)]() mutable {
+        _post_disk([this,
+                    path = std::move(path),
+                    content_type = std::move(content_type),
+                    max_size = _attachment_size_limit(),
+                    cb = std::move(cb)]() mutable {
+            auto plan = send_plan_of(path, content_type, max_size);
+            call([this, plan, cb = std::move(cb)]() mutable {
+                _report(cb, Expected<image::SendPlan>{plan});
+            });
+        });
+    });
+}
+
+image::SendPlan Client::attachment_send_plan(
+        const std::filesystem::path& path,
+        const std::optional<std::string>& content_type,
+        await_t) {
+    return send_plan_of(path, content_type, call_get([this] { return _attachment_size_limit(); }));
 }
 
 void Client::_drop_taken_file(int64_t client_id, size_t index) {
