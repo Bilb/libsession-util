@@ -41,9 +41,10 @@ std::optional<std::vector<std::byte>> rendition(Source& source, uint32_t edge);
 /// API: image/rendition_is_original
 ///
 /// Whether the picture `probe` described as `info` is already what `rendition` would make for
-/// `edge`, give or take the encoder: a JPEG or WebP, upright, 8 bits a sample, no larger than the
-/// clamped edge.  What a picture sent by a client that re-encodes (`sendable`) is, so a viewer can
-/// draw the original rather than a second copy of it.
+/// `edge` in format and size: a JPEG or WebP `rendition` would accept, upright, 8 bits a sample,
+/// no larger than the clamped edge.  What a picture sent by a client that re-encodes (`sendable`)
+/// is, so a viewer can draw the original rather than a second copy of it.  Not checked: its colour
+/// profile or metadata, which a viewer draws or ignores as it would the original's.
 bool rendition_is_original(const Info& info, uint32_t edge);
 
 }  // namespace session::image

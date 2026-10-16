@@ -482,15 +482,16 @@ class Client {
     /// An attachment's rendition: the whole picture re-encoded as a JPEG, or a WebP when it has
     /// transparency or is animated, fitting inside a `rendition_edge` box, for a viewer to draw in
     /// place of the original whatever format that was.  See `image::rendition` for exactly what it
-    /// is.
+    /// is.  A picture already a JPEG or WebP within the box (`image::rendition_is_original`) is its
+    /// own rendition, served as it is.
     ///
     /// **From the cache only, never the network.**  Made as soon as a picture Session displays is
     /// cached, after its thumbnail; one cached before that is made when first asked for, queued
     /// ahead of everything else waiting to be made, and the ask fails with `err::no_rendition`.
     /// When it is made, `messages_updated` reports `Attachment::has_rendition` true, and asking
     /// again serves it.  Nothing waits on the decode, which runs on another thread and would
-    /// otherwise deadlock a caller on Core's loop.  Until then, the thumbnail is what there is to
-    /// draw.
+    /// otherwise deadlock a caller on Core's loop.  Until then, the original if the platform
+    /// decodes it, else the thumbnail.
     ///
     /// Kept, evicted, counted and read as a thumbnail is: part of the file's cache entry, gone
     /// with it, and marking the file used when read.  A picture no rendition can be made of is
@@ -1328,6 +1329,8 @@ class Client {
         int64_t entry;
         cache::Derived kind;
         std::optional<std::filesystem::path> plain;  // as `_record_cached`'s
+        // Asked for by someone looking at it: no thumbnail queued later goes ahead of it.
+        bool hurried = false;
     };
     std::deque<PendingDerived> _derived_pending;
     bool _derived_running = false;

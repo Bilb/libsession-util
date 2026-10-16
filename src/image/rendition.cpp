@@ -11,9 +11,9 @@ namespace session::image {
 
 bool rendition_is_original(const Info& info, uint32_t edge) {
     edge = std::clamp(edge, min_rendition_edge, max_rendition_edge);
-    return (info.format == Format::jpeg || info.format == Format::webp) && info.decodable &&
-           info.orientation <= 1 && info.bits_per_sample <= 8 &&
-           std::max(info.width, info.height) <= edge;
+    return (info.format == Format::jpeg || info.format == Format::webp) &&
+           detail::acceptable(info) && info.within_pixel_limits(true) && info.orientation <= 1 &&
+           info.bits_per_sample <= 8 && std::max(info.width, info.height) <= edge;
 }
 
 std::optional<std::vector<std::byte>> rendition(Source& source, uint32_t edge) {

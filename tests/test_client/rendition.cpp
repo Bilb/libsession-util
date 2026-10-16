@@ -249,6 +249,10 @@ TEST_CASE("Client: which pictures get which rendition", "[client][rendition]") {
         CHECK(f.c->attachment_rendition(id, 0, await) == photo);
         CHECK_FALSE(std::filesystem::exists(view_file(f, url)));
         CHECK(f.db_get("SELECT size FROM attachment_derived WHERE kind = ?", rendition_kind) == 0);
+        // Kept across a restart: the sweep looks for no file behind it.
+        f.reopen();
+        CHECK(f.attachment(id).has_rendition);
+        CHECK(f.c->attachment_rendition(id, 0, await) == photo);
     }
 
     SECTION("a large one is drawn at the default edge") {
@@ -258,11 +262,29 @@ TEST_CASE("Client: which pictures get which rendition", "[client][rendition]") {
     }
 
     SECTION("one sent as its original file gets a thumbnail and no rendition") {
-        auto [id, url] = f.arrive(picture(400, 300), "image/png", true, /*ORIGINAL_FILE*/ 2);
+        auto [id, url] = f.arrive(
+                picture(400, 300),
+                "image/png",
+                true,
+                SessionProtos::AttachmentPointer::ORIGINAL_FILE);
         settle(*f.c);
         CHECK(f.attachment(id).has_thumbnail);
         CHECK_FALSE(f.attachment(id).has_rendition);
         CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
-        CHECK(TestHelper::thumbnails_queued(*f.c) == 0);
+        settle(*f.c);
+        CHECK(f.db_get("SELECT count(*) FROM attachment_derived WHERE kind = ?", rendition_kind) ==
+              0);
+    }
+
+    SECTION("an original that cannot be read takes its entry with it") {
+        auto [id, url] = f.arrive(picture(400, 300, ".jpg"), "image/jpeg");
+        settle(*f.c);
+        REQUIRE(f.attachment(id).has_rendition);
+        std::vector<std::byte> junk(3000);
+        random::fill(junk);
+        overwrite(f.file(url), junk);
+        CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
+        CHECK(f.db_get("SELECT count(*) FROM attachment_cache") == 0);
+        CHECK_FALSE(f.attachment(id).has_rendition);
     }
 }

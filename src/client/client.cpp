@@ -828,7 +828,7 @@ void Client::_reconcile_cache(
                                      R"(
             SELECT EXISTS(SELECT 1 FROM attachment_cache c
                 JOIN attachment_derived d ON d.entry = c.id
-                WHERE c.name = ? AND d.kind = ? AND d.size IS NOT NULL)
+                WHERE c.name = ? AND d.kind = ? AND d.size > 0)
         )",
                                      entry,
                                      static_cast<int>(*derived))
@@ -1598,14 +1598,26 @@ void Client::_attachment_rendition(int64_t message_id, size_t index, bytes_answe
     }
 
     // Size 0: the original is already what a viewer draws.
+    const bool original = *rendition == 0;
     _read_cache_file(
             _cache_dir / cache::ATTACHMENT_DIR /
-                    (*rendition == 0 ? *name : cache::derived_name(*name, kind)),
+                    (original ? *name : cache::derived_name(*name, kind)),
             wait,
-            [this, entry = *entry, message_id, index, done = std::move(done)](auto bytes) {
+            [this,
+             entry = *entry,
+             name = *name,
+             original,
+             message_id,
+             index,
+             done = std::move(done)](auto bytes) {
                 if (bytes) {
                     _touch_cached(entry);
                     return done(std::move(*bytes));
+                }
+                // The original itself is what failed to read, and the read has removed it.
+                if (original) {
+                    _drop_unreadable(entry, name);
+                    return done(unexpected{no_rendition(message_id, index).err()});
                 }
                 // Gone from under us, or unreadable and so removed by the read: made again, since
                 // the file it came from may well be fine.
@@ -6596,8 +6608,11 @@ void Client::_queue_derived(
     // A thumbnail goes ahead of every rendition waiting: a tile on screen matters more than a
     // picture a viewer may open, and a rendition can take seconds.
     auto at = kind == cache::Derived::thumbnail
-                    ? std::ranges::find(
-                              _derived_pending, cache::Derived::rendition, &PendingDerived::kind)
+                    ? std::ranges::find_if(
+                              _derived_pending,
+                              [](const PendingDerived& p) {
+                                  return p.kind == cache::Derived::rendition && !p.hurried;
+                              })
                     : _derived_pending.end();
     _derived_pending.insert(at, {entry, kind, std::move(plain)});
     _pump_derived();
@@ -6610,6 +6625,7 @@ void Client::_hurry_derived(int64_t entry, cache::Derived kind) {
     if (it == _derived_pending.end())
         return;
     auto pending = std::move(*it);
+    pending.hurried = true;
     _derived_pending.erase(it);
     _derived_pending.push_front(std::move(pending));
 }
