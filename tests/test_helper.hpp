@@ -3,6 +3,7 @@
 #include <fmt/format.h>
 #include <oxenc/base64.h>
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -484,6 +485,18 @@ class TestHelper {
         c.core.call_get([&c] { c._derived_running = true; });
     }
 
+    /// Waits for whatever the derive loop is running or has queued, unless a test is holding the
+    /// thread (`hold_thumbnail_thread`), when waiting would be waiting on the test itself.
+    template <typename Client>
+    static void drain_derive_loop(Client& c) {
+        if (derive_holds > 0)
+            return;
+        // Through the queue rather than the loop, so this runs behind whatever is already queued.
+        c._derive_jq->call_get([] { return 0; });
+    }
+
+    inline static std::atomic<int> derive_holds{0};
+
     /// Undoes `stall_thumbnails`: whatever queued meanwhile is made now.
     template <typename Client>
     static void resume_thumbnails(Client& c) {
@@ -528,7 +541,11 @@ class TestHelper {
     template <typename Client>
     static std::shared_ptr<std::promise<void>> hold_thumbnail_thread(Client& c) {
         auto release = std::make_shared<std::promise<void>>();
-        c._post_derive([f = release->get_future().share()] { f.wait(); });
+        // Let go when the job is destroyed, run or dropped by a queue that stopped first: the
+        // count must not outlive the Client it was taken on.
+        ++derive_holds;
+        std::shared_ptr<void> held{nullptr, [](void*) { --derive_holds; }};
+        c._post_derive([f = release->get_future().share(), held] { f.wait(); });
         return release;
     }
     template <typename Client>
