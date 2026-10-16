@@ -92,11 +92,13 @@ struct TempClient {
     }
 };
 
-/// Opens `path` as an install from before client migration `first_missing` has it: the client
-/// schema built from `client_schema_base` with every migration ahead of `first_missing` replayed,
-/// which is the client schema an upgraded install has, under today's Core schema (Core's own
-/// migrations are not replayed).  A Client opened on it afterwards runs the rest.  An empty name
-/// replays every migration.
+/// Opens `path` with the client schema an install from before client migration `first_missing`
+/// has: built from `client_schema_base`, with every migration ahead of `first_missing` replayed.
+/// A Client opened on it afterwards runs the rest.  An empty name replays every migration.
+///
+/// Only the client chain is replayed.  Core's own tables are today's, since a new file gets
+/// Core's current schema in one step; a client migration that reads a Core table whose shape has
+/// changed since is schema_history_check.sh's to catch, not this helper's.
 ///
 /// Two opens, because Core builds an owner's schema from a full schema only while none of its
 /// migrations are recorded, and never replays onto one it built.
