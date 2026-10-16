@@ -374,13 +374,12 @@ class Conversation {
     /// it can fire before this function returns, so it must not depend on anything the caller sets
     /// up afterwards.
     ///
-    /// The files are read at this point, not when they were attached, so they must still exist.
-    /// Nothing about them is stored: what persists is the message, whose content names the uploaded
-    /// copies.  Re-sending a failed message therefore uploads again.
+    /// The files are only checked here.  Each is read when its upload comes up, and again by a
+    /// retry that still has to upload it, so it must stay at its `path`, unchanged, until then.
     ///
-    /// @throws std::invalid_argument if any attachment's file cannot be opened or exceeds the file
-    /// server's limit, or if `reply_to` names a message that does not exist or belongs to another
-    /// conversation; thrown on the calling thread, before anything is stored or dispatched.
+    /// @throws std::invalid_argument if any attachment's file is not a readable, non-empty file,
+    /// or if `reply_to` names a message that does not exist or belongs to another conversation;
+    /// thrown on the calling thread, before anything is stored or dispatched.
     using upload_progress = std::function<void(
             size_t index, int64_t sent, int64_t total, std::optional<Expected<void>> result)>;
     void send_message(OutgoingMessage msg, upload_progress on_upload, result_function<int64_t> cb);

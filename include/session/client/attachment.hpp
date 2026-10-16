@@ -20,7 +20,8 @@ constexpr size_t MAX_THUMBHASH_SIZE = 25;
 /// and uploaded when the message is sent, not when it is attached, so a caller can hold these
 /// against a draft for as long as the user takes to write it.
 struct OutgoingAttachment {
-    /// The file to send.  Read at send time, so it must still be there and unchanged by then.
+    /// The file to send.  Read when its upload comes up and again by any retry, not by
+    /// `send_message` itself, so it must stay here, unchanged, until the upload is done.
     std::filesystem::path path;
 
     /// MIME type to advertise.  Recipients use it to decide how to display the attachment; when
