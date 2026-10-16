@@ -22,9 +22,9 @@
 #include <session/format.hpp>
 #include <session/hash.hpp>
 #include <session/image/content_types.hpp>
-#include <session/image/location.hpp>
 #include <session/image/probe.hpp>
 #include <session/image/rendition.hpp>
+#include <session/image/sendable.hpp>
 #include <session/image/thumbhash.hpp>
 #include <session/image/thumbnail.hpp>
 #include <session/network/backends/session_file_server.hpp>
@@ -89,6 +89,7 @@ static std::optional<MsgId> msgid_of(const SessionProtos::Content& content) {
 // AttachmentPointer.Flags.VOICE_MESSAGE.  Mirrored rather than taken from the generated header so
 // that the column's meaning is legible where it is written.
 constexpr int ATTACHMENT_FLAG_VOICE_MESSAGE = 1;
+constexpr int ATTACHMENT_FLAG_ORIGINAL_FILE = 2;
 
 // An attachment is a whole file rather than a swarm request, so it gets its own, longer allowances:
 // the per-request one covers a stalled transfer, and the overall one bounds the upload entire.
@@ -4477,6 +4478,7 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
                 .content_type = std::move(ctype),
                 .filename = std::move(fname),
                 .voice_message = (flags & ATTACHMENT_FLAG_VOICE_MESSAGE) != 0,
+                .original_file = (flags & ATTACHMENT_FLAG_ORIGINAL_FILE) != 0,
                 .width = width ? std::optional{static_cast<uint32_t>(*width)} : std::nullopt,
                 .height = height ? std::optional{static_cast<uint32_t>(*height)} : std::nullopt,
                 .thumbhash = thumbhash ? std::optional{std::vector<std::byte>{
@@ -4876,39 +4878,6 @@ std::optional<std::string> Client::_message_debug(int64_t message_id) {
 
 namespace {
 
-    // `path`'s bytes with any location metadata removed, or null when it is not a picture read
-    // for that or carries none.  What goes out, and what our own cached copy holds, in place of
-    // the file: the file itself is the application's, and is never rewritten.
-    //
-    // Throws when a picture cannot be read whole, or holds a location this cannot remove, since
-    // sending it as it is could send a location.
-    std::shared_ptr<const std::vector<std::byte>> outgoing_without_location(
-            const std::filesystem::path& path) {
-        std::ifstream in;
-        in.exceptions(std::ios::badbit);
-        in.open(path, std::ios::binary | std::ios::ate);
-        if (!in)
-            return nullptr;
-        const auto size = static_cast<uintmax_t>(in.tellg());
-        std::array<std::byte, image::location_sniff_size> buf;
-        const auto sniffed = static_cast<size_t>(std::min<uintmax_t>(size, buf.size()));
-        in.seekg(0);
-        in.read(reinterpret_cast<char*>(buf.data()), sniffed);
-        const auto head = std::span{buf}.first(sniffed);
-        if (static_cast<size_t>(in.gcount()) != sniffed || !image::may_carry_location(head))
-            return nullptr;
-
-        std::vector<std::byte> file(static_cast<size_t>(size));
-        std::ranges::copy(head, file.begin());
-        in.read(reinterpret_cast<char*>(file.data()) + sniffed,
-                static_cast<std::streamsize>(size - sniffed));
-        if (static_cast<uintmax_t>(in.gcount()) != size - sniffed)
-            throw std::runtime_error{"{} changed while it was read"_format(path.string())};
-        if (auto cleaned = image::without_location(file))
-            return std::make_shared<const std::vector<std::byte>>(*std::move(cleaned));
-        return nullptr;
-    }
-
     // The reference a quote puts on the wire, read from the message being replied to.
     struct WireRef {
         b33 author;
@@ -5214,7 +5183,8 @@ int64_t Client::_send_message(
                     a.path.string(),
                     a.content_type ? *a.content_type : infer_content_type(a.path),
                     a.filename ? a.filename : std::optional{a.path.filename().string()},
-                    a.voice_message ? ATTACHMENT_FLAG_VOICE_MESSAGE : 0,
+                    (a.voice_message ? ATTACHMENT_FLAG_VOICE_MESSAGE : 0) |
+                            (a.original_file ? ATTACHMENT_FLAG_ORIGINAL_FILE : 0),
                     a.width ? std::optional<int64_t>{*a.width} : std::nullopt,
                     a.height ? std::optional<int64_t>{*a.height} : std::nullopt,
                     a.thumbhash);
@@ -5261,9 +5231,9 @@ void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress o
             SELECT idx, path, width IS NOT NULL, height IS NOT NULL, thumbhash IS NOT NULL
             FROM message_attachments
             WHERE message = ?1 AND url IS NULL AND path IS NOT NULL
-              AND content_type IS NOT NULL AND {}
+              AND content_type IS NOT NULL AND {} AND flags & {} = 0
             ORDER BY idx
-        )"_format(DISPLAYABLE_IMAGE_SQL),
+        )"_format(DISPLAYABLE_IMAGE_SQL, ATTACHMENT_FLAG_ORIGINAL_FILE),
                      client_id))
             if (!(w && h) || !thumbhash)
                 wanted.push_back({idx, std::move(path), !(w && h), !thumbhash});
@@ -5287,9 +5257,17 @@ void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress o
             Derived d{want.idx};
             try {
                 image::Source source{std::filesystem::path{want.path}};
+                // The size it will be sent at, which the re-encode makes exact before the upload.
                 if (want.needs_size)
-                    if (auto info = image::probe(source); info && info->width && info->height)
-                        d.size = std::pair{info->width, info->height};
+                    if (auto info = image::probe(source); info && info->width && info->height) {
+                        const uint64_t longer = std::max(info->width, info->height);
+                        const uint64_t box = std::min<uint64_t>(longer, image::sendable_edge);
+                        d.size = std::pair{
+                                static_cast<uint32_t>(
+                                        std::max<uint64_t>(1, info->width * box / longer)),
+                                static_cast<uint32_t>(
+                                        std::max<uint64_t>(1, info->height * box / longer))};
+                    }
                 if (want.needs_placeholder)
                     d.placeholder = image::thumbhash::of_picture(source);
             } catch (const std::exception& e) {
@@ -5338,12 +5316,12 @@ void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress o
 }
 
 void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_upload) {
-    std::optional<std::tuple<int64_t, std::string>> next;
+    std::optional<std::tuple<int64_t, std::string, int64_t>> next;
     {
         auto c = core.database().conn();
-        next = c.prepared_maybe_get<int64_t, std::string>(
+        next = c.prepared_maybe_get<int64_t, std::string, int64_t>(
                 R"(
-            SELECT idx, path FROM message_attachments
+            SELECT idx, path, flags FROM message_attachments
             WHERE message = ? AND url IS NULL
             ORDER BY idx LIMIT 1
         )",
@@ -5354,7 +5332,8 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
     if (!next)
         return _finish_attachment_send(client_id);
 
-    auto [idx, path] = *next;
+    auto [idx, path, flags] = *next;
+    const bool original = (flags & ATTACHMENT_FLAG_ORIGINAL_FILE) != 0;
 
     // Checked here rather than only at send_message, because that check is on the other side of
     // however long the message sat waiting: a file present when it was attached can be gone by the
@@ -5364,37 +5343,173 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
                 client_id,
                 index = static_cast<size_t>(idx),
                 path = std::move(path),
+                original,
                 on_upload = std::move(on_upload)]() mutable {
         std::optional<int64_t> size;
-        std::shared_ptr<const std::vector<std::byte>> body;
         std::error_code ec;
         auto found = std::filesystem::file_size(path, ec);
-        if (!ec && std::filesystem::is_regular_file(path, ec) && !ec) {
+        if (!ec && std::filesystem::is_regular_file(path, ec) && !ec)
             size = static_cast<int64_t>(found);
-            try {
-                if ((body = outgoing_without_location(path)))
-                    size = static_cast<int64_t>(body->size());
-            } catch (const std::exception& e) {
-                log::warning(
-                        cat,
-                        "Attachment {} of message {} cannot be read: {}",
-                        index,
-                        client_id,
-                        e.what());
-                size.reset();
-            }
-        }
         call([this,
               client_id,
               index,
               path = std::move(path),
               size,
-              body = std::move(body),
+              original,
               on_upload = std::move(on_upload)]() mutable {
-            _upload_one(
-                    client_id, index, std::move(path), size, std::move(body), std::move(on_upload));
+            // TODO: remove a video's metadata (MP4/MOV location) before sending; it goes out as
+            // picked.
+            if (!size || original)
+                return _upload_one(
+                        client_id, index, std::move(path), size, nullptr, std::move(on_upload));
+            _convert_outgoing(client_id, index, std::move(path), *size, std::move(on_upload));
         });
     });
+}
+
+void Client::_convert_outgoing(
+        int64_t client_id,
+        size_t index,
+        std::string path,
+        int64_t file_size,
+        Conversation::upload_progress on_upload) {
+    enum class Outcome { not_a_picture, original, converted, too_large };
+    struct Converted {
+        Outcome outcome = Outcome::not_a_picture;
+        std::shared_ptr<const std::vector<std::byte>> body;
+        std::string content_type;
+        uint32_t width = 0, height = 0;
+        std::optional<std::vector<std::byte>> thumbhash;
+    };
+
+    // The limit the upload itself is held to; without a network the upload fails regardless.
+    auto net = core.network();
+    const size_t max_size = net ? net->file_server_config.max_file_size : 10'000'000;
+
+    auto convert = [path, max_size, client_id, index] {
+        Converted out;
+        try {
+            image::Source source{std::filesystem::path{path}};
+            auto info = image::probe(source);
+            if (!info)
+                return out;
+            // A picture, from here on: one that cannot be re-encoded goes as the original, at the
+            // size it is rather than the one the placeholder stage expected it to be sent at.
+            out.outcome = Outcome::original;
+            out.width = info->width;
+            out.height = info->height;
+            auto sendable = image::sendable(source, max_size);
+            if (!sendable) {
+                out.outcome = Outcome::too_large;
+                return out;
+            }
+            image::Source sent{std::span<const std::byte>{sendable->bytes}};
+            out.thumbhash = image::thumbhash::of_picture(sent);
+            out.outcome = Outcome::converted;
+            out.content_type = std::move(sendable->content_type);
+            out.width = sendable->width;
+            out.height = sendable->height;
+            out.body = std::make_shared<const std::vector<std::byte>>(std::move(sendable->bytes));
+        } catch (const std::exception& e) {
+            log::info(
+                    cat,
+                    "Attachment {} of message {} is sent as it is: {}",
+                    index,
+                    client_id,
+                    e.what());
+        }
+        return out;
+    };
+
+    auto finish = [this, client_id, index, path, file_size, on_upload](Converted c) mutable {
+        switch (c.outcome) {
+            case Outcome::not_a_picture: break;
+            case Outcome::original: {
+                core.database().conn().prepared_exec(
+                        "UPDATE message_attachments SET flags = flags | ?3,"
+                        " width = coalesce(?4, width), height = coalesce(?5, height)"
+                        " WHERE message = ?1 AND idx = ?2",
+                        client_id,
+                        static_cast<int64_t>(index),
+                        ATTACHMENT_FLAG_ORIGINAL_FILE,
+                        c.width ? std::optional<int64_t>{c.width} : std::nullopt,
+                        c.height ? std::optional<int64_t>{c.height} : std::nullopt);
+                _emit_message(false, client_id);
+                break;
+            }
+            case Outcome::too_large: {
+                log::warning(
+                        cat,
+                        "Attachment {} of message {} does not fit the file server even re-encoded",
+                        index,
+                        client_id);
+                if (on_upload)
+                    on_upload(
+                            index,
+                            0,
+                            0,
+                            unexpected{
+                                    Error{err::attachment_too_large,
+                                          "the picture does not fit the file server's limit"}});
+                return _fail_attachment_send(client_id, /*permanent=*/true);
+            }
+            case Outcome::converted: {
+                {
+                    auto conn = core.database().conn();
+                    auto name = conn.prepared_maybe_get<std::optional<std::string>>(
+                            "SELECT filename FROM message_attachments"
+                            " WHERE message = ?1 AND idx = ?2",
+                            client_id,
+                            static_cast<int64_t>(index));
+                    std::filesystem::path renamed{
+                            name && *name ? **name
+                                          : std::filesystem::path{path}.filename().string()};
+                    renamed.replace_extension(c.content_type == "image/webp" ? ".webp" : ".jpg");
+                    conn.prepared_exec(
+                            R"(
+                        UPDATE message_attachments
+                        SET content_type = ?3, filename = ?4, width = ?5, height = ?6,
+                            thumbhash = ?7
+                        WHERE message = ?1 AND idx = ?2 AND url IS NULL
+                    )",
+                            client_id,
+                            static_cast<int64_t>(index),
+                            c.content_type,
+                            renamed.string(),
+                            static_cast<int64_t>(c.width),
+                            static_cast<int64_t>(c.height),
+                            c.thumbhash);
+                    // A picture sent as one now, whatever the file was (a HEIC, say).
+                    default_gallery(conn, client_id);
+                }
+                _emit_message(false, client_id);
+                auto size = static_cast<int64_t>(c.body->size());
+                return _upload_one(
+                        client_id,
+                        index,
+                        std::move(path),
+                        size,
+                        std::move(c.body),
+                        std::move(on_upload));
+            }
+        }
+        _upload_one(client_id, index, std::move(path), file_size, nullptr, std::move(on_upload));
+    };
+
+    // Behind whatever the derive loop is making, as a thumbnail is.
+    bool posted = _post_derive([this, convert, finish]() mutable {
+        call([finish, converted = convert()]() mutable { finish(std::move(converted)); });
+    });
+    // Not sent unconverted: a picture going out as it is would carry everything it holds.
+    if (!posted) {
+        if (on_upload)
+            on_upload(
+                    index,
+                    0,
+                    0,
+                    unexpected{Error{err::upload_failed, "the client is shutting down"}});
+        _fail_attachment_send(client_id);
+    }
 }
 
 void Client::_upload_one(
