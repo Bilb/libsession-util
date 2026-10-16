@@ -116,10 +116,10 @@ TEST_CASE("Client: an animation's rendition is animated", "[client][picture]") {
 }
 
 TEST_CASE(
-        "Client: an animated PNG has a thumbnail and no rendition, whatever it is labelled",
+        "Client: an animated PNG labelled a PNG has a thumbnail and no rendition",
         "[client][picture][rendition]") {
     Fixture f;
-    auto type = GENERATE("image/apng", "IMAGE/APNG; charset=binary", "image/png");
+    auto type = GENERATE("image/png", " IMAGE/PNG ; charset=binary");
     INFO(type);
     auto [id, url] = f.arrive(image_test::animated_png(picture(400, 300), 3), type);
     settle(*f.c);
@@ -134,4 +134,14 @@ TEST_CASE(
     CHECK(a.picture->rendition_refused);
     CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
     CHECK(f.c->message(id, await)->gallery);
+}
+
+TEST_CASE("Client: an attachment labelled image/apng is a file", "[client][picture]") {
+    Fixture f;
+    auto [id, url] = f.arrive(image_test::animated_png(picture(400, 300), 3), "image/apng");
+    settle(*f.c);
+    auto a = f.attachment(id);
+    CHECK_FALSE(a.has_thumbnail);
+    CHECK_FALSE(a.has_rendition);
+    CHECK_FALSE(f.c->message(id, await)->gallery_viewable);
 }

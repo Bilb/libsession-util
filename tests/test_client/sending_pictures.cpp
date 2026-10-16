@@ -134,7 +134,7 @@ TEST_CASE(
         {"notes.pdf", bytes(300, std::byte{1}), false, "application/pdf", "notes.pdf", Sent::as_is},
         {"untouched.jpg", photo, true, "image/jpeg", "untouched.jpg", Sent::original_file, 640, 480, true},
         {"wave.png", animated_png(derived_test::picture(64, 48, ".png")), false, "image/png", "wave.png", Sent::original_file, 64, 48, true},
-        {"wave.apng", animated_png(derived_test::picture(64, 48, ".png")), false, "image/apng", "wave.apng", Sent::original_file, 64, 48, true, "image/apng"},
+        {"wave.apng", animated_png(derived_test::picture(64, 48, ".png")), false, "image/apng", "wave.apng", Sent::original_file, 0, 0, false, "image/apng"},
         // A content type's parameters, case and spacing do not stop the placeholder being read.
         {"kept.jpg", photo, true, " IMAGE/JPEG ; charset=binary", "kept.jpg", Sent::original_file, 640, 480, true, " IMAGE/JPEG ; charset=binary"},
         // A picture type libvips does not read: shown as a file, sent as it is.

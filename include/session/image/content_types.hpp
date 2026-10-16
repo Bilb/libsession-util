@@ -17,14 +17,13 @@ namespace session::image {
 /// convert HEIC to JPEG before sending, so one that arrives anyway is treated as a file.
 ///
 /// `image/jpg` and `image/pjpeg` are not registered types, but are what some senders label JPEGs.
-/// `image/apng` is an animated PNG, which libvips decodes as its first frame only: it has a
-/// thumbnail but no rendition, and is sent as its original file.
-inline constexpr std::array<std::string_view, 8> displayable_image_types{
+/// `image/apng` is absent, so is shown as a file; an animated PNG labelled `image/png` is shown as
+/// a picture, from its first frame (`Info::first_frame_only`).
+inline constexpr std::array<std::string_view, 7> displayable_image_types{
         "image/jpeg",
         "image/jpg",
         "image/pjpeg",
         "image/png",
-        "image/apng",
         "image/webp",
         "image/gif",
         "image/avif",

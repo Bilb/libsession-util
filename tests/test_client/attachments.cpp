@@ -2148,7 +2148,6 @@ TEST_CASE("Client: only image types we display count as images", "[client][attac
             {"image/webp", true},
             {"image/gif", true},
             {"image/avif", true},
-            {"image/apng", true},
             // MIME types are case-insensitive, and parameters do not change what the file is.
             {"IMAGE/PNG", true},
             {"Image/WebP", true},
@@ -2156,6 +2155,8 @@ TEST_CASE("Client: only image types we display count as images", "[client][attac
             {" IMAGE/PNG ; foo=bar", true},
             {"image/jpegx", false},
             {"image/jpeg2000", false},
+            // Shown as a file: libvips would decode only its first frame.
+            {"image/apng", false},
             // Image types we will not decode, so not images as far as presentation goes.
             {"image/svg+xml", false},
             {"image/tiff", false},
