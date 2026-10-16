@@ -332,3 +332,22 @@ TEST_CASE("Client: a taken file goes when its message turns unsendable", "[clien
     CHECK(s.c->message(id, await)->attachments[0].availability == AttachmentAvailability::absent);
     CHECK_THROWS(s.c->attachment_data_cached(id, 0, await));
 }
+
+TEST_CASE("Client: a sweep keeps a file taken for a send not yet stored", "[client][send][take]") {
+    Sandbox s;
+    auto body = contents(3000);
+    auto file = s.write("racing.bin", body);
+    OutgoingMessage msg{.attachments = {OutgoingAttachment{.path = file, .take_file = true}}};
+    auto taken = TestHelper::take_files(*s.c, msg);
+    auto copy = s.cache.path / msg.attachments[0].path;
+    REQUIRE(std::filesystem::exists(copy));
+
+    TestHelper::sweep_outgoing(*s.c);
+    sync(*s.c);
+    CHECK(std::filesystem::exists(copy));
+
+    // Dropped without its message being stored: the copy goes and the caller's file stays.
+    taken.reset();
+    CHECK_FALSE(std::filesystem::exists(copy));
+    CHECK(read_all(file) == body);
+}

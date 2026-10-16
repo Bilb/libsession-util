@@ -373,27 +373,17 @@ CREATE TABLE message_attachments (
     -- protobuf and how a progress report names one of them.
     idx INTEGER NOT NULL,
 
-    -- Where the file is, or came from: for an outgoing attachment the one we uploaded, for an
+    -- Where the file is, or came from: for an outgoing attachment the one we upload, for an
     -- incoming one where the user asked us to save the download (NULL until they do).
     --
-    -- Informational rather than owning -- closer to a symlink than a handle.  The file at the far
-    -- end belongs to the user in both directions: they chose it to attach, or they chose where to
-    -- put it.  So it may be moved or deleted behind our back (only fatal while this row still needs
-    -- uploading), and nothing here ever unlinks it.
+    -- An absolute path names the user's file, in either direction, and nothing here unlinks it.
+    -- It may be moved or deleted behind our back, which is only fatal while the row still needs
+    -- uploading.
     --
-    -- A cache of our own -- attachments kept encrypted so they outlive the file server -- would be a
-    -- third thing, at a path we picked, and wants its own column: that is what a
-    -- delete-attachments-before instruction is entitled to remove, and sharing this column would
-    -- leave it unable to tell our copy from the user's.
-    --
-    -- Such a cache cannot be freed by deleting files alongside the rows that name them, because the
-    -- rows go by cascade when a conversation is deleted and no code of ours runs.  It wants the same
-    -- treatment as everything else here: compare and converge.  List the cached paths still
-    -- referenced, list the cache directory, unlink the difference.  That survives a cascade, and
-    -- also collects what a crash mid-download left behind -- which collecting paths before a delete
-    -- never would.  It needs a directory we own outright, since "anything not in the list" is only
-    -- safe there, and it must not eat a download in flight: either the row exists before the
-    -- transfer starts, or the sweep skips the in-progress suffix.
+    -- `outgoing/<name>` names a file a send took over (`OutgoingAttachment::take_file`), relative
+    -- to the cache directory because that directory's absolute path can change between runs.  It
+    -- is ours: removed once uploaded or once its message is unsendable, and otherwise collected by
+    -- listing the directory against these rows, which also covers rows that went by cascade.
     path TEXT,
 
     -- Descriptive fields, carried straight through the protobuf pointer in both directions.

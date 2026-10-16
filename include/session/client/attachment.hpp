@@ -31,8 +31,12 @@ struct OutgoingAttachment {
     /// `SendState::unsendable`, or when its message is deleted.
     ///
     /// The caller's file is removed once the message is stored, and must not be used afterwards.
-    /// A send that throws, or whose callback reports an error, leaves the file at `path`.  A
-    /// symbolic link is refused.
+    /// Until then it is untouched, and it stays at `path` whenever the message is never stored,
+    /// which includes every send that throws.  A symbolic link is refused.
+    ///
+    /// The file is hard-linked into place, or copied where it cannot be (across filesystems, say).
+    /// Either happens on the calling thread, so a copy of a large file blocks the `send_message`
+    /// call, callback form included.
     ///
     /// Until it is uploaded, `Client::attachment_data` and `attachment_data_cached` serve it and
     /// `Attachment::availability` says `cached`, since the caller no longer has it to draw from.

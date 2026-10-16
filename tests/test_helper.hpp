@@ -480,6 +480,18 @@ class TestHelper {
         return c._cache_path(kind, url);
     }
 
+    /// Takes a message's `take_file` attachments as `send_message` does, without sending: the
+    /// window between a file being taken and its message being stored, held open.
+    template <typename Client, typename Message>
+    static auto take_files(Client& c, Message& msg) {
+        return c._take_files(msg);
+    }
+
+    template <typename Client>
+    static void sweep_outgoing(Client& c) {
+        c._sweep_outgoing();
+    }
+
     /// Whether a Client has no thumbnail queued or being made.  Made on a thread of their own and
     /// then written and recorded, so this is the only way a test can know that nothing more is
     /// coming, rather than that nothing has come yet.

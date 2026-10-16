@@ -4260,13 +4260,8 @@ WHERE id = ?1
             c.prepared_exec("DELETE FROM contacts WHERE account = ?", account);
 
             // Messages, their raw content and their attachments go with the conversation, by
-            // cascade.  The files those attachments name are the user's -- theirs to attach, or
-            // theirs to have saved -- so nothing is unlinked.
-            //
-            // That stops being the whole story once attachments are cached: a cached file *is*
-            // ours, and cascade will take the row naming it without any of our code running,
-            // leaving the file on disk with nothing left pointing at it.  Whatever adds that cache
-            // has to collect the paths here, before this delete, rather than trusting the cascade.
+            // cascade.  The files a user's paths name are theirs and are not unlinked; those a send
+            // took are ours, and `_attachments_deleted` collects them after the cascade.
             if (c.prepared_exec("DELETE FROM conversations WHERE dm = ?", account) > 0)
                 removed.push_back(id);
         }
