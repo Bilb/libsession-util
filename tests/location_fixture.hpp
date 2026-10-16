@@ -194,4 +194,90 @@ inline buffer jpeg_with(std::vector<buffer> segments) {
     return out;
 }
 
+// MARK: HEIF
+
+inline buffer heif_box(std::string_view type, const buffer& body) {
+    Writer w{false};
+    w.u32(static_cast<uint32_t>(body.size() + 8));
+    for (char c : type)
+        w.u8(c);
+    w.out.insert(w.out.end(), body.begin(), body.end());
+    return w.out;
+}
+
+inline buffer full_box(std::string_view type, uint8_t version, const buffer& body) {
+    buffer b{std::byte{version}, {}, {}, {}};
+    b.insert(b.end(), body.begin(), body.end());
+    return heif_box(type, b);
+}
+
+// A HEIC holding one metadata item, `item`, of type `type` ("Exif", or "mime" for XMP).
+struct HeifLayout {
+    uint8_t iloc_version = 0;
+    uint16_t method = 0;  // 1 puts the item in `idat`
+    std::string_view major = "heic";
+};
+
+inline buffer heif_with(std::string_view type, const buffer& item, HeifLayout layout = {}) {
+    auto build = [&](uint32_t offset) {
+        Writer infe{false};
+        infe.u16(1);
+        infe.u16(0);
+        for (char c : type)
+            infe.u8(c);
+        infe.u8(0);  // name
+        if (type == "mime")
+            for (char c : "application/rdf+xml"sv)
+                infe.u8(c);
+        if (type == "mime")
+            infe.u8(0);
+        Writer iinf{false};
+        iinf.u16(1);
+        auto entry = full_box("infe", 2, infe.out);
+        iinf.out.insert(iinf.out.end(), entry.begin(), entry.end());
+
+        Writer iloc{false};
+        iloc.u8(0x44);
+        iloc.u8(0x00);
+        iloc.u16(1);
+        iloc.u16(1);  // item id
+        if (layout.iloc_version > 0)
+            iloc.u16(layout.method);
+        iloc.u16(0);  // data reference
+        iloc.u16(1);  // extents
+        iloc.u32(layout.method == 1 ? 0 : offset);
+        iloc.u32(static_cast<uint32_t>(item.size()));
+
+        buffer meta_body;
+        for (auto b :
+             {full_box("iinf", 0, iinf.out), full_box("iloc", layout.iloc_version, iloc.out)})
+            meta_body.insert(meta_body.end(), b.begin(), b.end());
+        if (layout.method == 1) {
+            auto idat = heif_box("idat", item);
+            meta_body.insert(meta_body.end(), idat.begin(), idat.end());
+        }
+        auto ftyp = bytes_of(layout.major);
+        auto brands = bytes_of("\0\0\0\0mif1heic"sv);
+        ftyp.insert(ftyp.end(), brands.begin(), brands.end());
+        auto file = heif_box("ftyp", ftyp);
+        auto meta = full_box("meta", 0, meta_body);
+        file.insert(file.end(), meta.begin(), meta.end());
+        auto mdat = heif_box("mdat", layout.method == 1 ? buffer{} : item);
+        file.insert(file.end(), mdat.begin(), mdat.end());
+        return file;
+    };
+    auto probe = build(0);
+    return build(static_cast<uint32_t>(probe.size() - (layout.method == 1 ? 0 : item.size())));
+}
+
+inline buffer exif_item(bool with_gps = true) {
+    Writer item{false};
+    item.u32(6);
+    auto exif = bytes_of("Exif\0\0"sv);
+    auto tiff = exif_tiff(false, with_gps);
+    item.out.insert(item.out.end(), exif.begin(), exif.end());
+    item.out.insert(item.out.end(), tiff.begin(), tiff.end());
+    return item.out;
+}
+
 }  // namespace location_fixture

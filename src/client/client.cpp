@@ -4882,7 +4882,8 @@ namespace {
     // for that or carries none.  What goes out, and what our own cached copy holds, in place of
     // the file: the file itself is the application's, and is never rewritten.
     //
-    // Throws when a picture cannot be read whole, since sending it as it is could send a location.
+    // Throws when a picture cannot be read whole, or holds a location this cannot remove, since
+    // sending it as it is could send a location.
     std::shared_ptr<const std::vector<std::byte>> outgoing_without_location(
             const std::filesystem::path& path) {
         std::ifstream in;
@@ -4891,17 +4892,19 @@ namespace {
         if (!in)
             return nullptr;
         const auto size = static_cast<uintmax_t>(in.tellg());
-        std::array<std::byte, image::location_sniff_size> head;
+        std::array<std::byte, image::location_sniff_size> buf;
+        const auto sniffed = static_cast<size_t>(std::min<uintmax_t>(size, buf.size()));
         in.seekg(0);
-        in.read(reinterpret_cast<char*>(head.data()), head.size());
-        if (static_cast<size_t>(in.gcount()) != head.size() || !image::may_carry_location(head))
+        in.read(reinterpret_cast<char*>(buf.data()), sniffed);
+        const auto head = std::span{buf}.first(sniffed);
+        if (static_cast<size_t>(in.gcount()) != sniffed || !image::may_carry_location(head))
             return nullptr;
 
         std::vector<std::byte> file(static_cast<size_t>(size));
         std::ranges::copy(head, file.begin());
-        in.read(reinterpret_cast<char*>(file.data()) + head.size(),
-                static_cast<std::streamsize>(size - head.size()));
-        if (static_cast<uintmax_t>(in.gcount()) != size - head.size())
+        in.read(reinterpret_cast<char*>(file.data()) + sniffed,
+                static_cast<std::streamsize>(size - sniffed));
+        if (static_cast<uintmax_t>(in.gcount()) != size - sniffed)
             throw std::runtime_error{"{} changed while it was read"_format(path.string())};
         if (auto cleaned = image::without_location(file))
             return std::make_shared<const std::vector<std::byte>>(*std::move(cleaned));
@@ -6080,9 +6083,8 @@ void Client::_cache_outgoing_attachment(
     if (_cache_dir.empty())
         return;
 
-    // Read back rather than passed in: the upload has just written this row, and threading what
-    // this needs through the network callback would grow what that has to carry for something that
-    // is not part of sending.
+    // The message read back from the row the upload has just written, rather than carried through
+    // the network callback; only the bytes sent, which the row cannot hold, come that way.
     auto msg = _message(client_id);
     if (!msg)
         return;

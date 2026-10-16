@@ -131,6 +131,37 @@ TEST_CASE(
     std::filesystem::remove_all(dir);
 }
 
+TEST_CASE(
+        "Client: a picture whose location cannot be removed is not sent",
+        "[client][send][location]") {
+    TempClient c;
+    auto* net = attach_mock_network(c->core);
+    auto me = own_sid(*c);
+    TestHelper::seed_pfs_nak(c->core, me);
+
+    auto dir = std::filesystem::temp_directory_path() / random::unique_id("test_location", 7);
+    std::filesystem::create_directories(dir);
+    auto photo = dir / "photo.heic";
+    // Its EXIF is stored by reference to another item, which the reader does not follow.
+    auto original = location_fixture::heif_with(
+            "Exif", location_fixture::exif_item(), {.iloc_version = 1, .method = 2});
+    {
+        std::ofstream out{photo, std::ios::binary};
+        out.write(reinterpret_cast<const char*>(original.data()), original.size());
+    }
+
+    auto id = c->send_message(
+            ConversationId::dm(me),
+            {.attachments = {OutgoingAttachment{.path = photo, .content_type = "image/heic"}}},
+            await);
+    sync(*c);
+
+    CHECK(net->served.empty());
+    // For good: retrying would meet the same file.
+    CHECK(c->message(id, await)->send_state == SendState::unsendable);
+    std::filesystem::remove_all(dir);
+}
+
 TEST_CASE("Client: a file with no location goes out as it is", "[client][send][location]") {
     TempClient c;
     auto* net = attach_mock_network(c->core);

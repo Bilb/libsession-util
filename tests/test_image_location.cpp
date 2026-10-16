@@ -302,7 +302,7 @@ TEST_CASE("Location: a WebP's XMP naming a place goes, with its flag", "[image][
 
 // MARK: Everything else
 
-TEST_CASE("Location: only JPEG, PNG and WebP are read", "[image][location]") {
+TEST_CASE("Location: only JPEG, PNG, WebP and HEIF are read", "[image][location]") {
     CHECK_FALSE(image::may_carry_location(bytes_of("GIF89a\x01\0\x01\0\0\0"sv)));
     CHECK_FALSE(image::may_carry_location(bytes_of("\xFF\xD8\xFF"sv)));
     CHECK(image::may_carry_location(saved("jpeg")));
@@ -334,7 +334,7 @@ TEST_CASE("Location: a truncated or damaged file never reads out of bounds", "[i
     }
 }
 
-// MARK: What the first review found
+// MARK: Harder cases
 
 TEST_CASE("Location: XMP fields are matched in any case", "[image][location]") {
     // DJI's spelling, and UTF-16.
@@ -428,16 +428,16 @@ TEST_CASE(
     CHECK_FALSE(image::without_location(jpeg_with({xmp_segment(container)})));
 }
 
-TEST_CASE(
-        "Location: a C2PA manifest goes when it names a place or no longer matches",
-        "[image][location]") {
+TEST_CASE("Location: a C2PA manifest always goes", "[image][location]") {
     auto manifest = [](std::string_view text) {
         auto p = bytes_of("JP\0\x01"sv);
         auto t = bytes_of(text);
         p.insert(p.end(), t.begin(), t.end());
         return jpeg_segment(0xEB, p);
     };
-    CHECK_FALSE(image::without_location(jpeg_with({manifest("c2pa.actions")})));
+    auto alone = image::without_location(jpeg_with({manifest("c2pa.actions")}));
+    REQUIRE(alone);
+    CHECK_FALSE(contains(*alone, "c2pa.actions"));
 
     auto placed = image::without_location(jpeg_with({manifest("stds.exif exif:GPSLatitude")}));
     REQUIRE(placed);
@@ -520,68 +520,6 @@ TEST_CASE("Location: lengths at the edge of their fields are refused", "[image][
 
 // MARK: HEIF
 
-namespace {
-
-buffer heif_box(std::string_view type, const buffer& body) {
-    Writer w{false};
-    w.u32(static_cast<uint32_t>(body.size() + 8));
-    for (char c : type)
-        w.u8(c);
-    w.out.insert(w.out.end(), body.begin(), body.end());
-    return w.out;
-}
-
-buffer full_box(std::string_view type, uint8_t version, const buffer& body) {
-    buffer b{std::byte{version}, {}, {}, {}};
-    b.insert(b.end(), body.begin(), body.end());
-    return heif_box(type, b);
-}
-
-// A HEIC holding one metadata item, `item`, of type `type` ("Exif", or "mime" for XMP).
-buffer heif_with(std::string_view type, const buffer& item) {
-    auto build = [&](uint32_t offset) {
-        Writer infe{false};
-        infe.u16(1);
-        infe.u16(0);
-        for (char c : type)
-            infe.u8(c);
-        infe.u8(0);  // name
-        if (type == "mime")
-            for (char c : "application/rdf+xml"sv)
-                infe.u8(c);
-        if (type == "mime")
-            infe.u8(0);
-        Writer iinf{false};
-        iinf.u16(1);
-        auto entry = full_box("infe", 2, infe.out);
-        iinf.out.insert(iinf.out.end(), entry.begin(), entry.end());
-
-        Writer iloc{false};
-        iloc.u8(0x44);
-        iloc.u8(0x00);
-        iloc.u16(1);
-        iloc.u16(1);  // item id
-        iloc.u16(0);  // data reference
-        iloc.u16(1);  // extents
-        iloc.u32(offset);
-        iloc.u32(static_cast<uint32_t>(item.size()));
-
-        buffer meta_body;
-        for (auto b : {full_box("iinf", 0, iinf.out), full_box("iloc", 0, iloc.out)})
-            meta_body.insert(meta_body.end(), b.begin(), b.end());
-        auto file = heif_box("ftyp", bytes_of("heic\0\0\0\0mif1heic"sv));
-        auto meta = full_box("meta", 0, meta_body);
-        file.insert(file.end(), meta.begin(), meta.end());
-        auto mdat = heif_box("mdat", item);
-        file.insert(file.end(), mdat.begin(), mdat.end());
-        return file;
-    };
-    auto probe = build(0);
-    return build(static_cast<uint32_t>(probe.size() - item.size()));
-}
-
-}  // namespace
-
 TEST_CASE("Location: a HEIC's EXIF item has its GPS emptied where it lies", "[image][location]") {
     Writer item{false};
     item.u32(6);
@@ -612,4 +550,134 @@ TEST_CASE("Location: a HEIC's XMP naming a place becomes padding", "[image][loca
     CHECK(out->size() == file.size());
     CHECK_FALSE(contains(*out, "London"));
     CHECK_FALSE(image::without_location(heif_with("mime", bytes_of(HDR_XMP))));
+}
+
+TEST_CASE("Location: a HEIC's metadata in idat is read too", "[image][location]") {
+    auto file = heif_with("Exif", exif_item(), {.iloc_version = 1, .method = 1});
+    auto out = image::without_location(file);
+    REQUIRE(out);
+    CHECK(count_marks(*out) == count_marks(file) - 28);
+}
+
+TEST_CASE(
+        "Location: a HEIC item this cannot find is refused, not passed over", "[image][location]") {
+    // Construction method 2: the bytes are another item's.
+    CHECK_THROWS_AS(
+            image::without_location(
+                    heif_with("Exif", exif_item(), {.iloc_version = 1, .method = 2})),
+            std::runtime_error);
+}
+
+TEST_CASE("Location: a HEIF file is known by its compatible brands", "[image][location]") {
+    auto file = heif_with("Exif", exif_item(), {.major = "MiHE"});
+    REQUIRE(image::may_carry_location(std::span{file}.first(image::location_sniff_size)));
+    CHECK(image::without_location(file));
+}
+
+TEST_CASE("Location: an HDR gain map's XMP is not a place", "[image][location]") {
+    constexpr auto gain_map =
+            R"(<rdf:Description hdrgm:Version="1.0" hdrgm:HDRCapacityMin="0" hdrgm:HDRCapacityMax="2.3"/>)"sv;
+    CHECK_FALSE(image::without_location(jpeg_with({xmp_segment(gain_map)})));
+    CHECK(image::without_location(
+            jpeg_with({xmp_segment(R"(<rdf:Description Iptc4xmpExt:Sublocation="Soho"/>)")})));
+}
+
+TEST_CASE("Location: XMP and IPTC inside EXIF are cleared", "[image][location]") {
+    // IFD0 with orientation, an XMP value naming a city, and an IPTC block.
+    Writer w{true};
+    for (char c : "II"sv)
+        w.u8(c);
+    w.u16(42);
+    w.u32(8);
+    constexpr auto xmp = R"(<rdf:Description photoshop:City="Paris"/>)"sv;
+    const uint32_t values = 8 + 2 + 3 * 12 + 4;
+    w.u16(3);
+    w.entry(0x0112, 3, 1, 6);
+    w.entry(0x02BC, 1, static_cast<uint32_t>(xmp.size()), values);
+    w.entry(0x83BB, 7, 8, values + static_cast<uint32_t>(xmp.size()));
+    w.u32(0);
+    for (char c : xmp)
+        w.u8(c);
+    for (int i = 0; i < 8; i++)
+        w.out.push_back(MARK);
+
+    auto file = jpeg_with({exif_segment(w.out)});
+    auto out = image::without_location(file);
+    REQUIRE(out);
+    CHECK_FALSE(contains(*out, "Paris"));
+    CHECK(count_marks(*out) == count_marks(file) - 8);
+    CHECK(decoded_orientation(*out) == 6);
+    CHECK_FALSE(image::without_location(*out));
+}
+
+TEST_CASE("Location: a picture with no EOI ends where the next one starts", "[image][location]") {
+    auto first = saved("jpeg");
+    first.resize(first.size() - 2);  // its EOI
+    auto second = jpeg_with({exif_segment(exif_tiff(true))});
+    buffer file = first;
+    file.insert(file.end(), second.begin(), second.end());
+    auto out = image::without_location(file);
+    REQUIRE(out);
+    CHECK(!!(*out == first));
+}
+
+TEST_CASE("Location: zeros after the last picture leave its XMP be", "[image][location]") {
+    constexpr auto container = R"(<rdf:Description><Container:Directory/></rdf:Description>)"sv;
+    auto file = jpeg_with({xmp_segment(container)});
+    const size_t picture = file.size();
+    file.resize(file.size() + 64);
+    auto out = image::without_location(file);
+    REQUIRE(out);
+    CHECK(out->size() == picture);
+    CHECK(contains(*out, "Container:Directory"));
+}
+
+TEST_CASE("Location: an MPF index repeating one offset reads it once", "[image][location]") {
+    auto second = jpeg_with({exif_segment(exif_tiff(true))});
+    auto mpf = [](uint32_t offset, uint32_t size) {
+        Writer w{true};
+        for (char c : "MPF\0II"sv)
+            w.u8(c);
+        w.u16(42);
+        w.u32(8);
+        w.u16(1);
+        constexpr uint32_t entries = 500;
+        w.entry(0xB002, 7, 16 * entries, 8 + 2 + 12 + 4);
+        w.u32(0);
+        for (uint32_t k = 0; k < entries; k++)
+            for (uint32_t v : {0u, size, k == 0 ? 0u : offset, 0u})
+                w.u32(v);
+        return jpeg_segment(0xE2, w.out);
+    };
+    const uint32_t index_at = 2 + 4 + 4;
+    auto first = jpeg_with({mpf(0, 0)});
+    auto file = jpeg_with({mpf(static_cast<uint32_t>(first.size() - index_at), second.size())});
+    file.insert(file.end(), second.begin(), second.end());
+    auto out = image::without_location(file);
+    REQUIRE(out);
+    CHECK(out->size() == file.size());
+    CHECK(count_marks(*out) == count_marks(file) - 28);
+}
+
+TEST_CASE("Location: a damaged HEIF file never reads out of bounds", "[image][location]") {
+    for (auto file :
+         {heif_with("Exif", exif_item()),
+          heif_with("mime", bytes_of(PLACE_XMP)),
+          heif_with("Exif", exif_item(), {.iloc_version = 1, .method = 1})}) {
+        for (size_t n = 0; n <= file.size(); n++) {
+            buffer prefix{file.begin(), file.begin() + n};
+            try {
+                (void)image::without_location(prefix);
+            } catch (const std::runtime_error&) {
+            }
+        }
+        for (size_t i = 0; i < file.size(); i++) {
+            buffer damaged = file;
+            damaged[i] ^= std::byte{0xFF};
+            try {
+                (void)image::without_location(damaged);
+            } catch (const std::runtime_error&) {
+            }
+        }
+    }
 }
