@@ -306,7 +306,13 @@ CREATE TABLE attachment_cache (
     -- The file alone; what was made from it is in attachment_derived.  Eviction and the limit
     -- count both.
     size INTEGER NOT NULL,
-    last_used INTEGER NOT NULL      -- ms since epoch
+    last_used INTEGER NOT NULL,     -- ms since epoch
+    -- What the file's header says, read when a derived image is first attempted and reported as
+    -- `Attachment::picture`: one frame's upright size and the frame count, 0 frames for a file
+    -- that could not be read as a picture.  NULL until read.
+    width INTEGER,
+    height INTEGER,
+    frames INTEGER
 ) STRICT;
 
 CREATE INDEX attachment_cache_lru ON attachment_cache(last_used);
