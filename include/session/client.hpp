@@ -1508,9 +1508,20 @@ class Client {
     // them into the row, so the pointer carries a placeholder.  Then `_upload_next`.
     void _derive_outgoing(int64_t client_id, Conversation::upload_progress on_upload);
 
-    // The rest of `_upload_next`, once the disk loop has looked at the file: uploads attachment
-    // `index` from `path`, or from `body` when that is set, or fails the message for good if
-    // `file_size` says the file is gone.
+    // Between the disk loop's look at the file and its upload: a picture this build decodes is
+    // re-encoded on the derive loop (`image::sendable`) and its row rewritten to describe what is
+    // sent; one that cannot be decoded is flagged as the original file; anything else goes as it
+    // is.
+    void _convert_outgoing(
+            int64_t client_id,
+            size_t index,
+            std::string path,
+            int64_t file_size,
+            Conversation::upload_progress on_upload);
+
+    // The rest of `_upload_next`, once the file is known: uploads attachment `index` from `path`,
+    // or from `body` when that is set, or fails the message for good if `file_size` says the file
+    // is gone.
     void _upload_one(
             int64_t client_id,
             size_t index,

@@ -43,6 +43,7 @@ TEST_CASE("Client: an arriving message records the files it names", "[client][at
                     a->set_filename("kitten.png");
                     a->set_width(640);
                     a->set_height(480);
+                    a->set_flags(2);
                 });
                 // Legacy, which is what every current client actually sends: 64-byte key and a
                 // digest, and no fragment on the url.
@@ -73,10 +74,12 @@ TEST_CASE("Client: an arriving message records the files it names", "[client][at
     CHECK(m.attachments[0].width == 640);
     CHECK(m.attachments[0].height == 480);
     CHECK_FALSE(m.attachments[0].voice_message);
+    CHECK(m.attachments[0].original_file);
     // Always true on an incoming attachment: the file server is where it came from.
     CHECK(m.attachments[0].uploaded);
 
     CHECK(m.attachments[1].voice_message);
+    CHECK_FALSE(m.attachments[1].original_file);
     CHECK(m.attachments[1].uploaded);
 
     // The unusable one still occupies its position, so the indices keep meaning what the sender

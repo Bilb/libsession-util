@@ -254,11 +254,11 @@ target_link_libraries(core PUBLIC network)
 
 add_libsession_util_library(image
     image/jpeg_encode.cpp
-    image/location.cpp
     image/probe.cpp
     image/source.cpp
     image/thumbhash.cpp
     image/rendition.cpp
+    image/sendable.cpp
     image/thumbnail.cpp
     image/vips.cpp
 )

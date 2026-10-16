@@ -32,6 +32,10 @@ inline constexpr std::string_view no_rendition = "attachment.no_rendition";
 /// be sent.
 inline constexpr std::string_view attachment_file_missing = "attachment.file_missing";
 
+/// A picture does not fit the file server's limit even re-encoded at `image::min_sendable_edge`,
+/// so the message cannot be sent.
+inline constexpr std::string_view attachment_too_large = "attachment.too_large";
+
 /// The file is not in the cache, which is all that `Client::attachment_data_cached` reads.
 inline constexpr std::string_view not_cached = "file.not_cached";
 

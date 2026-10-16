@@ -481,10 +481,16 @@ TEST_CASE("Client: a picture we send carries its own placeholder", "[client][sen
                       OutgoingAttachment{.path = doc},
                       OutgoingAttachment{.path = junk, .content_type = "image/png"},
                       OutgoingAttachment{
-                              .path = photo, .width = 4, .height = 3, .thumbhash = supplied}}},
+                              .path = photo,
+                              .original_file = true,
+                              .width = 4,
+                              .height = 3,
+                              .thumbhash = supplied}}},
             await);
-    sync(*c);
-    REQUIRE(accept_stores(*net) == 1);
+    REQUIRE(eventually([&] {
+        sync(*c);
+        return accept_stores(*net) == 1;
+    }));
     sync(*c);
 
     auto msg = c->message(id, await);
@@ -506,7 +512,7 @@ TEST_CASE("Client: a picture we send carries its own placeholder", "[client][sen
     CHECK_FALSE(msg->attachments[2].thumbhash);
     CHECK(msg->attachments[2].uploaded);
 
-    // What the caller supplied is theirs.
+    // What the caller supplied for a file sent as it is stays theirs.
     CHECK(msg->attachments[3].width == 4);
     CHECK(msg->attachments[3].height == 3);
     CHECK(msg->attachments[3].thumbhash == supplied);
