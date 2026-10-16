@@ -2778,8 +2778,8 @@ static std::vector<UnfetchedAttachment> existing_unfetched(sqlite::Connection& c
     return found;
 }
 
-// Whether the row was owed nothing before: a file already here, known to be gone, or that no url
-// names (nothing could fetch it, and nothing would ever clear the flag) never is.
+// Returns whether the row can be owed at all.  A file already here, known to be gone, or with no
+// url is never flagged: nothing could fetch it, so nothing would ever clear the flag.
 static bool flag_auto(sqlite::Connection& c, int64_t message, int64_t idx) {
     return c.prepared_exec(
                    R"(
@@ -2802,8 +2802,6 @@ void Client::_drop_unwanted_auto(std::optional<int64_t> convo) {
     auto c = core.database().conn();
     auto max_size = core.globals.get_integer(AUTO_DL_MAX_KEY);
 
-    // CROSS JOIN keeps SQLite on the partial index, a handful of rows, rather than walking every
-    // message of a conversation that can be most of the database.
     std::vector<std::pair<int64_t, int64_t>> dropped;
     for (auto&& [message, idx, content_type, size, mode] : c.prepared_results<
                                                            int64_t,
@@ -2814,7 +2812,7 @@ void Client::_drop_unwanted_auto(std::optional<int64_t> convo) {
                  R"(
         SELECT a.message, a.idx, a.content_type, a.size, c.auto_download
         FROM message_attachments a
-        CROSS JOIN messages m ON m.id = a.message
+        JOIN messages m ON m.id = a.message
         JOIN conversations c ON c.id = m.conversation
         WHERE a.auto_pending IS NOT NULL AND (?1 IS NULL OR m.conversation = ?1)
     )",
