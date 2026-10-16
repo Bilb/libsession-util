@@ -159,6 +159,12 @@ TEST_CASE("probe reads each accepted format's header", "[image][probe]") {
         REQUIRE(info);
         CHECK(info->frames == 5);
 
+        // The count is the file's claim, and capped.
+        info = probe_bytes(
+                image_test::with_png_chunk(still, "acTL", {0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0}));
+        REQUIRE(info);
+        CHECK(info->frames == 65'535);
+
         // One frame is a still; an acTL after the image data is not an APNG's.
         info = probe_bytes(image_test::animated_png(still, 1));
         REQUIRE(info);

@@ -139,6 +139,8 @@ TEST_CASE(
         {"kept.jpg", photo, true, " IMAGE/JPEG ; charset=binary", "kept.jpg", Sent::original_file, 640, 480, true, " IMAGE/JPEG ; charset=binary"},
         // A picture type libvips does not read: shown as a file, sent as it is.
         {"scan.tiff", bytes(64, std::byte{'I'}), false, "image/tiff", "scan.tiff", Sent::original_file},
+        // Its type inferred from the extension, so it says it is a picture, but does not read as one.
+        {"broken.avif", bytes(64, std::byte{'A'}), false, "image/avif", "broken.avif", Sent::original_file},
         {"shot.heic", bytes{heic.begin(), heic.end()}, false,
          heic_converts ? "image/jpeg" : "image/heic", heic_converts ? "shot.jpg" : "shot.heic",
          heic_converts ? Sent::converted : Sent::original_file,

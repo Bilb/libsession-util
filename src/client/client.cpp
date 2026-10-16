@@ -738,12 +738,14 @@ std::filesystem::path Client::_outgoing_dir() const {
 // should pass `OutgoingAttachment::content_type` rather than rely on this.  Everything unrecognised
 // is application/octet-stream, which is what Session's other clients also fall back to.
 static std::string infer_content_type(const std::filesystem::path& path) {
+    // clang-format off
     static const std::unordered_map<std::string_view, std::string_view> types{
             {"jpg", "image/jpeg"},
             {"jpeg", "image/jpeg"},
             {"png", "image/png"},
             {"gif", "image/gif"},
             {"webp", "image/webp"},
+            {"avif", "image/avif"},
             {"heic", "image/heic"},
             {"bmp", "image/bmp"},
             {"tiff", "image/tiff"},
@@ -774,6 +776,7 @@ static std::string infer_content_type(const std::filesystem::path& path) {
             {"7z", "application/x-7z-compressed"},
             {"tar", "application/x-tar"},
     };
+    // clang-format on
 
     auto ext = utf8_string(path.extension());
     if (ext.starts_with('.'))

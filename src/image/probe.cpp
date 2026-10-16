@@ -124,8 +124,13 @@ namespace {
         return true;
     }
 
-    // The frame count an animated PNG's acTL chunk declares, or 0 for a still PNG.  libvips
-    // ignores the chunk, which the APNG spec requires to come before the first IDAT.
+    // The most frames an APNG is reported as having: acTL's count is unchecked, and is only ever
+    // used to say whether it is animated.
+    constexpr uint32_t MAX_APNG_FRAMES = 65'535;
+
+    // The frame count an animated PNG's acTL chunk declares, at most MAX_APNG_FRAMES, or 0 for a
+    // still PNG.  libvips ignores the chunk, which the APNG spec requires to come before the first
+    // IDAT.
     uint32_t apng_frames(Source& src) {
         VipsSource* vsrc = detail::source_access::vips(src);
         if (vips_source_rewind(vsrc))
@@ -152,7 +157,7 @@ namespace {
                     break;
             }
         vips_source_rewind(vsrc);
-        return frames;
+        return std::min(frames, MAX_APNG_FRAMES);
     }
 
 }  // namespace

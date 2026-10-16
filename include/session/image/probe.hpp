@@ -37,7 +37,7 @@ struct Info {
 
     /// 1 for a still image.  Always 1 for HEIC and AVIF: a HEIF file's other images are bursts,
     /// depth maps and the like rather than animation frames, and only its primary image is used.
-    /// An animated PNG's is what its acTL chunk declares; see `first_frame_only`.
+    /// An animated PNG's is what its acTL chunk declares, capped at 65535; see `first_frame_only`.
     uint32_t frames;
 
     /// EXIF orientation, 1 to 8 (1 being upright).
