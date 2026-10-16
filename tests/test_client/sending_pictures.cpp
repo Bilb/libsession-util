@@ -57,7 +57,22 @@ void until(TempClient& c, const std::function<bool()>& done) {
     }));
 }
 
+// What the file server holds for attachment `i`: decrypted from what the upload left there.
+bytes on_server(TempClient& c, MockNetwork& net, int64_t id, size_t i) {
+    using key_t = std::array<std::byte, attachment::ENCRYPT_KEY_SIZE>;
+    auto [url, key] = c->core.loop().call_get([&] {
+        return c->core.database().conn().prepared_get<std::string, sqlite::blob_guts<key_t>>(
+                "SELECT url, key FROM message_attachments WHERE message = ? AND idx = ?",
+                id,
+                static_cast<int64_t>(i));
+    });
+    auto file_id = url.substr(url.rfind('/') + 1);
+    file_id = file_id.substr(0, file_id.find('#'));
+    return attachment::decrypt(net.served.at(file_id), key);
+}
+
 struct Sandbox {
+    TempCacheDir cache;
     TempClient c;
     MockNetwork* net;
     std::filesystem::path dir =
@@ -114,6 +129,7 @@ TEST_CASE(
         "[client][send][pictures]") {
     using namespace image_test;
     Sandbox s;
+    s.c->set_cache_dir(s.cache.path);
     auto photo = derived_test::picture(640, 480, ".jpg");
     auto logo =
             save(draw(
@@ -168,7 +184,9 @@ TEST_CASE(
 
         auto expected = cs.sent == Sent::converted ? converted(cs.file) : cs.file;
         CHECK(a.size == static_cast<int64_t>(expected.size()));
-        CHECK(!!(read_back(s.c, *s.net, id, i, s.dir / "saved-{}"_format(i)) == expected));
+        CHECK(!!(on_server(s.c, *s.net, id, i) == expected));
+        // Kept here too, whatever it is: the only copy of what went out once the server's expires.
+        CHECK(!!(s.c->attachment_data_cached(id, i, await) == expected));
         // The application's file is never rewritten.
         CHECK(!!(read_all(s.dir / cs.name) == cs.file));
     }

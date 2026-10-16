@@ -245,10 +245,10 @@ struct Attachment {
     /// Whether the bytes are here, on their way, fetchable, or not to be had -- see
     /// `AttachmentAvailability`.
     ///
-    /// Reported the same way for an outgoing attachment as an incoming one: what we send is kept
-    /// on upload under the rule that would have fetched it had it arrived, plus anything on a
-    /// gallery-viewable message, which is drawn as its pictures and so needs them either way.  So
-    /// "can I draw this without a download" has one answer regardless of direction.
+    /// Reported the same way for an outgoing attachment as an incoming one: whatever we send is
+    /// kept on upload, unless it is larger than the whole attachment cache limit, then evicted like
+    /// any cached file.  So "can I draw this without a download" has one answer regardless of
+    /// direction.
     AttachmentAvailability availability = AttachmentAvailability::absent;
 
     /// How far the transfer has got, when `availability` is `fetching`; both 0 otherwise.

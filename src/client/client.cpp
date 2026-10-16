@@ -5405,8 +5405,10 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
 
 namespace {
 
-    std::shared_ptr<const std::vector<std::byte>> read_whole(
-            const std::string& path, int64_t size) {
+    // Up to `size` bytes of `path`, or with `exact` exactly that many and then its end, so that a
+    // file changed while it is read is not taken for the one that was looked at.
+    std::shared_ptr<const std::vector<std::byte>> read_file(
+            const std::string& path, int64_t size, bool exact) {
         std::vector<std::byte> bytes(static_cast<size_t>(size));
         std::ifstream in;
         in.exceptions(std::ios::badbit);
@@ -5414,8 +5416,11 @@ namespace {
         if (!in.is_open())
             throw std::runtime_error{"{} cannot be opened"_format(path)};
         in.read(reinterpret_cast<char*>(bytes.data()), size);
-        if (in.gcount() != size || in.peek() != std::ifstream::traits_type::eof())
+        // Taken before `peek`, which resets it.
+        const auto got = in.gcount();
+        if (exact && (got != size || in.peek() != std::ifstream::traits_type::eof()))
             throw std::runtime_error{"{} changed while it was read"_format(path)};
+        bytes.resize(static_cast<size_t>(got));
         return std::make_shared<const std::vector<std::byte>>(std::move(bytes));
     }
 
@@ -5442,19 +5447,6 @@ namespace {
 
     // Enough of a PNG's start to hold every chunk before its image data.
     constexpr int64_t PNG_HEAD = 64 * 1024;
-
-    std::shared_ptr<const std::vector<std::byte>> read_whole_head(
-            const std::string& path, int64_t most) {
-        std::vector<std::byte> bytes(static_cast<size_t>(most));
-        std::ifstream in;
-        in.exceptions(std::ios::badbit);
-        in.open(path, std::ios::binary);
-        if (!in.is_open())
-            throw std::runtime_error{"{} cannot be opened"_format(path)};
-        in.read(reinterpret_cast<char*>(bytes.data()), most);
-        bytes.resize(static_cast<size_t>(in.gcount()));
-        return std::make_shared<const std::vector<std::byte>>(std::move(bytes));
-    }
 
 }  // namespace
 
@@ -5489,7 +5481,7 @@ void Client::_convert_outgoing(
             // at; a larger one can only go out re-encoded, read from its path.
             const bool fits = static_cast<uint64_t>(file_size) <= max_size;
             if (fits)
-                out.body = read_whole(path, file_size);
+                out.body = read_file(path, file_size, true);
             auto source = out.body ? image::Source{std::span<const std::byte>{*out.body}}
                                    : image::Source{std::filesystem::path{path}};
             auto refuse = [&] {
@@ -5509,7 +5501,7 @@ void Client::_convert_outgoing(
             }
             auto apng = out.body ? animated_png(*out.body)
                       : info->format == image::Format::png
-                              ? animated_png(*read_whole_head(path, PNG_HEAD))
+                              ? animated_png(*read_file(path, PNG_HEAD, false))
                               : false;
             auto verdict =
                     apng ? image::SendableVerdict::cannot_decode : image::sendable_verdict(*info);
@@ -6322,28 +6314,9 @@ void Client::_cache_outgoing_attachment(
         return;
     auto size = *found->size;
 
-    // A gallery is drawn as its pictures, so a message we sent needs its bytes here just as much as
-    // one that arrived: without them a conversation shows placeholders over files that came off
-    // this disk.  That is the whole of the exception, which is why the gallery rule decides it --
-    // the same rule the display will apply -- rather than this attachment happening to be an image.
-    //
-    // Anything else follows what would have been fetched had the message arrived instead.
-    if (!msg->gallery_viewable) {
-        auto convo = _conversation(msg->conversation);
-        auto mode = convo ? convo->auto_download() : std::nullopt;
-        if (!mode || !auto_download_wants(*mode, found->content_type))
-            return;
-    }
-
-    // The same ceilings a download is held to.  The configured one bounds disk: a copy of a file we
-    // sent costs exactly what a copy of one we received does.
-    if (auto max_size = core.globals.get_integer(AUTO_DL_MAX_KEY); max_size && size > *max_size)
-        return;
-
-    // And the one a requested file is held to, since that is what this copy stands in for: a
-    // sender drawing their own message would otherwise have fetched it back and kept it under the
-    // same rule.
-    if (!_caches_requested(size))
+    // Kept whatever the download rules, but never a file the whole cache could not hold: eviction
+    // spares the entry just added, so it would flush everything else for a copy nobody asked for.
+    if (auto limit = core.globals.get_integer(CACHE_LIMIT_KEY); limit && size > *limit)
         return;
 
     // Not on `Attachment`, deliberately: where a file is locally is the application's business, and
