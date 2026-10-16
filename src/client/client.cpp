@@ -5368,8 +5368,8 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
 
 namespace {
 
-    // `size` bytes of `path`, or with `exact` exactly that many and then its end, so that a file
-    // changed while it is read is not taken for the one that was looked at.
+    // Up to `size` bytes of `path`, or with `exact` exactly that many and then its end, so that a
+    // file changed while it is read is not taken for the one that was looked at.
     std::shared_ptr<const std::vector<std::byte>> read_file(
             const std::string& path, int64_t size, bool exact) {
         std::vector<std::byte> bytes(static_cast<size_t>(size));
@@ -6277,9 +6277,10 @@ void Client::_cache_outgoing_attachment(
         return;
     auto size = *found->size;
 
-    // Whatever was sent, under no download rule: it is the only copy of what went out (a
-    // re-encoded picture is not the file it was made from), the file server's copy expires, and
-    // the user's file may be deleted.  Evicted like anything else cached.
+    // Kept whatever the download rules, but never a file the whole cache could not hold: eviction
+    // spares the entry just added, so it would flush everything else for a copy nobody asked for.
+    if (auto limit = core.globals.get_integer(CACHE_LIMIT_KEY); limit && size > *limit)
+        return;
 
     // Not on `Attachment`, deliberately: where a file is locally is the application's business, and
     // this is the one place that needs the path back.

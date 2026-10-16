@@ -2247,8 +2247,11 @@ TEST_CASE(
         return c->message(id, await)->attachments[index].availability;
     };
 
-    // Whatever it is, and whatever the conversation's download rules: the copy is the only one of
-    // what went out once the file server's expires, and the user's file may be deleted.
+    // Whatever it is, and whatever the download rules: the copy is the only one of what went out
+    // once the file server's expires, and the user's file may be deleted.
+    c->open_dm(ConversationId::dm(me), await);
+    c->conversation(ConversationId::dm(me), await)->set_auto_download(AutoDownload::none, await);
+    c->set_auto_download_max_size(contents.size() - 1, await);
     auto gallery_id = send({as_image});
     CHECK(availability(gallery_id, 0) == AttachmentAvailability::cached);
     CHECK(availability(send({as_document}), 0) == AttachmentAvailability::cached);
@@ -2279,6 +2282,11 @@ TEST_CASE(
     // Nor held to the limits a fetched file is: those ration what is downloaded.
     c->set_requested_cache_max_size(contents.size() - 1, await);
     CHECK(availability(send({as_image}), 0) == AttachmentAvailability::cached);
+
+    // But not one larger than the whole cache, which would evict everything else to make room.
+    c->set_attachment_cache_limit(contents.size() - 1, await);
+    CHECK(availability(send({as_document}), 0) != AttachmentAvailability::cached);
+    CHECK(availability(gallery_id, 0) == AttachmentAvailability::cached);
 
     std::filesystem::remove_all(dir);
 }

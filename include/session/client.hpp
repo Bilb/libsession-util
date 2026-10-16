@@ -692,6 +692,8 @@ class Client {
     /// and padded, which makes the total larger than the same attachments would be as plain files.
     /// That is the right way round for a disk limit — 5GB means 5GB of disk.
     ///
+    /// A file we send that is larger than the limit is not kept at all.
+    ///
     /// Display pictures are not counted and are never evicted for this.  They are one small file
     /// per contact, replaced rather than accumulated, and a contact you have not spoken to in years
     /// should not lose the last picture you had of them; freeing them is the reference sweep's job.
@@ -770,8 +772,7 @@ class Client {
     /// The largest file that `attachment_data` or `save_attachment` will keep in the cache, or
     /// nullopt for no limit, which is the default.  0 keeps nothing they fetch.
     ///
-    /// Also bounds the copy kept of a file we send, which costs the cache what a download of it
-    /// would.
+    /// A file we send is kept whatever this says.
     ///
     /// A file over it is still fetched -- this never refuses anything -- and is simply not kept, so
     /// asking for it again fetches it again.  One already in the cache is still served from there,
