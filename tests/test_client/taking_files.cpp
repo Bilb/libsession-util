@@ -108,7 +108,7 @@ TEST_CASE(
     CHECK(msg->attachments[0].uploaded);
     CHECK(msg->attachments[0].filename == "report.bin");
     CHECK(msg->attachments[0].content_type == "application/octet-stream");
-    CHECK(std::filesystem::path{stored_path(s.c, id)}.parent_path() == s.outgoing);
+    CHECK(stored_path(s.c, id).starts_with("outgoing/"));
     CHECK(on_server(s.c, *net, id) == body);
 
     CHECK(derived_test::eventually([&] {
@@ -128,7 +128,7 @@ TEST_CASE("Client: a retry uploads the taken copy", "[client][send][take]") {
     sync(*s.c);
     REQUIRE(s.c->message(id, await)->send_state == SendState::failed);
     CHECK_FALSE(std::filesystem::exists(file));
-    auto owned = stored_path(s.c, id);
+    auto owned = s.cache.path / stored_path(s.c, id);
     REQUIRE(std::filesystem::exists(owned));
 
     REQUIRE(s.c->retry_send(id, await));
@@ -148,7 +148,7 @@ TEST_CASE("Client: deleting a message removes the file it took", "[client][send]
     auto id = s.send(file);
     sync(*s.c);
     REQUIRE(s.c->message(id, await)->send_state == SendState::failed);
-    auto owned = stored_path(s.c, id);
+    auto owned = s.cache.path / stored_path(s.c, id);
     REQUIRE(std::filesystem::exists(owned));
 
     REQUIRE(s.c->delete_message(id, await));
@@ -161,7 +161,7 @@ TEST_CASE(
     Sandbox s;
     auto id = s.send(s.write("a.bin", contents(3000)));
     sync(*s.c);
-    auto owned = stored_path(s.c, id);
+    auto owned = s.cache.path / stored_path(s.c, id);
     REQUIRE(std::filesystem::exists(owned));
 
     // Clearing takes what is strictly older than now, so not a message sent this millisecond.
@@ -211,7 +211,7 @@ TEST_CASE(
     auto id = s.send(s.write("pending.bin", contents(3000)));
     sync(*s.c);
     REQUIRE(s.c->message(id, await)->send_state == SendState::failed);
-    auto owned = stored_path(s.c, id);
+    auto owned = s.cache.path / stored_path(s.c, id);
 
     // What a crash between taking a file and storing its message leaves.
     auto orphan = s.outgoing / "orphan.bin";
@@ -236,4 +236,46 @@ TEST_CASE("Client: without take_file the caller's file is left alone", "[client]
     CHECK(stored_path(s.c, id) == file.string());
     CHECK(read_all(file) == body);
     CHECK(files_in(s.outgoing) == 0);
+}
+
+TEST_CASE("Client: a taken file survives the cache directory moving", "[client][send][take]") {
+    auto parent = std::filesystem::temp_directory_path() / random::unique_id("test_take_move", 7);
+    auto before = parent / "container-a", after = parent / "container-b";
+    std::filesystem::create_directories(before);
+    TempClient c;
+    auto me = own_sid(*c);
+    TestHelper::seed_pfs_nak(c->core, me);
+    c->set_cache_dir(before);
+
+    auto body = contents(4000);
+    auto file = parent / "moving.bin";
+    std::ofstream{file, std::ios::binary}.write(
+            reinterpret_cast<const char*>(body.data()), body.size());
+    auto id = c->send_message(
+            ConversationId::dm(me),
+            {.attachments = {OutgoingAttachment{.path = file, .take_file = true}}},
+            await);
+    sync(*c);
+    REQUIRE(c->message(id, await)->send_state == SendState::failed);
+
+    c.client.reset();
+    std::filesystem::rename(before, after);
+    c.reopen();
+    c->set_cache_dir(after);
+    auto* net = attach_mock_network(c->core);
+    sync(*c);
+    REQUIRE(files_in(after / "outgoing") == 1);
+
+    REQUIRE(c->retry_send(id, await));
+    sync(*c);
+    REQUIRE(accept_stores(*net) == 1);
+    CHECK(c->message(id, await)->attachments[0].uploaded);
+    CHECK(on_server(c, *net, id) == body);
+    CHECK(derived_test::eventually([&] {
+        sync(*c);
+        return files_in(after / "outgoing") == 0;
+    }));
+
+    c.client.reset();
+    std::filesystem::remove_all(parent);
 }

@@ -725,8 +725,26 @@ std::filesystem::path Client::_outgoing_dir() const {
     return _cache_dir.empty() ? std::filesystem::path{} : _cache_dir / cache::OUTGOING_DIR;
 }
 
-static bool inside(const std::filesystem::path& dir, const std::filesystem::path& file) {
-    return !dir.empty() && file.parent_path() == dir;
+// A taken file is recorded as `outgoing/<name>`, relative to the cache directory, since that
+// directory's absolute path can change between runs (an iOS app container moves on update).
+static std::optional<std::string_view> taken_name(std::string_view stored) {
+    auto dir = cache::OUTGOING_DIR;
+    if (stored.size() <= dir.size() + 1 || !stored.starts_with(dir) || stored[dir.size()] != '/')
+        return std::nullopt;
+    auto name = stored.substr(dir.size() + 1);
+    if (name.find('/') != std::string_view::npos)
+        return std::nullopt;
+    return name;
+}
+
+static std::string taken_path(std::string_view name) {
+    return "{}/{}"_format(cache::OUTGOING_DIR, name);
+}
+
+std::filesystem::path Client::_attachment_file(const std::string& stored) const {
+    if (taken_name(stored) && !_cache_dir.empty())
+        return _cache_dir / stored;
+    return stored;
 }
 
 std::shared_ptr<Client::TakenFiles> Client::_take_files(OutgoingMessage& msg) {
@@ -746,7 +764,8 @@ std::shared_ptr<Client::TakenFiles> Client::_take_files(OutgoingMessage& msg) {
         if (!a.take_file)
             continue;
         // A fresh name with the original extension, which is what infers an unset content type.
-        auto to = dir / (random::random_base32(26) + a.path.extension().string());
+        auto name = random::random_base32(26) + a.path.extension().string();
+        auto to = dir / name;
         taken->claim(a.path, to);
         // Linked rather than renamed so that the caller's file stays until the message is stored;
         // copied where a link cannot be made, such as across filesystems.
@@ -760,7 +779,7 @@ std::shared_ptr<Client::TakenFiles> Client::_take_files(OutgoingMessage& msg) {
                     a.path.string(), ec.message())};
         if (!a.filename)
             a.filename = a.path.filename().string();
-        a.path = std::move(to);
+        a.path = taken_path(name);
     }
     return taken;
 }
@@ -781,8 +800,8 @@ void Client::_sweep_outgoing() {
                 for (auto path :
                      c.prepared_results<std::string>("SELECT path FROM message_attachments"
                                                      " WHERE url IS NULL AND path IS NOT NULL"))
-                    if (std::filesystem::path file{path}; inside(dir, file))
-                        needed.insert(file.filename().string());
+                    if (auto name = taken_name(path))
+                        needed.emplace(*name);
             } catch (const std::exception& e) {
                 log::warning(cat, "Outgoing file sweep failed: {}", e.what());
                 return;
@@ -5367,7 +5386,8 @@ int64_t Client::_send_message(
             )",
                     client_id,
                     static_cast<int64_t>(i),
-                    a.path.string(),
+                    // Absolute, so that a relative one cannot be mistaken for a taken file.
+                    a.take_file ? a.path.string() : std::filesystem::absolute(a.path).string(),
                     a.content_type ? *a.content_type : infer_content_type(a.path),
                     a.filename ? a.filename : std::optional{a.path.filename().string()},
                     (a.voice_message ? ATTACHMENT_FLAG_VOICE_MESSAGE : 0) |
@@ -5425,7 +5445,7 @@ void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress o
         )"_format(DISPLAYABLE_IMAGE_SQL),
                      client_id))
             if (!(w && h) || !thumbhash)
-                wanted.push_back({idx, std::move(path), !(w && h), !thumbhash});
+                wanted.push_back({idx, _attachment_file(path).string(), !(w && h), !thumbhash});
     }
     if (wanted.empty())
         return _upload_next(client_id, std::move(on_upload));
@@ -5515,7 +5535,20 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
     if (!next)
         return _finish_attachment_send(client_id);
 
-    auto [idx, path, flags, content_type] = *next;
+    auto [idx, stored, flags, content_type] = *next;
+    if (taken_name(stored) && _cache_dir.empty()) {
+        // Not missing, only unreachable this run: a later one that sets the directory can retry.
+        if (on_upload)
+            on_upload(
+                    static_cast<size_t>(idx),
+                    0,
+                    0,
+                    unexpected{
+                            Error{err::attachment_unreadable,
+                                  "no cache directory holds {}"_format(stored)}});
+        return _fail_attachment_send(client_id);
+    }
+    auto path = _attachment_file(stored).string();
     const bool original = (flags & ATTACHMENT_FLAG_ORIGINAL_FILE) != 0;
     const bool declared_image = content_type && content_type->starts_with("image/");
 
@@ -5776,10 +5809,10 @@ void Client::_drop_taken_file(int64_t client_id, size_t index) {
             "SELECT path FROM message_attachments WHERE message = ?1 AND idx = ?2",
             client_id,
             static_cast<int64_t>(index));
-    if (!path || !inside(_outgoing_dir(), *path))
+    if (!path || !taken_name(*path) || _cache_dir.empty())
         return;
     // Posted after the cache copy, which may read the file: the disk loop runs them in order.
-    _post_disk([file = std::move(*path)] {
+    _post_disk([file = _attachment_file(*path)] {
         std::error_code ec;
         std::filesystem::remove(file, ec);
     });
@@ -6503,7 +6536,7 @@ void Client::_cache_outgoing_attachment(
                 url,
                 size,
                 body = std::move(body),
-                source = std::filesystem::path{*stored},
+                source = _attachment_file(*stored),
                 file = _cache_path(cache::ATTACHMENT_DIR, url),
                 key = _cache_encryption_key()] {
         // The length has to still match what was uploaded.  A url names one particular encrypted

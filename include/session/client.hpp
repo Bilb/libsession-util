@@ -1520,6 +1520,9 @@ class Client {
     // way.  A retry never uploads it again.
     void _drop_taken_file(int64_t client_id, size_t index);
 
+    // The file an attachment row's `path` names, resolving a taken file against the cache dir.
+    std::filesystem::path _attachment_file(const std::string& stored) const;
+
     // Where taken files are kept, or empty without a cache directory.
     std::filesystem::path _outgoing_dir() const;
 
