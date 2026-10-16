@@ -507,6 +507,10 @@ CREATE TABLE message_attachments (
 -- share of the table.
 CREATE INDEX message_attachments_url ON message_attachments(url) WHERE url IS NOT NULL;
 
+-- Whether a file in the outgoing directory is still owed an upload, asked by name for each file
+-- there.  Partial because only rows still to upload are ever asked about.
+CREATE INDEX message_attachments_pending ON message_attachments(path) WHERE url IS NULL;
+
 -- Which messages show a file that is being evicted, which is the question a keyed hash cannot
 -- answer: it does not run backwards, so without this the only route from a cached file to the
 -- messages drawing it is to hash every url in the table.

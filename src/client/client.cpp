@@ -793,15 +793,25 @@ void Client::_sweep_outgoing() {
     // existed, and leaves `_taking` on Core's loop only once its row is there.
     _post_disk([this, root = _cache_dir, dir] {
         auto names = cache::list(root, cache::OUTGOING_DIR);
+        if (names.empty())
+            return;
         call([this, dir, names = std::move(names)]() mutable {
             std::unordered_set<std::string> needed;
             try {
                 auto c = core.database().conn();
-                for (auto path :
-                     c.prepared_results<std::string>("SELECT path FROM message_attachments"
-                                                     " WHERE url IS NULL AND path IS NOT NULL"))
-                    if (auto name = taken_name(path))
-                        needed.emplace(*name);
+                // Batched to stay well inside SQLite's limit on bound parameters.
+                constexpr size_t batch = 500;
+                for (size_t at = 0; at < names.size(); at += batch) {
+                    auto n = std::min(batch, names.size() - at);
+                    auto st = c.prepared_st(R"(
+                SELECT path FROM message_attachments WHERE path IN ({}) AND url IS NULL
+            )"_format(sqlite::placeholders(n)));
+                    for (size_t i = 0; i < n; i++)
+                        st->bind(static_cast<int>(i + 1), taken_path(names[at + i]));
+                    for (auto path : sqlite::IterableStatementWrapper<std::string>{std::move(st)})
+                        if (auto name = taken_name(path))
+                            needed.emplace(*name);
+                }
             } catch (const std::exception& e) {
                 log::warning(cat, "Outgoing file sweep failed: {}", e.what());
                 return;
