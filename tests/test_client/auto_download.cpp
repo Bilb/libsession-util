@@ -69,7 +69,8 @@ struct Backlog {
         return carry(file, "h" + file, ts);
     }
 
-    // Another message carrying a file `arrive` made, as a forward would.
+    // Another message carrying the same pointer as one `arrive` made, as a forward or a quote of
+    // it does: one file, two rows.
     int64_t carry(
             const std::string& file, std::string hash, std::optional<int64_t> ts = std::nullopt) {
         const auto& f = made.at(file);
@@ -149,365 +150,367 @@ struct Backlog {
 TEST_CASE(
         "Client: turning auto-download on can fetch what is already here",
         "[client][auto][existing]") {
-    Backlog b;
-    auto image = b.arrive("a");
-    auto doc = b.arrive("b", "application/pdf");
-    b.arrive("c", "image/png", 20000);
-    REQUIRE(b.fetching().empty());
+    Backlog chat;
+    auto image = chat.arrive("a");
+    auto doc = chat.arrive("b", "application/pdf");
+    chat.arrive("c", "image/png", 20000);
+    REQUIRE(chat.fetching().empty());
 
     SECTION("leaving it fetches only what arrives afterwards") {
-        b.set(AutoDownload::all);
-        CHECK(b.fetching().empty());
-        b.arrive("d");
-        CHECK(b.fetching() == files{"d"});
+        chat.set(AutoDownload::all);
+        CHECK(chat.fetching().empty());
+        chat.arrive("d");
+        CHECK(chat.fetching() == files{"d"});
     }
 
     SECTION("the count is what fetching then queues, for either mode") {
-        auto n = b.counts();
+        auto n = chat.counts();
         CHECK(n.all.count == 3);
         CHECK(n.all.bytes == 26000);
         CHECK(n.image_attachments.count == 2);
         CHECK(n.image_attachments.bytes == 23000);
 
-        b.c->set_auto_download_max_size(10000, await);
-        n = b.counts();
+        chat.c->set_auto_download_max_size(10000, await);
+        n = chat.counts();
         CHECK(n.all.count == 2);
         CHECK(n.all.bytes == 6000);
         CHECK(n.image_attachments.count == 1);
 
-        b.fetch(AutoDownload::all);
-        CHECK(b.fetching() == files{"b", "a"});
+        chat.fetch(AutoDownload::all);
+        CHECK(chat.fetching() == files{"b", "a"});
         // Still counted while only queued: they are not here yet.
-        CHECK(b.counts().all.count == 2);
-        b.serve();
-        CHECK(b.counts().all.count == 0);
+        CHECK(chat.counts().all.count == 2);
+        chat.serve();
+        CHECK(chat.counts().all.count == 0);
     }
 
     SECTION("images only fetches the pictures, newest first") {
-        b.fetch(AutoDownload::image_attachments);
-        CHECK(b.fetching() == files{"c", "a"});
+        chat.fetch(AutoDownload::image_attachments);
+        CHECK(chat.fetching() == files{"c", "a"});
     }
 
     SECTION("asking later, with the setting already on, still fetches") {
-        b.set(AutoDownload::all);
-        b.fetch_existing();
-        CHECK(b.fetching() == files{"c", "b", "a"});
+        chat.set(AutoDownload::all);
+        chat.fetch_existing();
+        CHECK(chat.fetching() == files{"c", "b", "a"});
     }
 
     SECTION("there is nothing to fetch with it unset or off") {
-        CHECK_THROWS_AS(b.fetch_existing(), std::invalid_argument);
-        b.set(AutoDownload::none);
-        CHECK_THROWS_AS(b.fetch_existing(), std::invalid_argument);
-        CHECK(b.fetching().empty());
+        CHECK_THROWS_AS(chat.fetch_existing(), std::invalid_argument);
+        chat.set(AutoDownload::none);
+        CHECK_THROWS_AS(chat.fetch_existing(), std::invalid_argument);
+        CHECK(chat.fetching().empty());
     }
 
     SECTION("a file already here is neither counted nor fetched") {
-        b.request(image);
-        b.serve();
-        CHECK(b.counts().all.count == 2);
-        b.fetch(AutoDownload::all);
-        CHECK(b.fetching() == files{"c", "b"});
+        chat.request(image);
+        chat.serve();
+        CHECK(chat.counts().all.count == 2);
+        chat.fetch(AutoDownload::all);
+        CHECK(chat.fetching() == files{"c", "b"});
     }
 
     SECTION("a file the server no longer has is neither counted nor fetched") {
-        b.request(doc);
-        fail_downloads(*b.net, 404);
-        sync(*b.c);
-        CHECK(b.counts().all.count == 2);
-        b.fetch(AutoDownload::all);
-        CHECK(b.fetching() == files{"c", "a"});
+        chat.request(doc);
+        fail_downloads(*chat.net, 404);
+        sync(*chat.c);
+        CHECK(chat.counts().all.count == 2);
+        chat.fetch(AutoDownload::all);
+        CHECK(chat.fetching() == files{"c", "a"});
     }
 }
 
 TEST_CASE("Client: a new arrival goes ahead of the backlog", "[client][auto][existing]") {
-    Backlog b{true};
-    b.arrive("a");
-    b.arrive("b");
-    b.fetch(AutoDownload::all);
-    REQUIRE(b.fetching() == files{"b"});
+    Backlog chat{true};
+    chat.arrive("a");
+    chat.arrive("b");
+    chat.fetch(AutoDownload::all);
+    REQUIRE(chat.fetching() == files{"b"});
 
-    b.arrive("c");
-    b.serve();
-    CHECK(b.fetching() == files{"c"});
-    b.serve();
-    CHECK(b.fetching() == files{"a"});
+    chat.arrive("c");
+    chat.serve();
+    CHECK(chat.fetching() == files{"c"});
+    chat.serve();
+    CHECK(chat.fetching() == files{"a"});
 }
 
 TEST_CASE("Client: what auto-download still owes survives a restart", "[client][auto][existing]") {
     bool network_first = GENERATE(false, true);
-    Backlog b{true};
-    b.arrive("a");
-    b.arrive("b");
-    b.fetch(AutoDownload::all);
-    REQUIRE(b.fetching() == files{"b"});
+    Backlog chat{true};
+    chat.arrive("a");
+    chat.arrive("b");
+    chat.fetch(AutoDownload::all);
+    REQUIRE(chat.fetching() == files{"b"});
 
-    b.reopen(network_first);
-    CHECK(b.fetching() == files{"b"});
-    b.serve();
-    CHECK(b.fetching() == files{"a"});
-    b.serve();
-    CHECK(b.fetching().empty());
+    chat.reopen(network_first);
+    CHECK(chat.fetching() == files{"b"});
+    chat.serve();
+    CHECK(chat.fetching() == files{"a"});
+    chat.serve();
+    CHECK(chat.fetching().empty());
 
-    b.reopen(network_first);
-    CHECK(b.fetching().empty());
+    chat.reopen(network_first);
+    CHECK(chat.fetching().empty());
 }
 
 TEST_CASE("Client: an evicted file is not owed again", "[client][auto][existing][evict]") {
-    Backlog b;
-    b.arrive("a");
-    b.arrive("b");
+    Backlog chat;
+    chat.arrive("a");
+    chat.arrive("b");
     // Room for one of the two, so the second to land evicts the first.
-    b.c->set_attachment_cache_limit(4000, await);
-    b.fetch(AutoDownload::all);
-    REQUIRE(b.fetching() == files{"b", "a"});
-    b.serve();
+    chat.c->set_attachment_cache_limit(4000, await);
+    chat.fetch(AutoDownload::all);
+    REQUIRE(chat.fetching() == files{"b", "a"});
+    chat.serve();
 
     size_t cached = 0;
-    for (const auto& m : b.c->conversation(b.convo, await)->messages(await))
+    for (const auto& m : chat.c->conversation(chat.convo, await)->messages(await))
         cached += m.attachments[0].availability == AttachmentAvailability::cached;
     REQUIRE(cached == 1);
 
-    b.reopen(false);
-    CHECK(b.fetching().empty());
+    chat.reopen(false);
+    CHECK(chat.fetching().empty());
 }
 
 TEST_CASE(
         "Client: changing the setting forgets what it no longer takes",
         "[client][auto][existing]") {
-    Backlog b{true};
-    b.arrive("a");
-    b.arrive("b", "application/pdf");
-    b.arrive("c");
-    b.fetch(AutoDownload::all);
-    REQUIRE(b.fetching() == files{"c"});
+    Backlog chat{true};
+    chat.arrive("a");
+    chat.arrive("b", "application/pdf");
+    chat.arrive("c");
+    chat.fetch(AutoDownload::all);
+    REQUIRE(chat.fetching() == files{"c"});
 
     SECTION("off forgets all of it, and on again does not bring it back") {
-        b.set(AutoDownload::none);
-        b.serve();
-        CHECK(b.fetching().empty());
+        chat.set(AutoDownload::none);
+        chat.serve();
+        CHECK(chat.fetching().empty());
 
-        b.reopen(false);
-        CHECK(b.fetching().empty());
-        b.set(AutoDownload::all);
-        CHECK(b.fetching().empty());
+        chat.reopen(false);
+        CHECK(chat.fetching().empty());
+        chat.set(AutoDownload::all);
+        CHECK(chat.fetching().empty());
     }
 
-    SECTION("off and on again before the queue is reached does not bring it back") {
-        b.set(AutoDownload::none);
-        b.set(AutoDownload::all);
-        b.serve();
-        CHECK(b.fetching().empty());
+    SECTION("off then on again, with the rest still queued, does not bring it back") {
+        chat.set(AutoDownload::none);
+        chat.set(AutoDownload::all);
+        chat.serve();
+        CHECK(chat.fetching().empty());
     }
 
     SECTION("images only forgets the rest") {
-        b.set(AutoDownload::image_attachments);
-        b.serve();
-        CHECK(b.fetching() == files{"a"});
-        b.serve();
-        CHECK(b.fetching().empty());
+        chat.set(AutoDownload::image_attachments);
+        chat.serve();
+        CHECK(chat.fetching() == files{"a"});
+        chat.serve();
+        CHECK(chat.fetching().empty());
     }
 }
 
 TEST_CASE(
         "Client: a failed auto-download stays owed only while it may succeed",
         "[client][auto][existing]") {
-    Backlog b{true};
-    b.arrive("a");
-    b.fetch(AutoDownload::all);
-    REQUIRE(b.fetching() == files{"a"});
+    Backlog chat{true};
+    chat.arrive("a");
+    chat.fetch(AutoDownload::all);
+    REQUIRE(chat.fetching() == files{"a"});
 
     SECTION("a file the server no longer has is dropped") {
-        fail_downloads(*b.net, 404);
-        sync(*b.c);
-        b.reopen(false);
-        CHECK(b.fetching().empty());
+        fail_downloads(*chat.net, 404);
+        sync(*chat.c);
+        chat.reopen(false);
+        CHECK(chat.fetching().empty());
     }
 
     SECTION("a transient failure is tried again at the next start, not before") {
-        fail_downloads(*b.net, 503);
-        sync(*b.c);
-        CHECK(b.fetching().empty());
-        b.reopen(false);
-        CHECK(b.fetching() == files{"a"});
+        fail_downloads(*chat.net, 503);
+        sync(*chat.c);
+        CHECK(chat.fetching().empty());
+        chat.reopen(false);
+        CHECK(chat.fetching() == files{"a"});
     }
 
     SECTION("asking again retries what a failed attempt left owed") {
-        fail_downloads(*b.net, 503);
-        sync(*b.c);
-        CHECK(b.counts().all.count == 1);
-        b.fetch(AutoDownload::all);
-        CHECK(b.fetching() == files{"a"});
+        fail_downloads(*chat.net, 503);
+        sync(*chat.c);
+        CHECK(chat.counts().all.count == 1);
+        chat.fetch(AutoDownload::all);
+        CHECK(chat.fetching() == files{"a"});
     }
 }
 
 TEST_CASE("Client: a file fetched another way is no longer owed", "[client][auto][existing]") {
-    Backlog b{true};
-    auto older = b.arrive("a");
-    b.arrive("b");
-    b.fetch(AutoDownload::all);
-    REQUIRE(b.fetching() == files{"b"});
+    Backlog chat{true};
+    auto older = chat.arrive("a");
+    chat.arrive("b");
+    chat.fetch(AutoDownload::all);
+    REQUIRE(chat.fetching() == files{"b"});
 
     // Asked for directly while it waits its turn, and held to no auto-download limit.
-    b.request(older);
-    REQUIRE(b.fetching() == files{"b", "a"});
-    b.serve();
-    CHECK(b.fetching().empty());
+    chat.request(older);
+    REQUIRE(chat.fetching() == files{"b", "a"});
+    chat.serve();
+    CHECK(chat.fetching().empty());
 
-    b.reopen(false);
-    CHECK(b.fetching().empty());
+    chat.reopen(false);
+    CHECK(chat.fetching().empty());
 }
 
 TEST_CASE(
         "Client: a file several messages carry is counted and fetched once",
         "[client][auto][existing]") {
-    Backlog b;
-    auto first = b.arrive("a");
-    auto forward = b.carry("a", "h-forward");
-    auto n = b.counts();
+    Backlog chat;
+    auto first = chat.arrive("a");
+    auto forward = chat.carry("a", "h-forward");
+    auto n = chat.counts();
     CHECK(n.all.count == 1);
     CHECK(n.all.bytes == 3000);
 
-    b.fetch(AutoDownload::all);
-    CHECK(b.fetching() == files{"a"});
-    b.serve();
+    chat.fetch(AutoDownload::all);
+    CHECK(chat.fetching() == files{"a"});
+    chat.serve();
     for (auto id : {first, forward})
-        CHECK(b.c->message(id, await)->attachments[0].availability ==
+        CHECK(chat.c->message(id, await)->attachments[0].availability ==
               AttachmentAvailability::cached);
 }
 
 TEST_CASE(
         "Client: the backlog goes newest message first by when it was sent",
         "[client][auto][existing]") {
-    Backlog b{true};
-    b.arrive("newer", "image/png", 3000, 5000);
+    Backlog chat{true};
+    chat.arrive("newer", "image/png", 3000, 5000);
     // Delivered after, sent before: a late or synced delivery.
-    b.arrive("older", "image/png", 3000, 2000);
-    b.fetch(AutoDownload::all);
-    CHECK(b.fetching() == files{"newer"});
+    chat.arrive("older", "image/png", 3000, 2000);
+    chat.fetch(AutoDownload::all);
+    CHECK(chat.fetching() == files{"newer"});
 }
 
 TEST_CASE(
         "Client: a size limit lowered while queued forgets what it refuses",
         "[client][auto][existing]") {
-    Backlog b{true};
-    b.arrive("a");
-    b.arrive("b");
-    b.fetch(AutoDownload::all);
-    REQUIRE(b.fetching() == files{"b"});
+    Backlog chat{true};
+    chat.arrive("a");
+    chat.arrive("b");
+    chat.fetch(AutoDownload::all);
+    REQUIRE(chat.fetching() == files{"b"});
 
     // Raised again before the queue reaches `a`: it was forgotten when the limit refused it.
-    b.c->set_auto_download_max_size(1000, await);
-    b.c->set_auto_download_max_size(std::nullopt, await);
-    b.serve();
-    CHECK(b.fetching().empty());
-    b.reopen(false);
-    CHECK(b.fetching().empty());
+    chat.c->set_auto_download_max_size(1000, await);
+    chat.c->set_auto_download_max_size(std::nullopt, await);
+    chat.serve();
+    CHECK(chat.fetching().empty());
+    chat.reopen(false);
+    CHECK(chat.fetching().empty());
 }
 
 TEST_CASE("Client: a message deleted while queued is not fetched", "[client][auto][existing]") {
-    Backlog b{true};
-    auto older = b.arrive("a");
-    b.arrive("b");
-    b.fetch(AutoDownload::all);
-    REQUIRE(b.fetching() == files{"b"});
+    Backlog chat{true};
+    auto older = chat.arrive("a");
+    chat.arrive("b");
+    chat.fetch(AutoDownload::all);
+    REQUIRE(chat.fetching() == files{"b"});
 
-    b.c->delete_message(older, await);
-    b.serve();
-    CHECK(b.fetching().empty());
-    b.reopen(false);
-    CHECK(b.fetching().empty());
+    chat.c->delete_message(older, await);
+    chat.serve();
+    CHECK(chat.fetching().empty());
+    chat.reopen(false);
+    CHECK(chat.fetching().empty());
 }
 
 TEST_CASE("Client: without a cache there is nothing to fetch", "[client][auto][existing]") {
-    Backlog b{false, false};
-    b.arrive("a");
-    auto n = b.counts();
+    Backlog chat{false, false};
+    chat.arrive("a");
+    auto n = chat.counts();
     CHECK(n.all.count == 0);
     CHECK(n.image_attachments.count == 0);
 
-    b.fetch(AutoDownload::all);
-    CHECK(b.fetching().empty());
-    b.c->set_cache_dir(b.dir.path);
-    sync(*b.c);
-    CHECK(b.fetching().empty());
+    chat.fetch(AutoDownload::all);
+    CHECK(chat.fetching().empty());
+    chat.c->set_cache_dir(chat.dir.path);
+    sync(*chat.c);
+    CHECK(chat.fetching().empty());
 }
 
 TEST_CASE("Client: reloading the queue does not fetch a file twice", "[client][auto][existing]") {
-    Backlog b;
-    b.c->set_auto_download_concurrency(2, await);
-    b.arrive("a");
-    b.fetch(AutoDownload::all);
-    REQUIRE(b.fetching() == files{"a"});
+    Backlog chat;
+    chat.c->set_auto_download_concurrency(2, await);
+    chat.arrive("a");
+    chat.fetch(AutoDownload::all);
+    REQUIRE(chat.fetching() == files{"a"});
 
     // A second reload while `a` runs must not spend the other slot joining it.
-    b.c->set_cache_dir(b.dir.path);
-    sync(*b.c);
-    b.arrive("b");
-    CHECK(b.fetching() == files{"a", "b"});
+    chat.c->set_cache_dir(chat.dir.path);
+    sync(*chat.c);
+    chat.arrive("b");
+    CHECK(chat.fetching() == files{"a", "b"});
 }
 
 TEST_CASE(
         "Client: a file several messages carry takes one slot, not one each",
         "[client][auto][existing]") {
-    Backlog b;
-    b.c->set_auto_download_concurrency(2, await);
-    b.arrive("x");
-    b.arrive("a");
-    b.carry("a", "h-forward");
-    b.fetch(AutoDownload::all);
-    CHECK(b.fetching() == files{"a", "x"});
+    Backlog chat;
+    chat.c->set_auto_download_concurrency(2, await);
+    chat.arrive("x");
+    chat.arrive("a");
+    chat.carry("a", "h-forward");
+    chat.fetch(AutoDownload::all);
+    CHECK(chat.fetching() == files{"a", "x"});
 }
 
 TEST_CASE("Client: asking twice does not queue anything twice", "[client][auto][existing]") {
-    Backlog b{true};
-    b.arrive("a");
-    b.arrive("b");
-    b.arrive("c");
-    b.fetch(AutoDownload::all);
-    b.fetch_existing();
-    REQUIRE(b.fetching() == files{"c"});
-    b.serve();
-    REQUIRE(b.fetching() == files{"b"});
-    b.serve();
-    REQUIRE(b.fetching() == files{"a"});
+    Backlog chat{true};
+    chat.arrive("a");
+    chat.arrive("b");
+    chat.arrive("c");
+    chat.fetch(AutoDownload::all);
+    chat.fetch_existing();
+    REQUIRE(chat.fetching() == files{"c"});
+    chat.serve();
+    REQUIRE(chat.fetching() == files{"b"});
+    chat.serve();
+    REQUIRE(chat.fetching() == files{"a"});
 
     // A duplicate entry would try `a` again at once.
-    fail_downloads(*b.net, 503);
-    sync(*b.c);
-    CHECK(b.fetching().empty());
+    fail_downloads(*chat.net, 503);
+    sync(*chat.c);
+    CHECK(chat.fetching().empty());
 }
 
 TEST_CASE("Client: a file found unavailable is no longer owed", "[client][auto][existing]") {
-    Backlog b{true};
-    b.fetch(AutoDownload::all);
-    b.arrive("a");
-    REQUIRE(b.fetching() == files{"a"});
-    REQUIRE(b.owed() == 1);
+    Backlog chat{true};
+    chat.fetch(AutoDownload::all);
+    chat.arrive("a");
+    REQUIRE(chat.fetching() == files{"a"});
+    REQUIRE(chat.owed() == 1);
 
     SECTION("the server no longer has it") {
-        fail_downloads(*b.net, 404);
-        sync(*b.c);
-        CHECK(b.owed() == 0);
+        fail_downloads(*chat.net, 404);
+        sync(*chat.c);
+        CHECK(chat.owed() == 0);
     }
 
     SECTION("its bytes are not the file they claimed to be") {
         std::vector<std::byte> garbage(4000);
         random::fill(garbage);
-        serve_downloads(*b.net, garbage);
-        sync(*b.c);
-        CHECK(b.c->conversation(b.convo, await)->messages(await)[0].attachments[0].availability ==
-              AttachmentAvailability::unreadable);
-        CHECK(b.owed() == 0);
+        serve_downloads(*chat.net, garbage);
+        sync(*chat.c);
+        CHECK(chat.c->conversation(chat.convo, await)
+                      ->messages(await)[0]
+                      .attachments[0]
+                      .availability == AttachmentAvailability::unreadable);
+        CHECK(chat.owed() == 0);
     }
 }
 
 TEST_CASE("Client: a pointer with no url is never owed", "[client][auto][existing]") {
-    Backlog b;
-    b.set(AutoDownload::all);
-    deliver(*b.c,
-            b.peer,
+    Backlog chat;
+    chat.set(AutoDownload::all);
+    deliver(*chat.c,
+            chat.peer,
             "",
-            from_epoch_ms(b.when++),
+            from_epoch_ms(chat.when++),
             "nourl",
             "",
             std::nullopt,
@@ -517,13 +520,13 @@ TEST_CASE("Client: a pointer with no url is never owed", "[client][auto][existin
                 a->set_size(100);
                 a->set_contenttype("image/png");
             });
-    sync(*b.c);
-    CHECK(b.owed() == 0);
-    CHECK(b.fetching().empty());
+    sync(*chat.c);
+    CHECK(chat.owed() == 0);
+    CHECK(chat.fetching().empty());
 
-    b.fetch_existing();
-    CHECK(b.owed() == 0);
-    b.reopen(false);
-    CHECK(b.owed() == 0);
-    CHECK(b.fetching().empty());
+    chat.fetch_existing();
+    CHECK(chat.owed() == 0);
+    chat.reopen(false);
+    CHECK(chat.owed() == 0);
+    CHECK(chat.fetching().empty());
 }
