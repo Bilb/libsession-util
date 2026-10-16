@@ -41,6 +41,9 @@ namespace session::client::cache {
 /// the other's files unreferenced, which it would, since neither knows the other's urls.
 inline constexpr std::string_view PROFILE_DIR = "profile";
 inline constexpr std::string_view ATTACHMENT_DIR = "attachments";
+/// Files a send took over (`OutgoingAttachment::take_file`), kept as they were rather than
+/// encrypted, until they are uploaded.
+inline constexpr std::string_view OUTGOING_DIR = "outgoing";
 
 /// The name `url`'s cached file takes, and where that file lives beneath `dir`.
 ///

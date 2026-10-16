@@ -20,8 +20,33 @@ constexpr size_t MAX_THUMBHASH_SIZE = 25;
 /// and uploaded when the message is sent, not when it is attached, so a caller can hold these
 /// against a draft for as long as the user takes to write it.
 struct OutgoingAttachment {
-    /// The file to send.  Read at send time, so it must still be there and unchanged by then.
+    /// The file to send.  Read when its upload comes up and again by any retry, not by
+    /// `send_message` itself, so without `take_file` it must stay here, unchanged, until the upload
+    /// is done.
     std::filesystem::path path;
+
+    /// Hands the file to libsession, which keeps it beneath `Client::set_cache_dir` (needed for
+    /// this), reads it from there for the upload and any retry, and deletes it once nothing can
+    /// send it: when it has uploaded (a retry never uploads it again), when its message turns
+    /// `SendState::unsendable`, or when its message is deleted.
+    ///
+    /// The caller's file is removed once the message is stored, and must not be used afterwards.
+    /// Until then it is untouched, and it stays at `path` whenever the message is never stored,
+    /// which includes every send that throws.  A symbolic link is refused.
+    ///
+    /// The file is hard-linked into place, or copied where it cannot be (across filesystems, say).
+    /// Either happens on the calling thread, so a copy of a large file blocks the `send_message`
+    /// call, callback form included.
+    ///
+    /// It waits there **unencrypted**, as handed over, unlike the rest of the cache.
+    ///
+    /// Until it is uploaded, `Client::attachment_data`, `attachment_data_cached` and
+    /// `save_attachment` serve it and `Attachment::availability` says `cached`, since the caller
+    /// no longer has it to draw from.
+    ///
+    /// `filename` defaults to `path`'s filename as it was, and `content_type` to what its
+    /// extension implies, as without this.
+    bool take_file = false;
 
     /// MIME type to advertise.  Recipients use it to decide how to display the attachment; when
     /// unset it is inferred from the filename's extension.
@@ -239,7 +264,8 @@ struct Attachment {
     ///
     /// `availability` is not an exception to that.  The cache is ours, at a path derived from the
     /// url rather than chosen by anybody, so it is a fact about this attachment and not about
-    /// somewhere the application happens to have put a copy.
+    /// somewhere the application happens to have put a copy.  The same goes for a file a send
+    /// took (`OutgoingAttachment::take_file`), which is ours until it uploads.
     bool uploaded = false;
 
     /// Whether the bytes are here, on their way, fetchable, or not to be had -- see
@@ -248,7 +274,8 @@ struct Attachment {
     /// Reported the same way for an outgoing attachment as an incoming one: whatever we send is
     /// kept on upload, unless it is larger than the whole attachment cache limit, then evicted like
     /// any cached file.  So "can I draw this without a download" has one answer regardless of
-    /// direction.
+    /// direction.  Before its upload, an attachment that took its file is `cached` while that
+    /// file is there, and an un-taken one is `absent`, its bytes being the caller's.
     AttachmentAvailability availability = AttachmentAvailability::absent;
 
     /// How far the transfer has got, when `availability` is `fetching`; both 0 otherwise.

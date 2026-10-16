@@ -1,6 +1,7 @@
 #include "client_schema_before_006.hpp"
 #include "client_schema_before_009.hpp"
 #include "client_schema_before_010.hpp"
+#include "client_schema_before_011.hpp"
 #include "common.hpp"
 
 // ── ConversationId ──────────────────────────────────────────────────────────────────────────────
@@ -316,4 +317,23 @@ TEST_CASE(
                         "SELECT width, height, frames FROM attachment_cache WHERE name = 'a'");
     });
     CHECK(facts == row{std::nullopt, std::nullopt, std::nullopt});
+}
+
+TEST_CASE("Client: upgrading indexes the attachments still to upload", "[client][schema]") {
+    TempClient c{TempClient::unopened};
+    {
+        auto old = open_client_schema_before(
+                c.path, "011_pending_attachments", client_schema_before_011);
+        REQUIRE(TestHelper::migration_applied(old, "client:010_picture_info"));
+        REQUIRE_FALSE(TestHelper::migration_applied(old, "client:011_pending_attachments"));
+    }
+
+    c.reopen();
+    REQUIRE(TestHelper::migration_applied(c->core, "client:011_pending_attachments"));
+    auto indexed = TestHelper::on_loop(c->core, [&] {
+        return c->core.database().conn().prepared_get<int64_t>(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index'"
+                " AND name = 'message_attachments_pending')");
+    });
+    CHECK(indexed);
 }

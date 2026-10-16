@@ -4,6 +4,8 @@
 #include <deque>
 #include <filesystem>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <oxen/quic/loop.hpp>
 #include <session/client/attachment.hpp>
@@ -300,9 +302,9 @@ class Client {
     /// See `Conversation::send_message` for what the arguments mean and what `on_upload` reports.
     ///
     /// @throws std::invalid_argument if the conversation is not a DM (groups and communities are
-    /// not implemented yet), if an attachment cannot be read, or if `reply_to` names a message that
-    /// does not exist or belongs to another conversation; thrown on the calling thread, before
-    /// anything is stored or dispatched.
+    /// not implemented yet), if an attachment cannot be read or taken, or if `reply_to` names a
+    /// message that does not exist or belongs to another conversation; thrown on the calling
+    /// thread, before anything is stored or dispatched.
     void send_message(
             const ConversationId& id,
             OutgoingMessage msg,
@@ -600,7 +602,8 @@ class Client {
     /// written and verified, or the same error `cb` gets.
     ///
     /// Fails as `attachment_data` does, and with `err::save_failed` if the file cannot be written
-    /// where it was asked to go.
+    /// where it was asked to go.  A taken file not yet uploaded is saved from our own copy, as
+    /// `attachment_data` serves it.
     ///
     /// `notify_sender` tells the person who sent it that we saved their file, which is what
     /// Session's other clients do and so what a recipient expects.  Passing false keeps this
@@ -663,6 +666,9 @@ class Client {
     /// the message or config entry whose key originally opened them — and so the files are not
     /// readable by whoever ends up with the disk.  That protection is only as good as the
     /// database's: with an unencrypted database the key sits in plaintext beside them.
+    ///
+    /// The exception is `outgoing/`, where files a send took (`OutgoingAttachment::take_file`)
+    /// wait **unencrypted**, as the caller handed them over, until they upload or are dropped.
     void set_cache_dir(std::filesystem::path dir);
 
     /// A conversation's picture, decrypted and ready to decode.
@@ -1091,6 +1097,9 @@ class Client {
     // database rather than worked out at each of those, which delete in several different ways.
     void _withdraw_orphaned_requests();
 
+    // What everything that deletes messages or attachments calls once it has committed.
+    void _attachments_deleted();
+
     // Stops `found`'s transfer and forgets it if nobody is left on it, discarding whatever it was
     // keeping; true if it did.
     bool _abort_if_unwanted(std::map<std::string, std::shared_ptr<Transfer>>::iterator found);
@@ -1496,10 +1505,49 @@ class Client {
             bool include_deleted);
     std::optional<Message> _message(int64_t id);
     int64_t _send_message(const ConversationId& id, const OutgoingMessage& msg);
+
+    // The files a send took over (`OutgoingAttachment::take_file`), until its message is stored.
+    // Dropped before `stored()`, it removes its copies and leaves the caller's files alone.
+    class TakenFiles;
+
+    // Copies or links each `take_file` attachment into `_outgoing_dir()` and points it there.  On
+    // the calling thread, after `_require_sendable`; null when nothing was taken.
+    std::shared_ptr<TakenFiles> _take_files(OutgoingMessage& msg);
+
     int64_t _send_message(
             const ConversationId& id,
             const OutgoingMessage& msg,
-            Conversation::upload_progress on_upload);
+            Conversation::upload_progress on_upload,
+            std::shared_ptr<TakenFiles> taken = nullptr);
+
+    // Removes the file attachment `index` took, once it is uploaded and its cached copy is under
+    // way.  A retry never uploads it again.
+    void _drop_taken_file(int64_t client_id, size_t index);
+
+    // The file an attachment row's `path` names, resolving a taken file against the cache dir.
+    std::filesystem::path _attachment_file(const std::string& stored) const;
+
+    // The file a not-yet-uploaded attachment took, while its message can still be sent.
+    std::optional<std::filesystem::path> _taken_unsent(
+            sqlite::Connection& c, int64_t message_id, size_t index);
+
+    // `_read_cache_file` for a taken file, which is kept as it is rather than encrypted.
+    void _read_taken_file(
+            std::filesystem::path file,
+            bool wait,
+            std::function<void(std::optional<std::vector<std::byte>>)> then);
+
+    // Where taken files are kept, or empty without a cache directory.
+    std::filesystem::path _outgoing_dir() const;
+
+    // Removes what `_outgoing_dir()` holds that no message still has to upload.  Listed on the disk
+    // loop and decided on Core's, as `_sweep_cache` is.
+    void _sweep_outgoing();
+
+    // Names taken into `_outgoing_dir()` whose message is not stored yet, which a sweep must keep.
+    // Locked because taking happens on the caller's thread.
+    std::mutex _taking_mutex;
+    std::unordered_set<std::string> _taking;
 
     // Uploads the message's first attachment that has no url yet and, when there are none left,
     // finishes the send.  Each upload's completion calls this again, so the chain runs one file at
@@ -1719,6 +1767,9 @@ class Client {
     // entry to mark as used.
     void _save_from_cache(
             std::shared_ptr<Save> s, std::filesystem::path file, std::optional<int64_t> entry_id);
+
+    // Copies a taken file that has not been uploaded into the save, on the disk loop.
+    void _save_from_taken(std::shared_ptr<Save> s, std::filesystem::path file);
 
     // Writes the whole of `bytes` into the save, on the disk loop, for one served from a transfer
     // that held its file rather than caching it.
