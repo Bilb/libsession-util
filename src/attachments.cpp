@@ -1269,6 +1269,19 @@ cleared_b32 Encryptor::load_key_from_file(
             allow_large);
 }
 
+cleared_b32 Encryptor::load_key_from_data(
+        std::shared_ptr<const std::vector<std::byte>> data, bool allow_large) {
+    update_key(*data);
+    return start_encryption(
+            [data, at = size_t{0}](std::span<std::byte> buffer) mutable -> size_t {
+                const auto n = std::min(buffer.size(), data->size() - at);
+                std::memcpy(buffer.data(), data->data() + at, n);
+                at += n;
+                return n;
+            },
+            allow_large);
+}
+
 std::pair<Encryptor, cleared_b32> Encryptor::from_file(
         std::span<const std::byte> seed,
         Domain domain,
