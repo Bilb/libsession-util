@@ -109,7 +109,8 @@ namespace detail {
     // vips_thumbnail applies EXIF orientation, loads only the first frame of an animation, and
     // shrinks on load where the format allows (JPEG, WebP, HEIF), so a 12 MP photo is never
     // decoded at full size.  It converts from an embedded ICC profile only when given an output
-    // profile.
+    // profile.  Never enlarging is what the fit needs; a cover is given a box no larger than the
+    // picture, so it is never asked to.
     image_ptr scaled(Source& source, const Info& info, uint32_t width, uint32_t height, bool crop) {
         VipsImage* out = nullptr;
         int rc;
@@ -125,56 +126,38 @@ namespace detail {
                                    (longer * std::min(width, height) + shorter - 1) / shorter)
                          : std::max(width, height);
             auto decoded = platform_decode(source, info.format, max_side);
-            rc = crop ? vips_thumbnail_image(
-                                decoded.get(),
-                                &out,
-                                w,
-                                "height",
-                                h,
-                                "crop",
-                                VIPS_INTERESTING_CENTRE,
-                                "output_profile",
-                                "srgb",
-                                nullptr)
-                      : vips_thumbnail_image(
-                                decoded.get(),
-                                &out,
-                                w,
-                                "height",
-                                h,
-                                "size",
-                                VIPS_SIZE_DOWN,
-                                "output_profile",
-                                "srgb",
-                                nullptr);
+            rc = vips_thumbnail_image(
+                    decoded.get(),
+                    &out,
+                    w,
+                    "height",
+                    h,
+                    "size",
+                    VIPS_SIZE_DOWN,
+                    "crop",
+                    crop ? VIPS_INTERESTING_CENTRE : VIPS_INTERESTING_NONE,
+                    "output_profile",
+                    "srgb",
+                    nullptr);
         } else {
             VipsSource* vsrc = source_access::vips(source);
             if (vips_source_rewind(vsrc)) {
                 source_access::rethrow_error(source);
                 throw_vips_error("scaling: cannot rewind the source");
             }
-            rc = crop ? vips_thumbnail_source(
-                                vsrc,
-                                &out,
-                                w,
-                                "height",
-                                h,
-                                "crop",
-                                VIPS_INTERESTING_CENTRE,
-                                "output_profile",
-                                "srgb",
-                                nullptr)
-                      : vips_thumbnail_source(
-                                vsrc,
-                                &out,
-                                w,
-                                "height",
-                                h,
-                                "size",
-                                VIPS_SIZE_DOWN,
-                                "output_profile",
-                                "srgb",
-                                nullptr);
+            rc = vips_thumbnail_source(
+                    vsrc,
+                    &out,
+                    w,
+                    "height",
+                    h,
+                    "size",
+                    VIPS_SIZE_DOWN,
+                    "crop",
+                    crop ? VIPS_INTERESTING_CENTRE : VIPS_INTERESTING_NONE,
+                    "output_profile",
+                    "srgb",
+                    nullptr);
             source_access::rethrow_error(source);
         }
         if (rc)
