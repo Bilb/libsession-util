@@ -82,8 +82,14 @@ struct TempClient {
         std::filesystem::remove(path, ec);
     }
 
-    Client* operator->() { return client.get(); }
-    Client& operator*() { return *client; }
+    Client* operator->() {
+        REQUIRE(client);
+        return client.get();
+    }
+    Client& operator*() {
+        REQUIRE(client);
+        return *client;
+    }
 };
 
 /// Opens `path` as an install from before client migration `first_missing` has it: the client
