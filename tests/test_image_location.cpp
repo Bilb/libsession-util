@@ -510,9 +510,8 @@ TEST_CASE("Location: lengths at the edge of their fields are refused", "[image][
     CHECK_FALSE(image::without_location(webp));
     auto png = saved("png");
     buffer bad{png.begin(), png.begin() + 8};
-    for (auto b : bytes_of(
-                 "\xff\xff\xff\xff"
-                 "eXIfII*\0"sv))
+    for (auto b : bytes_of("\xff\xff\xff\xff"
+                           "eXIfII*\0"sv))
         bad.push_back(b);
     bad.resize(bad.size() + 20);
     CHECK_FALSE(image::without_location(bad));
