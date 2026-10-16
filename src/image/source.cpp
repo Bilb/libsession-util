@@ -5,6 +5,7 @@
 #include <mutex>
 #include <optional>
 #include <oxen/log/format.hpp>
+#include <session/file.hpp>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -78,7 +79,7 @@ Source::Source(const std::filesystem::path& file) : pimpl{std::make_unique<impl>
     auto name = file.u8string();
     pimpl->source = vips_source_new_from_file(reinterpret_cast<const char*>(name.c_str()));
     if (!pimpl->source)
-        throw_vips_error("image source: cannot open {}"_format(file.string()));
+        throw_vips_error("image source: cannot open {}"_format(utf8_string(file)));
     pimpl->size = std::filesystem::file_size(file);
 }
 

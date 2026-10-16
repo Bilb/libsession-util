@@ -6,6 +6,7 @@
 #include <fstream>
 #include <oxen/log.hpp>
 #include <session/attachments.hpp>
+#include <session/file.hpp>
 #include <session/format.hpp>
 #include <session/hash.hpp>
 #include <session/random.hpp>
@@ -65,7 +66,7 @@ std::optional<std::vector<std::byte>> read(
     } catch (const std::exception& e) {
         // A cache that cannot answer is a cache miss; the caller fetches instead.  Removed because
         // nothing else ever would: it is not referenced by anything that could notice it is bad.
-        log::warning(cat, "Discarding unreadable cache entry {}: {}", file.string(), e.what());
+        log::warning(cat, "Discarding unreadable cache entry {}: {}", utf8_string(file), e.what());
         std::filesystem::remove(file, ec);
         return std::nullopt;
     }
@@ -99,7 +100,7 @@ bool read_into(
     } catch (const std::exception& e) {
         // As for `read`.  The caller may already have been handed some of it, which is theirs to
         // discard: a failure here is a failure of the whole read.
-        log::warning(cat, "Discarding unreadable cache entry {}: {}", file.string(), e.what());
+        log::warning(cat, "Discarding unreadable cache entry {}: {}", utf8_string(file), e.what());
         std::filesystem::remove(file, ec);
         return false;
     }
@@ -173,7 +174,7 @@ std::vector<std::string> list(const std::filesystem::path& dir, std::string_view
 
     std::error_code ec;
     for (const auto& entry : std::filesystem::directory_iterator{dir / kind, ec}) {
-        auto name = entry.path().filename().string();
+        auto name = utf8_string(entry.path().filename());
         // A download still running is not garbage, it is unfinished, and unlinking it mid-write
         // would make the fetch fail for a reason nothing could explain.
         if (name.ends_with(PARTIAL_SUFFIX))

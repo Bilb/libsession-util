@@ -20,6 +20,7 @@
 #include <session/config/local.hpp>
 #include <session/config/user_groups.hpp>
 #include <session/config/user_profile.hpp>
+#include <session/file.hpp>
 #include <session/format.hpp>
 #include <session/hash.hpp>
 #include <session/image/content_types.hpp>
@@ -623,17 +624,17 @@ void Client::_require_readable(const std::vector<OutgoingAttachment>& attachment
     for (const auto& a : attachments) {
         std::error_code ec;
         if (!std::filesystem::is_regular_file(a.path, ec) || ec)
-            throw std::invalid_argument{
-                    "send_message: attachment {} is not a readable file"_format(a.path.string())};
+            throw std::invalid_argument{"send_message: attachment {} is not a readable file"_format(
+                    utf8_string(a.path))};
         if (std::filesystem::file_size(a.path, ec) == 0 || ec)
             throw std::invalid_argument{
-                    "send_message: attachment {} is empty"_format(a.path.string())};
+                    "send_message: attachment {} is empty"_format(utf8_string(a.path))};
         // Thrown rather than dropped, unlike the incoming side: this is our own caller's value, so
         // the mistake is reported where it was made -- the same reason the checks above throw.
         if (a.thumbhash && a.thumbhash->size() > MAX_THUMBHASH_SIZE)
             throw std::invalid_argument{
                     "send_message: attachment {} has a thumbhash longer than {} bytes"_format(
-                            a.path.string(), MAX_THUMBHASH_SIZE)};
+                            utf8_string(a.path), MAX_THUMBHASH_SIZE)};
     }
 }
 
@@ -686,7 +687,7 @@ class Client::TakenFiles {
     void claim(std::filesystem::path from, std::filesystem::path to) {
         {
             std::lock_guard lock{_client._taking_mutex};
-            _client._taking.insert(to.filename().string());
+            _client._taking.insert(utf8_string(to.filename()));
         }
         _files.emplace_back(std::move(from), std::move(to));
     }
@@ -703,7 +704,7 @@ class Client::TakenFiles {
                     log::warning(
                             cat,
                             "send_message: could not remove {} once taken: {}",
-                            from.string(),
+                            utf8_string(from),
                             ec.message());
             } catch (...) {
             }
@@ -717,7 +718,7 @@ class Client::TakenFiles {
         _released = true;
         std::lock_guard lock{_client._taking_mutex};
         for (const auto& [from, to] : _files)
-            _client._taking.erase(to.filename().string());
+            _client._taking.erase(utf8_string(to.filename()));
     }
 
     Client& _client;
@@ -773,7 +774,7 @@ static std::string infer_content_type(const std::filesystem::path& path) {
             {"tar", "application/x-tar"},
     };
 
-    auto ext = path.extension().string();
+    auto ext = utf8_string(path.extension());
     if (ext.starts_with('.'))
         ext.erase(0, 1);
     for (auto& ch : ext)
@@ -805,8 +806,8 @@ static std::string taken_path(std::string_view name) {
 
 std::filesystem::path Client::_attachment_file(const std::string& stored) const {
     if (taken_name(stored) && !_cache_dir.empty())
-        return _cache_dir / stored;
-    return stored;
+        return _cache_dir / utf8_path(stored);
+    return utf8_path(stored);
 }
 
 std::shared_ptr<Client::TakenFiles> Client::_take_files(OutgoingMessage& msg) {
@@ -819,7 +820,7 @@ std::shared_ptr<Client::TakenFiles> Client::_take_files(OutgoingMessage& msg) {
     std::filesystem::create_directories(dir, ec);
     if (ec)
         throw std::invalid_argument{
-                "send_message: cannot create {}: {}"_format(dir.string(), ec.message())};
+                "send_message: cannot create {}: {}"_format(utf8_string(dir), ec.message())};
 
     // Refused rather than followed: taking the target would delete a file the caller never named,
     // and taking the link would leave the file behind and the copy dangling.
@@ -827,7 +828,7 @@ std::shared_ptr<Client::TakenFiles> Client::_take_files(OutgoingMessage& msg) {
         if (a.take_file && std::filesystem::is_symlink(a.path, ec))
             throw std::invalid_argument{
                     "send_message: attachment {} is a symbolic link, which take_file refuses"_format(
-                            a.path.string())};
+                            utf8_string(a.path))};
 
     auto taken = std::make_shared<TakenFiles>(*this);
     for (auto& a : msg.attachments) {
@@ -836,9 +837,9 @@ std::shared_ptr<Client::TakenFiles> Client::_take_files(OutgoingMessage& msg) {
         if (!a.content_type)
             a.content_type = infer_content_type(a.path);
         // A fresh name, keeping a plausible extension for whoever looks in the directory.
-        auto ext = a.path.extension().string();
+        auto ext = utf8_string(a.path.extension());
         auto name = random::random_base32(26) + (ext.size() <= MAX_TAKEN_EXTENSION ? ext : "");
-        auto to = dir / name;
+        auto to = dir / utf8_path(name);
         taken->claim(a.path, to);
         // Linked rather than renamed so that the caller's file stays until the message is stored;
         // copied where a link cannot be made, such as across filesystems.
@@ -849,15 +850,15 @@ std::shared_ptr<Client::TakenFiles> Client::_take_files(OutgoingMessage& msg) {
         }
         if (ec)
             throw std::invalid_argument{"send_message: attachment {} cannot be taken: {}"_format(
-                    a.path.string(), ec.message())};
+                    utf8_string(a.path), ec.message())};
         // Checked on our own copy too, which nothing else writes: the caller's path can change
         // between the check above and the link.
         if (std::filesystem::is_symlink(to, ec))
             throw std::invalid_argument{
                     "send_message: attachment {} is a symbolic link, which take_file refuses"_format(
-                            a.path.string())};
+                            utf8_string(a.path))};
         if (!a.filename)
-            a.filename = a.path.filename().string();
+            a.filename = utf8_string(a.path.filename());
         a.path = taken_path(name);
     }
     return taken;
@@ -906,7 +907,7 @@ void Client::_sweep_outgoing() {
             _post_disk([dir, names = std::move(names)] {
                 for (const auto& name : names) {
                     std::error_code ec;
-                    std::filesystem::remove(dir / name, ec);
+                    std::filesystem::remove(dir / utf8_path(name), ec);
                 }
                 log::debug(cat, "Removed {} outgoing file(s) no message needs", names.size());
             });
@@ -1744,7 +1745,7 @@ namespace {
         std::vector<std::byte> bytes(static_cast<size_t>(size));
         std::ifstream in;
         in.exceptions(std::ios::badbit);
-        in.open(path, std::ios::binary);
+        in.open(utf8_path(path), std::ios::binary);
         if (!in.is_open())
             throw std::runtime_error{"{} cannot be opened"_format(path)};
         in.read(reinterpret_cast<char*>(bytes.data()), size);
@@ -1786,7 +1787,7 @@ void Client::_read_taken_file(
         if (ec)
             return std::nullopt;
         try {
-            return *read_file(file.string(), static_cast<int64_t>(size), true);
+            return *read_file(utf8_string(file), static_cast<int64_t>(size), true);
         } catch (const std::exception&) {
             return std::nullopt;
         }
@@ -2636,9 +2637,9 @@ uint64_t Client::save_attachment(
     // Checked on the calling thread so a caller's own mistake surfaces at the call site, where they
     // still have a stack to make sense of it.
     if (std::filesystem::is_directory(dest))
-        throw std::invalid_argument{"save_attachment: {} is a directory"_format(dest.string())};
+        throw std::invalid_argument{"save_attachment: {} is a directory"_format(utf8_string(dest))};
     if (auto dir = dest.parent_path(); !dir.empty() && !std::filesystem::is_directory(dir))
-        throw std::invalid_argument{"save_attachment: {} does not exist"_format(dir.string())};
+        throw std::invalid_argument{"save_attachment: {} does not exist"_format(utf8_string(dir))};
 
     // Not _async: what that reports is the *start* of the transfer, and the answer a caller wants
     // is whether the file arrived, which is minutes away.  So the callback is carried down to the
@@ -5522,9 +5523,10 @@ int64_t Client::_send_message(
                     client_id,
                     static_cast<int64_t>(i),
                     // Absolute, so that a relative one cannot be mistaken for a taken file.
-                    a.take_file ? a.path.string() : std::filesystem::absolute(a.path).string(),
+                    a.take_file ? utf8_string(a.path)
+                                : utf8_string(std::filesystem::absolute(a.path)),
                     a.content_type ? *a.content_type : infer_content_type(a.path),
-                    a.filename ? a.filename : std::optional{a.path.filename().string()},
+                    a.filename ? a.filename : std::optional{utf8_string(a.path.filename())},
                     (a.voice_message ? ATTACHMENT_FLAG_VOICE_MESSAGE : 0) |
                             (a.original_file ? ATTACHMENT_FLAG_ORIGINAL_FILE : 0),
                     a.width ? std::optional<int64_t>{*a.width} : std::nullopt,
@@ -5563,7 +5565,7 @@ int64_t Client::_send_message(
 void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress on_upload) {
     struct Wanted {
         int64_t idx;
-        std::string path;
+        std::filesystem::path path;
         bool needs_size, needs_placeholder;
     };
     std::vector<Wanted> wanted;
@@ -5580,7 +5582,7 @@ void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress o
         )"_format(DISPLAYABLE_IMAGE_SQL),
                      client_id))
             if (!(w && h) || !thumbhash)
-                wanted.push_back({idx, _attachment_file(path).string(), !(w && h), !thumbhash});
+                wanted.push_back({idx, _attachment_file(path), !(w && h), !thumbhash});
     }
     if (wanted.empty())
         return _upload_next(client_id, std::move(on_upload));
@@ -5600,7 +5602,7 @@ void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress o
         for (auto& want : wanted) {
             Derived d{want.idx};
             try {
-                image::Source source{std::filesystem::path{want.path}};
+                image::Source source{want.path};
                 // The picture's own size: what a placeholder needs is its shape, and a re-encode
                 // replaces it with the size sent.
                 if (want.needs_size)
@@ -5683,7 +5685,7 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
                                   "no cache directory holds {}"_format(stored)}});
         return _fail_attachment_send(client_id);
     }
-    auto path = _attachment_file(stored).string();
+    auto path = utf8_string(_attachment_file(stored));
     const bool original = (flags & ATTACHMENT_FLAG_ORIGINAL_FILE) != 0;
     const bool declared_image = content_type && content_type->starts_with("image/");
 
@@ -5700,8 +5702,8 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
                 on_upload = std::move(on_upload)]() mutable {
         std::optional<int64_t> size;
         std::error_code ec;
-        auto found = std::filesystem::file_size(path, ec);
-        if (!ec && std::filesystem::is_regular_file(path, ec) && !ec)
+        auto found = std::filesystem::file_size(utf8_path(path), ec);
+        if (!ec && std::filesystem::is_regular_file(utf8_path(path), ec) && !ec)
             size = static_cast<int64_t>(found);
         call([this,
               client_id,
@@ -5783,7 +5785,7 @@ void Client::_convert_outgoing(
             if (fits)
                 out.body = read_file(path, file_size, true);
             auto source = out.body ? image::Source{std::span<const std::byte>{*out.body}}
-                                   : image::Source{std::filesystem::path{path}};
+                                   : image::Source{utf8_path(path)};
             auto refuse = [&] {
                 out = Converted{.outcome = Outcome::too_large};
                 return out;
@@ -5876,8 +5878,7 @@ void Client::_convert_outgoing(
                         "SELECT filename FROM message_attachments WHERE message = ?1 AND idx = ?2",
                         client_id,
                         static_cast<int64_t>(index));
-                std::filesystem::path renamed{
-                        name && *name ? **name : std::filesystem::path{path}.filename().string()};
+                auto renamed = name && *name ? utf8_path(**name) : utf8_path(path).filename();
                 renamed.replace_extension(c.content_type == "image/webp" ? ".webp" : ".jpg");
                 conn.prepared_exec(
                         R"(
@@ -5889,7 +5890,7 @@ void Client::_convert_outgoing(
                         client_id,
                         static_cast<int64_t>(index),
                         c.content_type,
-                        renamed.string(),
+                        utf8_string(renamed),
                         static_cast<int64_t>(c.width),
                         static_cast<int64_t>(c.height),
                         c.thumbhash);
@@ -5975,7 +5976,7 @@ void Client::_upload_one(
     }
 
     network::FileUploadRequest req;
-    req.file = path;
+    req.file = utf8_path(path);
     req.data = body;
     req.domain = attachment::Domain::ATTACHMENT;
     // The limit this guards is the one onion requests impose, and an attachment goes to the file
@@ -6188,14 +6189,15 @@ static std::filesystem::path open_partial(std::ofstream& out, const std::filesys
             return p;
         out.clear();
     }
-    throw std::runtime_error{"Cannot write a scratch file beside {}"_format(dest.string())};
+    throw std::runtime_error{"Cannot write a scratch file beside {}"_format(utf8_string(dest))};
 }
 
 // `name (1).pdf`, not `name.pdf (1)`: only the first still opens on a double-click, and it is what
 // browsers and both desktop file managers produce.
 static std::filesystem::path numbered(const std::filesystem::path& dest, int n) {
     auto out = dest;
-    out.replace_filename("{} ({}){}"_format(dest.stem().string(), n, dest.extension().string()));
+    out.replace_filename(utf8_path(
+            "{} ({}){}"_format(utf8_string(dest.stem()), n, utf8_string(dest.extension()))));
     return out;
 }
 
@@ -6219,7 +6221,7 @@ static std::filesystem::path final_path(const std::filesystem::path& dest, bool 
         if (!std::filesystem::exists(p, ec))
             return p;
     }
-    throw std::runtime_error{"Cannot find a free name beside {}"_format(dest.string())};
+    throw std::runtime_error{"Cannot find a free name beside {}"_format(utf8_string(dest))};
 }
 
 Client::transfer_progress Client::_attachment_progress(
@@ -6668,7 +6670,7 @@ void Client::_cache_outgoing_attachment(
                     "Not caching attachment of message {}: {} is no longer the file that was "
                     "uploaded",
                     client_id,
-                    source.string());
+                    utf8_string(source));
             return;
         }
 
@@ -6688,7 +6690,7 @@ void Client::_cache_outgoing_attachment(
                         static_cast<std::streamsize>(chunk.size()));
                 auto got = static_cast<size_t>(in.gcount());
                 if (got == 0)
-                    throw std::runtime_error{"{} ended early"_format(source.string())};
+                    throw std::runtime_error{"{} ended early"_format(utf8_string(source))};
                 w.write(std::span{chunk}.first(got));
                 copied += static_cast<int64_t>(got);
             }
@@ -7354,7 +7356,7 @@ void Client::_save_write(Save& s, std::span<const std::byte> data) {
                 reinterpret_cast<const char*>(data.data()),
                 static_cast<std::streamsize>(data.size()));
         if (!s.out)
-            throw std::runtime_error{"writing {} failed"_format(s.partial.string())};
+            throw std::runtime_error{"writing {} failed"_format(utf8_string(s.partial))};
     } catch (const std::exception& e) {
         // Given up on here, not the transfer: whatever else wants these bytes still gets them.
         s.failed = Error{err::save_failed, e.what()};
@@ -7376,7 +7378,7 @@ Expected<std::filesystem::path> Client::_save_finish(Save& s, std::optional<Erro
             s.partial = open_partial(s.out, s.dest);
         s.out.close();
         if (!s.out)
-            throw std::runtime_error{"writing {} failed"_format(s.partial.string())};
+            throw std::runtime_error{"writing {} failed"_format(utf8_string(s.partial))};
 
         // Only now does it get a name a user would recognise -- and only now can it be known
         // whether the one they asked for is still free, which is why the choice is here rather

@@ -1,4 +1,5 @@
 #include <session/client/error_codes.hpp>
+#include <session/file.hpp>
 
 #include "derived_fixture.hpp"
 
@@ -417,5 +418,24 @@ TEST_CASE("Client: a taken file with a long extension is kept without it", "[cli
     CHECK(msg->attachments[0].filename == name);
     CHECK(msg->attachments[0].content_type == "application/octet-stream");
     CHECK(std::filesystem::path{stored_path(s.c, id)}.extension().empty());
+    CHECK(on_server(s.c, *net, id) == body);
+}
+
+TEST_CASE("Client: a name outside ASCII is stored as UTF-8", "[client][send][take]") {
+    Sandbox s;
+    auto* net = attach_mock_network(s.c->core);
+    // Built from UTF-8 explicitly, so that a narrow conversion would be the one to get it wrong.
+    auto name = session::utf8_path("caf\xc3\xa9 \xe2\x98\x95.txt");
+    auto body = contents(3000);
+    auto file = s.dir / name;
+    std::ofstream{file, std::ios::binary}.write(
+            reinterpret_cast<const char*>(body.data()), body.size());
+
+    auto id = s.send(file);
+    sync(*s.c);
+    REQUIRE(accept_stores(*net) == 1);
+    auto msg = s.c->message(id, await);
+    CHECK(msg->attachments[0].filename == "caf\xc3\xa9 \xe2\x98\x95.txt");
+    CHECK(msg->attachments[0].content_type == "text/plain");
     CHECK(on_server(s.c, *net, id) == body);
 }
