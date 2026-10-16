@@ -24,9 +24,16 @@ std::optional<std::vector<std::byte>> thumbnail(Source& source, uint32_t edge, B
 bool acceptable(const Info& info);
 
 // The picture scaled to `width` x `height`: covering it and cropped to the centre when `crop`,
-// else fitted inside it and never enlarged.  Orientation applied, the first frame only, converted
-// to sRGB from any embedded profile.
-image_ptr scaled(Source& source, const Info& info, uint32_t width, uint32_t height, bool crop);
+// else fitted inside it and never enlarged.  Orientation applied, converted to sRGB from any
+// embedded profile.  The first frame only, unless `all_frames`, which keeps an animation's frames
+// stacked as libvips holds them, with their delays.
+image_ptr scaled(
+        Source& source,
+        const Info& info,
+        uint32_t width,
+        uint32_t height,
+        bool crop,
+        bool all_frames = false);
 
 // `img` as 8-bit sRGB, converted from any embedded profile.
 image_ptr to_srgb8(VipsImage* img);

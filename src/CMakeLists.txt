@@ -259,6 +259,7 @@ add_libsession_util_library(image
     image/source.cpp
     image/thumbhash.cpp
     image/rendition.cpp
+    image/sendable.cpp
     image/thumbnail.cpp
     image/vips.cpp
 )

@@ -111,7 +111,13 @@ namespace detail {
     // shrinks on load where the format allows (JPEG, WebP, HEIF), so a 12 MP photo is never
     // decoded at full size.  It converts from an embedded ICC profile only when given an output
     // profile.
-    image_ptr scaled(Source& source, const Info& info, uint32_t width, uint32_t height, bool crop) {
+    image_ptr scaled(
+            Source& source,
+            const Info& info,
+            uint32_t width,
+            uint32_t height,
+            bool crop,
+            bool all_frames) {
         VipsImage* out = nullptr;
         int rc;
         auto w = static_cast<int>(width), h = static_cast<int>(height);
@@ -154,6 +160,7 @@ namespace detail {
                 source_access::rethrow_error(source);
                 throw_vips_error("scaling: cannot rewind the source");
             }
+            const char* frames = all_frames ? "n=-1" : "";
             rc = crop ? vips_thumbnail_source(
                                 vsrc,
                                 &out,
@@ -164,6 +171,8 @@ namespace detail {
                                 VIPS_INTERESTING_CENTRE,
                                 "output_profile",
                                 "srgb",
+                                "option_string",
+                                frames,
                                 nullptr)
                       : vips_thumbnail_source(
                                 vsrc,
@@ -175,6 +184,8 @@ namespace detail {
                                 VIPS_SIZE_DOWN,
                                 "output_profile",
                                 "srgb",
+                                "option_string",
+                                frames,
                                 nullptr);
             source_access::rethrow_error(source);
         }
