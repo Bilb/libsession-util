@@ -759,6 +759,14 @@ std::shared_ptr<Client::TakenFiles> Client::_take_files(OutgoingMessage& msg) {
         throw std::invalid_argument{
                 "send_message: cannot create {}: {}"_format(dir.string(), ec.message())};
 
+    // Refused rather than followed: taking the target would delete a file the caller never named,
+    // and taking the link would leave the file behind and the copy dangling.
+    for (const auto& a : msg.attachments)
+        if (a.take_file && std::filesystem::is_symlink(a.path, ec))
+            throw std::invalid_argument{
+                    "send_message: attachment {} is a symbolic link, which take_file refuses"_format(
+                            a.path.string())};
+
     auto taken = std::make_shared<TakenFiles>(*this);
     for (auto& a : msg.attachments) {
         if (!a.take_file)

@@ -31,7 +31,8 @@ struct OutgoingAttachment {
     /// deleted.
     ///
     /// The caller's file is removed once the message is stored, and must not be used afterwards.
-    /// A send that throws, or whose callback reports an error, leaves the file at `path`.
+    /// A send that throws, or whose callback reports an error, leaves the file at `path`.  A
+    /// symbolic link is refused.
     ///
     /// `filename` defaults to `path`'s filename as it was, and `content_type` to what its
     /// extension implies, as without this.

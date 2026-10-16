@@ -279,3 +279,17 @@ TEST_CASE("Client: a taken file survives the cache directory moving", "[client][
     c.client.reset();
     std::filesystem::remove_all(parent);
 }
+
+TEST_CASE("Client: take_file refuses a symbolic link", "[client][send][take]") {
+    Sandbox s;
+    auto body = contents(3000);
+    auto real = s.write("real.bin", body);
+    auto link = s.dir / "link.bin";
+    std::filesystem::create_symlink("real.bin", link);
+
+    CHECK_THROWS_AS(s.send(link), std::invalid_argument);
+    CHECK(std::filesystem::is_symlink(link));
+    CHECK(read_all(link) == body);
+    CHECK(read_all(real) == body);
+    CHECK(files_in(s.outgoing) == 0);
+}
