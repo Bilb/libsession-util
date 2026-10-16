@@ -23,6 +23,7 @@
 #include <thread>
 
 #include "../test_helper.hpp"
+#include "client_schema_base.hpp"
 
 using namespace session;
 using namespace session::client;
@@ -49,20 +50,23 @@ struct SenderKeys {
 /// RAII Client over a unique temporary database, mirroring TempCore.  Unlike TempCore this can
 /// close and reopen the same file, which is how the restart behaviour is exercised.
 struct TempClient {
-    std::filesystem::path path;
+    std::filesystem::path path{
+            std::filesystem::temp_directory_path() /
+            fmt::format("{}.db", random::unique_id("test_client", 7))};
     std::unique_ptr<Client> client;
 
     template <core::CoreOption... Opts>
     explicit TempClient(Opts&&... opts) :
-            path{std::filesystem::temp_directory_path() /
-                 fmt::format("{}.db", random::unique_id("test_client", 7))},
             client{std::make_unique<Client>(path, std::forward<Opts>(opts)...)} {}
 
     template <core::CoreOption... Opts>
     explicit TempClient(callbacks cbs, Opts&&... opts) :
-            path{std::filesystem::temp_directory_path() /
-                 fmt::format("{}.db", random::unique_id("test_client", 7))},
             client{std::make_unique<Client>(path, std::move(cbs), std::forward<Opts>(opts)...)} {}
+
+    /// Leaves the file for the test to create; the first reopen() opens it.
+    struct unopened_t {};
+    static constexpr unopened_t unopened{};
+    explicit TempClient(unopened_t) {}
 
     template <core::CoreOption... Opts>
     void reopen(Opts&&... opts) {
@@ -79,6 +83,28 @@ struct TempClient {
     Client* operator->() { return client.get(); }
     Client& operator*() { return *client; }
 };
+
+/// Opens `path` as an install from before client migration `first_missing` has it: the client
+/// schema built from `client_schema_base` with every migration ahead of `first_missing` replayed,
+/// which is what an upgraded install has.  A Client opened on it afterwards runs the rest.  An
+/// empty name replays every migration.
+///
+/// Two opens, because Core builds an owner's schema from a full schema only while none of its
+/// migrations are recorded, and never replays onto one it built.
+inline core::Core open_client_schema_before(
+        const std::filesystem::path& path, std::string_view first_missing) {
+    const auto& all = client::schema::MIGRATIONS;
+    auto stop = first_missing.empty()
+                      ? all.end()
+                      : std::ranges::find(all, first_missing, &core::schema::Migration::name);
+    if (stop == all.end() && !first_missing.empty())
+        throw std::invalid_argument{fmt::format("no client migration named {}", first_missing)};
+    {
+        core::Core base{
+                path, core::schema_extension{"client", {}, client_test::client_schema_base}};
+    }
+    return core::Core{path, core::schema_extension{"client", all.first(stop - all.begin()), {}}};
+}
 
 /// A cache directory that removes itself, so a failing assertion cannot leave one behind.
 struct TempCacheDir {
