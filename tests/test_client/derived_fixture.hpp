@@ -19,8 +19,10 @@ namespace cache = session::client::cache;
 namespace derived_test {
 
 // A w x h picture, encoded as `suffix` says (".png", ".jpg"), in one colour with a stripe so that
-// it compresses to something of a realistic size rather than to nothing.
-inline std::vector<std::byte> picture(int w, int h, const char* suffix = ".png") {
+// it compresses to something of a realistic size rather than to nothing.  `orientation` is written
+// as the file's EXIF orientation, which only a JPEG carries.
+inline std::vector<std::byte> picture(
+        int w, int h, const char* suffix = ".png", int orientation = 1) {
     image::init();
     std::vector<uint8_t> px(size_t(w) * h * 3);
     for (int y = 0; y < h; y++)
@@ -33,9 +35,43 @@ inline std::vector<std::byte> picture(int w, int h, const char* suffix = ".png")
     VipsImage* img =
             vips_image_new_from_memory_copy(px.data(), px.size(), w, h, 3, VIPS_FORMAT_UCHAR);
     REQUIRE(img);
+    if (orientation != 1)
+        vips_image_set_int(img, VIPS_META_ORIENTATION, orientation);
     void* buf = nullptr;
     size_t len = 0;
     int rc = vips_image_write_to_buffer(img, suffix, &buf, &len, nullptr);
+    g_object_unref(img);
+    REQUIRE(rc == 0);
+    std::vector<std::byte> out{static_cast<std::byte*>(buf), static_cast<std::byte*>(buf) + len};
+    g_free(buf);
+    return out;
+}
+
+// A w x h animation of `frames` frames, each a different shade so that the encoder keeps them
+// apart, as `suffix` says (".gif", ".webp").
+inline std::vector<std::byte> animation(int w, int h, int frames, const char* suffix) {
+    image::init();
+    std::vector<VipsImage*> shades;
+    for (int i = 0; i < frames; i++) {
+        VipsImage *black, *shade;
+        REQUIRE(vips_black(&black, w, h, "bands", 3, nullptr) == 0);
+        REQUIRE(vips_linear1(black, &shade, 1.0, 100.0 + 30 * i, "uchar", TRUE, nullptr) == 0);
+        g_object_unref(black);
+        shades.push_back(shade);
+    }
+    VipsImage* joined;
+    int rc = vips_arrayjoin(shades.data(), &joined, frames, "across", 1, nullptr);
+    for (auto* s : shades)
+        g_object_unref(s);
+    REQUIRE(rc == 0);
+    VipsImage* img;
+    rc = vips_copy(joined, &img, "interpretation", VIPS_INTERPRETATION_sRGB, nullptr);
+    g_object_unref(joined);
+    REQUIRE(rc == 0);
+    vips_image_set_int(img, "page-height", h);
+    void* buf = nullptr;
+    size_t len = 0;
+    rc = vips_image_write_to_buffer(img, suffix, &buf, &len, nullptr);
     g_object_unref(img);
     REQUIRE(rc == 0);
     std::vector<std::byte> out{static_cast<std::byte*>(buf), static_cast<std::byte*>(buf) + len};
@@ -143,6 +179,7 @@ struct Fixture {
 
     void reopen() {
         c.reopen();
+        net = attach_mock_network(c->core);
         c->set_cache_dir(dir.path);
         settle(*c);
     }

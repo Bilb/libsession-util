@@ -16,6 +16,7 @@ set(LIB_SESSION_UTESTS_SOURCES
     test_client/interop_and_threading.cpp
     test_client/location.cpp
     test_client/receiving.cpp
+    test_client/picture_info.cpp
     test_client/rendition.cpp
     test_client/replies.cpp
     test_client/requests.cpp

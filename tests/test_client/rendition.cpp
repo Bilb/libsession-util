@@ -162,6 +162,9 @@ TEST_CASE("Client: a picture no rendition can be made of is refused once", "[cli
             rendition_kind,
             f.file(url).filename().string());
     CHECK(refused == image::renderer_version);
+    REQUIRE(f.attachment(bad).picture);
+    CHECK_FALSE(f.attachment(bad).picture->readable());
+    CHECK(f.attachment(bad).picture->rendition_refused);
 
     // Not tried again when asked again...
     CHECK(error_code([&] { f.c->attachment_rendition(bad, 0, await); }) == err::no_rendition);

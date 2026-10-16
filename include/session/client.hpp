@@ -495,11 +495,14 @@ class Client {
     /// with it, and marking the file used when read.  A picture no rendition can be made of is
     /// refused under `image::renderer_version` and not tried again until that rises.
     ///
+    /// An animation gets none, and asking queues nothing: its original is what a viewer plays,
+    /// and `Attachment::picture` says which pictures those are.
+    ///
     /// Fails with:
     ///
     /// - `err::message_not_found`, `err::attachment_not_found` — there is no such attachment.
     /// - `err::no_rendition` — none yet, or none ever: not cached, not a picture Session
-    ///   displays, or refused.
+    ///   displays, an animation, or refused.
     void attachment_rendition(
             int64_t message_id, size_t index, result_function<std::vector<std::byte>> cb);
     std::vector<std::byte> attachment_rendition(int64_t message_id, size_t index, await_t);
@@ -1311,6 +1314,12 @@ class Client {
     // False once the queue has stopped.
     bool _post_derive(std::function<void()> job);
 
+    // What the derive thread read from a file's header, for `attachment_cache`'s columns of the
+    // same names: all zero when it could not be read as a picture.
+    struct PictureFacts {
+        uint32_t width = 0, height = 0, frames = 0;
+    };
+
     // Cache entries waiting for a derived image of some kind, next first, and whether one is being
     // made.  Core's loop's.  One at a time end to end -- made, written on the disk loop, recorded
     // -- which is what keeps one written for an entry evicted meanwhile from racing the eviction.
@@ -1343,13 +1352,15 @@ class Client {
     // Back from the derive thread with what it made: writes it beside the entry if the entry
     // still wants it.  Nullopt is a refusal, which stays recorded until the kind's version
     // changes; `failed`, an exception, which may not happen again: a thumbnail is retried at the
-    // next start, a rendition at the next ask, once.
+    // next start, a rendition at the next ask, once.  `facts` is what the header said, written to
+    // the entry; nullopt when the file could not be opened at all.
     void _derived_made(
             int64_t entry,
             cache::Derived kind,
             std::string name,
             std::optional<std::vector<std::byte>> jpeg,
-            bool failed);
+            bool failed,
+            std::optional<PictureFacts> facts);
 
     // Records a derived image written beside entry `entry`, and tells the messages showing it; or,
     // if the entry has gone meanwhile, removes the file again.

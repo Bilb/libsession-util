@@ -1,5 +1,6 @@
 #include "client_schema_before_006.hpp"
 #include "client_schema_before_009.hpp"
+#include "client_schema_before_010.hpp"
 #include "common.hpp"
 
 // ── ConversationId ──────────────────────────────────────────────────────────────────────────────
@@ -284,6 +285,35 @@ TEST_CASE("Client: upgrading moves thumbnails into attachment_derived", "[client
             names.push_back(name);
         return names;
     });
-    CHECK(columns == std::vector<std::string>{"id", "name", "size", "last_used"});
+    CHECK(columns ==
+          std::vector<std::string>{"id", "name", "size", "last_used", "width", "height", "frames"});
     CHECK(c->attachment_cache_size(await) == 230);
+}
+
+TEST_CASE(
+        "Client: upgrading gives a cache entry room for what its header says", "[client][schema]") {
+    TempClient c{TempClient::unopened};
+    {
+        auto old = open_client_schema_before(c.path, "010_picture_info", client_schema_before_010);
+        REQUIRE(TestHelper::migration_applied(old, "client:009_attachment_derived"));
+        REQUIRE_FALSE(TestHelper::migration_applied(old, "client:010_picture_info"));
+        TestHelper::on_loop(old, [&] {
+            old.database().conn().prepared_exec(
+                    "INSERT INTO attachment_cache (name, size, last_used) VALUES ('a', 100, 1)");
+        });
+    }
+
+    c.reopen();
+    REQUIRE(TestHelper::migration_applied(c->core, "client:010_picture_info"));
+    using row = std::tuple<std::optional<int64_t>, std::optional<int64_t>, std::optional<int64_t>>;
+    auto facts = TestHelper::on_loop(c->core, [&] {
+        return c->core.database()
+                .conn()
+                .prepared_get<
+                        std::optional<int64_t>,
+                        std::optional<int64_t>,
+                        std::optional<int64_t>>(
+                        "SELECT width, height, frames FROM attachment_cache WHERE name = 'a'");
+    });
+    CHECK(facts == row{std::nullopt, std::nullopt, std::nullopt});
 }
