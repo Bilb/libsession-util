@@ -351,3 +351,25 @@ TEST_CASE("Client: a sweep keeps a file taken for a send not yet stored", "[clie
     CHECK_FALSE(std::filesystem::exists(copy));
     CHECK(read_all(file) == body);
 }
+
+TEST_CASE(
+        "Client: a taken file is saved from our copy until it is uploaded",
+        "[client][send][take]") {
+    Sandbox s;
+    auto body = contents(3000);
+    auto id = s.send(s.write("keepsake.bin", body));
+    sync(*s.c);
+    REQUIRE(s.c->message(id, await)->send_state == SendState::failed);
+
+    std::promise<Expected<std::filesystem::path>> done;
+    s.c->save_attachment(
+            id, 0, s.dir / "saved.bin", nullptr, [&](auto r) { done.set_value(std::move(r)); });
+    auto answer = done.get_future();
+    REQUIRE(derived_test::eventually([&] {
+        sync(*s.c);
+        return answer.wait_for(0s) == std::future_status::ready;
+    }));
+    auto saved = answer.get();
+    REQUIRE(saved);
+    CHECK(read_all(*saved) == body);
+}

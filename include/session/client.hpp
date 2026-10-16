@@ -602,7 +602,8 @@ class Client {
     /// written and verified, or the same error `cb` gets.
     ///
     /// Fails as `attachment_data` does, and with `err::save_failed` if the file cannot be written
-    /// where it was asked to go.
+    /// where it was asked to go.  A taken file not yet uploaded is saved from our own copy, as
+    /// `attachment_data` serves it.
     ///
     /// `notify_sender` tells the person who sent it that we saved their file, which is what
     /// Session's other clients do and so what a recipient expects.  Passing false keeps this
@@ -1763,6 +1764,9 @@ class Client {
     // entry to mark as used.
     void _save_from_cache(
             std::shared_ptr<Save> s, std::filesystem::path file, std::optional<int64_t> entry_id);
+
+    // Copies a taken file that has not been uploaded into the save, on the disk loop.
+    void _save_from_taken(std::shared_ptr<Save> s, std::filesystem::path file);
 
     // Writes the whole of `bytes` into the save, on the disk loop, for one served from a transfer
     // that held its file rather than caching it.

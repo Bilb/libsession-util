@@ -7178,9 +7178,14 @@ void Client::_save_attachment(
         bool notify_sender,
         bool replace) {
 
+    auto taken = [&] {
+        auto c = core.database().conn();
+        return _taken_unsent(c, message_id, index);
+    }();
     auto s = std::make_shared<Save>();
     s->token = token;
-    s->remote = _remote_file(message_id, index);
+    if (!taken)
+        s->remote = _remote_file(message_id, index);
     s->message_id = message_id;
     s->index = index;
     s->dest = std::move(dest);
@@ -7189,6 +7194,9 @@ void Client::_save_attachment(
     s->cb = std::move(cb);
     s->report = _attachment_progress(message_id, index, token, std::move(on_progress));
     _saves.emplace(token, s);
+
+    if (taken)
+        return _save_from_taken(std::move(s), std::move(*taken));
 
     // Served from the cache when it is there.  Indistinguishable to everyone else: the file lands
     // where it was asked to, and the sender is still told we saved it, because being able to skip
@@ -7269,6 +7277,36 @@ void Client::_save_from_cache(
             if (entry_id)
                 _touch_cached(*entry_id);
             _saved(*s, std::move(*result));
+        });
+    });
+}
+
+void Client::_save_from_taken(std::shared_ptr<Save> s, std::filesystem::path file) {
+    _post_disk([this, s = std::move(s), file = std::move(file)]() mutable {
+        if (s->settled)
+            return;
+        std::optional<Error> error;
+        try {
+            std::ifstream in;
+            in.exceptions(std::ios::badbit);
+            in.open(file, std::ios::binary);
+            if (!in.is_open())
+                throw std::runtime_error{"its file is gone"};
+            std::vector<char> chunk(attachment::ENCRYPT_CHUNK_SIZE);
+            while (in) {
+                in.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+                if (auto got = static_cast<size_t>(in.gcount()))
+                    _save_write(*s, std::as_bytes(std::span{chunk}.first(got)));
+            }
+        } catch (const std::exception& e) {
+            error =
+                    Error{err::download_failed,
+                          "Attachment {} of message {} has not been uploaded, and {}"_format(
+                                  s->index, s->message_id, e.what())};
+        }
+        auto result = _save_finish(*s, std::move(error));
+        call([this, s = std::move(s), result = std::move(result)]() mutable {
+            _saved(*s, std::move(result));
         });
     });
 }

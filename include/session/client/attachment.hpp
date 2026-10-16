@@ -38,8 +38,9 @@ struct OutgoingAttachment {
     /// Either happens on the calling thread, so a copy of a large file blocks the `send_message`
     /// call, callback form included.
     ///
-    /// Until it is uploaded, `Client::attachment_data` and `attachment_data_cached` serve it and
-    /// `Attachment::availability` says `cached`, since the caller no longer has it to draw from.
+    /// Until it is uploaded, `Client::attachment_data`, `attachment_data_cached` and
+    /// `save_attachment` serve it and `Attachment::availability` says `cached`, since the caller
+    /// no longer has it to draw from.
     ///
     /// `filename` defaults to `path`'s filename as it was, and `content_type` to what its
     /// extension implies, as without this.
