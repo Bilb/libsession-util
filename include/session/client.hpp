@@ -1191,13 +1191,11 @@ class Client {
             int64_t on_disk,
             std::optional<std::filesystem::path> plain = std::nullopt);
 
-    /// Keeps a copy of a file we just uploaded, so that a message we sent can be drawn without
-    /// fetching back a file that came off this disk in the first place.
+    /// Keeps a copy of a file we just uploaded, whatever it is, so that a message we sent can be
+    /// drawn and saved without fetching back a file that came off this disk in the first place.
     ///
-    /// Under the rule that would have applied had the same file arrived, plus anything on a
-    /// gallery-viewable message whatever that rule says -- see the definition.  Best effort: `body`
-    /// is what the upload sent when it sent bytes rather than the file, else the source is re-read,
-    /// and a file that has since moved or changed is simply not cached.
+    /// Best effort: `body` is what the upload sent when it sent bytes rather than the file, else
+    /// the source is re-read, and a file that has since moved or changed is simply not cached.
     ///
     /// Call once the row carries the url, which is both where the copy belongs and what says the
     /// upload is done.
