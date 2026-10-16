@@ -38,8 +38,9 @@ struct OutgoingAttachment {
     /// Sends the file exactly as it is, metadata included, flagged so that recipients offer it as
     /// a file to export rather than as a picture.  Otherwise a picture this build decodes is sent
     /// re-encoded (`image::sendable`): `content_type`, the filename's extension, the size and the
-    /// fields below then describe what was sent rather than the file at `path`.  A picture that
-    /// cannot be decoded is sent as if this were set.
+    /// fields below then describe what was sent rather than the file at `path`.  A picture this
+    /// build does not decode (a format it does not read, an animated PNG) is sent as if this were
+    /// set; one too large to decode is refused with `err::attachment_too_large`.
     bool original_file = false;
 
     /// Pixel dimensions, for visual media.  Recipients use them to lay out a placeholder before

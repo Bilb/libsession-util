@@ -1510,13 +1510,14 @@ class Client {
 
     // Between the disk loop's look at the file and its upload: a picture this build decodes is
     // re-encoded on the derive loop (`image::sendable`) and its row rewritten to describe what is
-    // sent; one that cannot be decoded is flagged as the original file; anything else goes as it
-    // is.
+    // sent; a picture it cannot decode is flagged as the original file; anything else goes as it
+    // is, from the very bytes that were looked at.
     void _convert_outgoing(
             int64_t client_id,
             size_t index,
             std::string path,
             int64_t file_size,
+            bool declared_image,
             Conversation::upload_progress on_upload);
 
     // The rest of `_upload_next`, once the file is known: uploads attachment `index` from `path`,

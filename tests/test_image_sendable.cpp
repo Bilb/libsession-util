@@ -132,6 +132,12 @@ std::vector<Case> cases() {
              30,
              3,
              true},
+            {"a wide animated GIF",
+             save(animation(2100, 40, 3).get(), ".gif"),
+             "image/webp",
+             2048,
+             39,
+             3},
             {"a PDF", bytes(400, std::byte{'%'}), ""},
     };
     // HEIC decodes through ImageIO on Apple, and elsewhere only with a HEVC decoder in libheif.

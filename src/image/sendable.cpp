@@ -3,7 +3,9 @@
 #include <vips/vips.h>
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
+#include <span>
 #include <stdexcept>
 
 #include "jpeg_encode.hpp"
@@ -14,6 +16,8 @@
 #include "vips_internal.hpp"
 
 namespace session::image {
+
+using detail::Reencoded;
 
 namespace {
 
@@ -45,39 +49,64 @@ namespace {
 
 }  // namespace
 
+Reencoded detail::reencode(Source& source, const Info& info, uint32_t box, int quality) {
+    const bool animated = info.animated();
+    auto img = scaled(source, info, box, box, /*crop=*/false, animated);
+    Reencoded out;
+    // From the decoded picture rather than the header, which a platform decoder need not agree
+    // with: JPEG cannot hold the alpha band it would be handed.
+    out.webp = animated || vips_image_hasalpha(img.get());
+    out.width = static_cast<uint32_t>(img->Xsize);
+    out.frames = animated ? static_cast<uint32_t>(vips_image_get_n_pages(img.get())) : 1;
+    out.height = animated ? static_cast<uint32_t>(vips_image_get_page_height(img.get()))
+                          : static_cast<uint32_t>(img->Ysize);
+    out.bytes = out.webp ? encode_webp(img.get(), quality) : encode_jpeg(img.get(), quality);
+    return out;
+}
+
+SendableVerdict sendable_verdict(const Info& info) {
+    if (!info.decodable)
+        return SendableVerdict::cannot_decode;
+    if (!detail::acceptable(info) || !info.within_pixel_limits(true))
+        return SendableVerdict::too_large;
+    return SendableVerdict::encode;
+}
+
 std::optional<Sendable> sendable(Source& source, size_t max_encrypted_size) {
     auto info = probe(source);
-    if (!info || !detail::acceptable(*info) || !info->within_pixel_limits(true))
-        throw std::runtime_error{"sendable: not a picture this build decodes"};
+    if (!info || sendable_verdict(*info) != SendableVerdict::encode)
+        throw std::runtime_error{"sendable: not a picture this build re-encodes"};
 
-    const bool animated = info->animated();
-    const bool webp = animated || info->has_alpha;
     uint32_t box = std::min(sendable_edge, std::max(info->width, info->height));
-
     try {
+        // Every quality at the full size, then the lowest only, at a box sized from how far the
+        // last attempt overshot: each attempt is a whole decode and encode.
+        size_t attempts = 0;
         while (true) {
-            for (int quality : sendable_qualities) {
+            std::span<const int> qualities = sendable_qualities;
+            if (attempts > 0)
+                qualities = qualities.last(1);
+            size_t last = 0;
+            for (int quality : qualities) {
                 // A fresh pipeline each time: libvips decodes lazily, and a second encode of the
                 // same image would read its source again from where the first one left it.
-                auto img = detail::scaled(source, *info, box, box, /*crop=*/false, animated);
-                const uint32_t frames =
-                        animated ? static_cast<uint32_t>(vips_image_get_n_pages(img.get())) : 1;
-                const uint32_t height =
-                        animated ? static_cast<uint32_t>(vips_image_get_page_height(img.get()))
-                                 : static_cast<uint32_t>(img->Ysize);
-                auto bytes = webp ? encode_webp(img.get(), quality)
-                                  : detail::encode_jpeg(img.get(), quality);
-                if (attachment::encrypted_size(bytes.size()) <= max_encrypted_size)
+                auto r = detail::reencode(source, *info, box, quality);
+                attempts++;
+                last = attachment::encrypted_size(r.bytes.size());
+                if (last <= max_encrypted_size)
                     return Sendable{
-                            std::move(bytes),
-                            webp ? "image/webp" : "image/jpeg",
-                            static_cast<uint32_t>(img->Xsize),
-                            height,
-                            frames};
+                            std::move(r.bytes),
+                            r.webp ? "image/webp" : "image/jpeg",
+                            r.width,
+                            r.height,
+                            r.frames};
             }
-            if (box <= min_sendable_edge)
+            if (box <= min_sendable_edge || attempts >= max_sendable_attempts)
                 return std::nullopt;
-            box = std::max(min_sendable_edge, box * 4 / 5);
+            // Size goes roughly with area, so the edge with its square root.
+            double scale = std::clamp(
+                    std::sqrt(double(max_encrypted_size) / double(last)) * 0.95, 0.5, 0.9);
+            box = std::max(min_sendable_edge, static_cast<uint32_t>(box * scale));
         }
     } catch (...) {
         detail::source_access::rethrow_error(source);

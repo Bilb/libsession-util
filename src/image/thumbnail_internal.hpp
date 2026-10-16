@@ -35,6 +35,18 @@ image_ptr scaled(
         bool crop,
         bool all_frames = false);
 
+// A picture re-encoded whole from its pixels.
+struct Reencoded {
+    std::vector<std::byte> bytes;
+    bool webp = false;
+    uint32_t width = 0, height = 0, frames = 1;
+};
+
+// The picture fitted inside `box` x `box` (never enlarged): a jpegli JPEG when the decoded picture
+// is still and has no alpha band, else a WebP with every frame and its delays.  `info` must pass
+// `sendable_verdict`.
+Reencoded reencode(Source& source, const Info& info, uint32_t box, int quality);
+
 // `img` as 8-bit sRGB, converted from any embedded profile.
 image_ptr to_srgb8(VipsImage* img);
 
