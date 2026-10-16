@@ -92,4 +92,13 @@ bool can_decode(Format format);
 /// turns out to be corrupt partway through: that is an error, not "not an image".
 std::optional<Info> probe(Source& source);
 
+/// API: image/recognized
+///
+/// Whether `source` is in a format `probe` accepts, judged from its first bytes without reading
+/// its header: true for a picture whose header is then found damaged, which `probe` cannot tell
+/// apart from one that is not a picture at all.
+///
+/// Throws std::runtime_error as `probe` does.
+bool recognized(Source& source);
+
 }  // namespace session::image

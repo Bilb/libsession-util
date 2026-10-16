@@ -74,6 +74,25 @@ struct Sandbox {
     }
 };
 
+// A PNG made an APNG by an animation control chunk ahead of its image data.
+bytes animated_png(bytes png) {
+    bytes chunk{std::byte{0}, std::byte{0}, std::byte{0}, std::byte{8}};
+    for (char c : "acTL\0\0\0\x02\0\0\0\0"sv)
+        chunk.push_back(std::byte(c));
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 4; i < chunk.size(); i++) {
+        crc ^= uint8_t(chunk[i]);
+        for (int k = 0; k < 8; k++)
+            crc = (crc & 1) ? 0xEDB88320u ^ (crc >> 1) : crc >> 1;
+    }
+    crc ^= 0xFFFFFFFFu;
+    for (int shift : {24, 16, 8, 0})
+        chunk.push_back(std::byte(crc >> shift));
+    constexpr size_t after_ihdr = 8 + 25;
+    png.insert(png.begin() + after_ihdr, chunk.begin(), chunk.end());
+    return png;
+}
+
 // What a sent attachment should be: re-encoded, or the file as it is, flagged or not.
 enum class Sent { converted, as_is, original_file };
 
@@ -116,6 +135,7 @@ TEST_CASE(
         {"spin.gif", spin, false, "image/webp", "spin.webp", Sent::converted, 40, 30, true},
         {"notes.pdf", bytes(300, std::byte{1}), false, "application/pdf", "notes.pdf", Sent::as_is},
         {"untouched.jpg", photo, true, "image/jpeg", "untouched.jpg", Sent::original_file, 640, 480, true},
+        {"wave.png", animated_png(derived_test::picture(64, 48, ".png")), false, "image/png", "wave.png", Sent::original_file, 64, 48, true},
         // A picture type libvips does not read: shown as a file, sent as it is.
         {"scan.tiff", bytes(64, std::byte{'I'}), false, "image/tiff", "scan.tiff", Sent::original_file},
         {"shot.heic", bytes{heic.begin(), heic.end()}, false,
@@ -186,6 +206,32 @@ TEST_CASE(
         CHECK_FALSE(s.c->message(id, await)->attachments[0].original_file);
     }
 
+    SECTION("a picture whose header is damaged fails the same way, EXIF and all kept home") {
+        Sandbox s;
+        // Cut before its frame header, after everything a camera puts ahead of it.
+        auto photo = derived_test::picture(64, 48, ".jpg");
+        auto sof = std::string_view{reinterpret_cast<const char*>(photo.data()), photo.size()}.find(
+                "\xFF\xC2"sv);
+        if (sof == std::string_view::npos)
+            sof = std::string_view{reinterpret_cast<const char*>(photo.data()), photo.size()}.find(
+                    "\xFF\xC0"sv);
+        REQUIRE(sof != std::string_view::npos);
+        photo.resize(sof);
+        auto id = send(s, s.write("cut.jpg", photo));
+        until(s.c, [&] { return state(s, id) == SendState::failed; });
+        CHECK(codes == std::vector<std::string_view>{err::attachment_unreadable});
+        CHECK(s.net->served.empty());
+    }
+
+    SECTION("a picture past the decode limits is refused, not sent as it is") {
+        Sandbox s;
+        std::span<const std::byte> avif{image_fixtures::avif8_4900x4900};
+        auto id = send(s, s.write("huge.avif", bytes{avif.begin(), avif.end()}));
+        until(s.c, [&] { return state(s, id) == SendState::unsendable; });
+        CHECK(codes == std::vector<std::string_view>{err::attachment_too_large});
+        CHECK(s.net->served.empty());
+    }
+
     SECTION("a failed upload is retried, the picture re-encoded the same") {
         Sandbox s;
         auto photo = derived_test::picture(640, 480, ".jpg");
@@ -201,8 +247,13 @@ TEST_CASE(
         network::config::Config config;
         config.custom_file_server_max_file_size = 2'000;
         Sandbox s{config};
-        auto id = send(s, s.write("photo.jpg", derived_test::picture(640, 480, ".jpg")));
-        until(s.c, [&] { return state(s, id) == SendState::unsendable; });
-        CHECK(codes == std::vector<std::string_view>{err::attachment_too_large});
+        auto photo = send(s, s.write("photo.jpg", derived_test::picture(640, 480, ".jpg")));
+        until(s.c, [&] { return state(s, photo) == SendState::unsendable; });
+        // Not a picture, so nothing can make it smaller.
+        auto pdf = send(s, s.write("big.pdf", bytes(3000, std::byte{1})));
+        until(s.c, [&] { return state(s, pdf) == SendState::unsendable; });
+        CHECK(codes ==
+              std::vector<std::string_view>{err::attachment_too_large, err::attachment_too_large});
+        CHECK(s.net->served.empty());
     }
 }
