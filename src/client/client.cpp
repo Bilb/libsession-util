@@ -1568,28 +1568,27 @@ void Client::_attachment_rendition(int64_t message_id, size_t index, bytes_answe
             std::optional<int64_t>,
             std::optional<std::string>,
             std::optional<int64_t>,
-            int64_t,
-            std::optional<int64_t>>(
+            int64_t>(
             R"(
         SELECT c.id, c.name,
                (SELECT d.size FROM attachment_derived d WHERE d.entry = c.id AND d.kind = ?3),
-               a.content_type IS NOT NULL AND {}, c.frames
+               a.content_type IS NOT NULL AND {} AND a.flags & {} = 0
         FROM message_attachments a LEFT JOIN attachment_cache c ON c.id = a.cached
         WHERE a.message = ?1 AND a.idx = ?2
-    )"_format(DISPLAYABLE_IMAGE_SQL),
+    )"_format(DISPLAYABLE_IMAGE_SQL, ATTACHMENT_FLAG_ORIGINAL_FILE),
             message_id,
             static_cast<int64_t>(index),
             static_cast<int>(kind));
     if (!row)
         throw_missing_attachment(c, message_id, index);
-    auto& [entry, name, rendition, picture, frames] = *row;
+    auto& [entry, name, rendition, picture] = *row;
     if (_cache_dir.empty())
         throw no_rendition(message_id, index);
     if (!rendition) {
-        // Made only on demand, so this ask is what queues it: at the front, since somebody is
-        // looking.  Not for a file that is not here or not a picture, nor one already refused,
-        // which the pump turns away; nor an animation, whose original is what a viewer plays.
-        if (entry && picture && !(frames && *frames > 1)) {
+        // Not made yet, for a file cached before renditions were made on arrival or evicted and
+        // fetched back: at the front, since somebody is looking.  Not for a file that is not here
+        // or not a picture to open, nor one already refused, which the pump turns away.
+        if (entry && picture) {
             _queue_derived(*entry, kind);
             _hurry_derived(*entry, kind);
         }
@@ -6705,9 +6704,20 @@ void Client::_derived_made(
             _emit_messages_showing(c, showing);
         }
     }
+    // A picture's rendition is queued once its thumbnail is made, so every tile is drawn before any
+    // viewer copy is decoded; not for a picture only ever sent as its original file, which nobody
+    // opens, nor one whose thumbnail was refused.
+    if (jpeg && kind == cache::Derived::thumbnail &&
+        c.prepared_get<int64_t>(
+                "SELECT EXISTS(SELECT 1 FROM message_attachments"
+                " WHERE cached = ? AND {} AND flags & {} = 0)"_format(
+                        DISPLAYABLE_IMAGE_SQL, ATTACHMENT_FLAG_ORIGINAL_FILE),
+                entry))
+        _queue_derived(entry, cache::Derived::rendition);
+
     // An exception may not happen again.  A thumbnail is unmarked and tried again at the next
-    // start, by the pass; a rendition, which only an ask queues, keeps its strike, so the next ask
-    // is its last try rather than every open decoding it again.
+    // start, by the pass; a rendition keeps its strike, so the next ask is its last try rather
+    // than every open decoding it again.
     if (jpeg || (failed && kind == cache::Derived::thumbnail))
         _unmark_derived_attempt(entry, kind);
     else if (!failed)

@@ -284,9 +284,9 @@ struct Attachment {
     /// What the cached file's header says, once libsession has read it, which it does when it
     /// first makes a thumbnail or rendition from it: a little after the file arrives, reported
     /// through `messages_updated` as `has_thumbnail` is.  Unset until then, and again once the
-    /// file leaves the cache.  What a viewer decides from: an animation is played from the
-    /// original, a still picture drawn from its rendition, and one that could not be read is the
-    /// platform's to decode or not.
+    /// file leaves the cache.  What a viewer decides from: a picture is drawn from its rendition,
+    /// an animation played from it, and one that could not be read is the platform's to decode or
+    /// not.
     std::optional<PictureInfo> picture;
 
     /// When the *recipient* of this message last saved this attachment -- us, on an incoming one,
