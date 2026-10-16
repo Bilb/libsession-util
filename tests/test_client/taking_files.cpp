@@ -293,3 +293,42 @@ TEST_CASE("Client: take_file refuses a symbolic link", "[client][send][take]") {
     CHECK(read_all(real) == body);
     CHECK(files_in(s.outgoing) == 0);
 }
+
+TEST_CASE("Client: a taken file is served until it is uploaded", "[client][send][take]") {
+    Sandbox s;
+    auto body = contents(3000);
+    auto id = s.send(s.write("photo.bin", body));
+    sync(*s.c);
+    REQUIRE(s.c->message(id, await)->send_state == SendState::failed);
+
+    CHECK(s.c->message(id, await)->attachments[0].availability == AttachmentAvailability::cached);
+    CHECK(s.c->attachment_data_cached(id, 0, await) == body);
+
+    std::promise<Expected<std::vector<std::byte>>> got;
+    s.c->attachment_data(id, 0, nullptr, [&](auto r) { got.set_value(std::move(r)); });
+    auto answer = got.get_future();
+    REQUIRE(derived_test::eventually([&] {
+        sync(*s.c);
+        return answer.wait_for(0s) == std::future_status::ready;
+    }));
+    auto r = answer.get();
+    REQUIRE(r);
+    CHECK(*r == body);
+}
+
+TEST_CASE("Client: a taken file goes when its message turns unsendable", "[client][send][take]") {
+    Sandbox s;
+    network::config::Config config;
+    config.custom_file_server_max_file_size = 2'000;
+    attach_mock_network(s.c->core, std::move(config));
+
+    auto id = s.send(s.write("big.bin", contents(3000)));
+    auto owned = s.cache.path / stored_path(s.c, id);
+    CHECK(derived_test::eventually([&] {
+        sync(*s.c);
+        return s.c->message(id, await)->send_state == SendState::unsendable;
+    }));
+    CHECK(eventually_gone(s.c, owned));
+    CHECK(s.c->message(id, await)->attachments[0].availability == AttachmentAvailability::absent);
+    CHECK_THROWS(s.c->attachment_data_cached(id, 0, await));
+}

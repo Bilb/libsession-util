@@ -1523,6 +1523,16 @@ class Client {
     // The file an attachment row's `path` names, resolving a taken file against the cache dir.
     std::filesystem::path _attachment_file(const std::string& stored) const;
 
+    // The file a not-yet-uploaded attachment took, while its message can still be sent.
+    std::optional<std::filesystem::path> _taken_unsent(
+            sqlite::Connection& c, int64_t message_id, size_t index);
+
+    // `_read_cache_file` for a taken file, which is kept as it is rather than encrypted.
+    void _read_taken_file(
+            std::filesystem::path file,
+            bool wait,
+            std::function<void(std::optional<std::vector<std::byte>>)> then);
+
     // Where taken files are kept, or empty without a cache directory.
     std::filesystem::path _outgoing_dir() const;
 

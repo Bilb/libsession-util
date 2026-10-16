@@ -812,8 +812,9 @@ void Client::_sweep_outgoing() {
                 for (size_t at = 0; at < names.size(); at += batch) {
                     auto n = std::min(batch, names.size() - at);
                     auto st = c.prepared_st(R"(
-                SELECT path FROM message_attachments WHERE path IN ({}) AND url IS NULL
-            )"_format(sqlite::placeholders(n)));
+                SELECT a.path FROM message_attachments a JOIN messages m ON m.id = a.message
+                WHERE a.path IN ({}) AND a.url IS NULL AND m.send_state IS NOT {}
+            )"_format(sqlite::placeholders(n), static_cast<int>(SendState::unsendable)));
                     for (size_t i = 0; i < n; i++)
                         st->bind(static_cast<int>(i + 1), taken_path(names[at + i]));
                     for (auto path : sqlite::IterableStatementWrapper<std::string>{std::move(st)})
@@ -1523,6 +1524,28 @@ void Client::_attachment_data(
         result_function<std::vector<std::byte>> cb,
         std::function<void()> ended) {
 
+    // Ours to serve until it is uploaded, as the caller's own file would have been.
+    if (auto file = [&] {
+            auto c = core.database().conn();
+            return _taken_unsent(c, message_id, index);
+        }())
+        return _read_taken_file(
+                std::move(*file),
+                false,
+                [this, message_id, index, cb = std::move(cb), ended = std::move(ended)](
+                        auto bytes) {
+                    if (bytes)
+                        _report(cb, Expected<std::vector<std::byte>>{std::move(*bytes)});
+                    else
+                        _report(cb,
+                                Expected<std::vector<std::byte>>{unexpected{Error{
+                                        err::download_failed,
+                                        "Attachment {} of message {} has not been uploaded and "
+                                        "its file is gone"_format(index, message_id)}}});
+                    if (ended)
+                        ended();
+                });
+
     auto remote = _remote_file(message_id, index);
     // An auto-download exists to fill the cache, and has already been held to its own limit.
     bool caching = automatic || _caches_requested(remote.size);
@@ -1641,6 +1664,69 @@ void Client::_read_cache_file(
     });
 }
 
+namespace {
+
+    // Up to `size` bytes of `path`, or with `exact` exactly that many and then its end, so that a
+    // file changed while it is read is not taken for the one that was looked at.
+    std::shared_ptr<const std::vector<std::byte>> read_file(
+            const std::string& path, int64_t size, bool exact) {
+        std::vector<std::byte> bytes(static_cast<size_t>(size));
+        std::ifstream in;
+        in.exceptions(std::ios::badbit);
+        in.open(path, std::ios::binary);
+        if (!in.is_open())
+            throw std::runtime_error{"{} cannot be opened"_format(path)};
+        in.read(reinterpret_cast<char*>(bytes.data()), size);
+        // Taken before `peek`, which resets it.
+        const auto got = in.gcount();
+        if (exact && (got != size || in.peek() != std::ifstream::traits_type::eof()))
+            throw std::runtime_error{"{} changed while it was read"_format(path)};
+        bytes.resize(static_cast<size_t>(got));
+        return std::make_shared<const std::vector<std::byte>>(std::move(bytes));
+    }
+
+}  // namespace
+
+std::optional<std::filesystem::path> Client::_taken_unsent(
+        sqlite::Connection& c, int64_t message_id, size_t index) {
+    if (_cache_dir.empty())
+        return std::nullopt;
+    auto path = c.prepared_maybe_get<std::string>(
+            R"(
+        SELECT a.path FROM message_attachments a JOIN messages m ON m.id = a.message
+        WHERE a.message = ? AND a.idx = ? AND a.url IS NULL AND a.path IS NOT NULL
+          AND m.outgoing AND m.send_state IS NOT ?
+    )",
+            message_id,
+            static_cast<int64_t>(index),
+            static_cast<int>(SendState::unsendable));
+    if (!path || !taken_name(*path))
+        return std::nullopt;
+    return _attachment_file(*path);
+}
+
+void Client::_read_taken_file(
+        std::filesystem::path file,
+        bool wait,
+        std::function<void(std::optional<std::vector<std::byte>>)> then) {
+    auto read = [file = std::move(file)]() -> std::optional<std::vector<std::byte>> {
+        std::error_code ec;
+        auto size = std::filesystem::file_size(file, ec);
+        if (ec)
+            return std::nullopt;
+        try {
+            return *read_file(file.string(), static_cast<int64_t>(size), true);
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    };
+    if (wait)
+        return then(read());
+    _post_disk([this, read = std::move(read), then = std::move(then)]() mutable {
+        call([then = std::move(then), bytes = read()]() mutable { then(std::move(bytes)); });
+    });
+}
+
 void Client::_attachment_data_cached(
         int64_t message_id, size_t index, bytes_answer done, bool wait) {
     auto c = core.database().conn();
@@ -1650,6 +1736,16 @@ void Client::_attachment_data_cached(
             static_cast<int64_t>(index));
     if (!url)
         throw_missing_attachment(c, message_id, index);
+    if (!*url)
+        if (auto file = _taken_unsent(c, message_id, index))
+            return _read_taken_file(
+                    std::move(*file),
+                    wait,
+                    [message_id, index, done = std::move(done)](auto bytes) {
+                        if (bytes)
+                            return done(std::move(*bytes));
+                        done(unexpected{not_cached(message_id, index).err()});
+                    });
     auto entry = *url && !_cache_dir.empty() ? _cached_entry(c, **url) : std::nullopt;
     if (!entry)
         throw not_cached(message_id, index);
@@ -4625,7 +4721,8 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
                       WHERE d.entry = c.id AND d.kind = {} AND d.size IS NOT NULL),
                c.width, c.height, c.frames,
                coalesce((SELECT d.failed FROM attachment_derived d
-                         WHERE d.entry = c.id AND d.kind = {}), 0) = {}
+                         WHERE d.entry = c.id AND d.kind = {}), 0) = {},
+               a.path
         FROM message_attachments a LEFT JOIN attachment_cache c ON c.id = a.cached
         WHERE a.message IN ({}) ORDER BY a.message, a.idx
     )"_format(static_cast<int>(cache::Derived::thumbnail),
@@ -4656,7 +4753,8 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
                  picture_width,
                  picture_height,
                  frames,
-                 rendition_refused] :
+                 rendition_refused,
+                 path] :
          sqlite::IterableStatementWrapper<
                  int64_t,
                  int64_t,
@@ -4678,14 +4776,19 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
                  std::optional<int64_t>,
                  std::optional<int64_t>,
                  std::optional<int64_t>,
-                 int>{std::move(st)}) {
+                 int,
+                 std::optional<std::string>>{std::move(st)}) {
         auto found = by_id.find(message);
         if (found == by_id.end())
             continue;
 
         // Without a url, an incoming attachment is one its sender gave no way to fetch, which no
-        // attempt will change; an outgoing one has simply not been uploaded yet.
+        // attempt will change; an outgoing one has simply not been uploaded yet, and is here if it
+        // was taken, until its message turns unsendable.
+        bool taken = path && taken_name(*path) && !_cache_dir.empty() &&
+                     found->second->send_state != SendState::unsendable;
         auto status = url                     ? _attachment_availability(*url, cached, unavailable)
+                    : taken                   ? CacheStatus{AttachmentAvailability::cached}
                     : found->second->outgoing ? CacheStatus{}
                                               : CacheStatus{AttachmentAvailability::unreadable};
         found->second->attachments.push_back(Attachment{
@@ -5606,25 +5709,6 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
 }
 
 namespace {
-
-    // Up to `size` bytes of `path`, or with `exact` exactly that many and then its end, so that a
-    // file changed while it is read is not taken for the one that was looked at.
-    std::shared_ptr<const std::vector<std::byte>> read_file(
-            const std::string& path, int64_t size, bool exact) {
-        std::vector<std::byte> bytes(static_cast<size_t>(size));
-        std::ifstream in;
-        in.exceptions(std::ios::badbit);
-        in.open(path, std::ios::binary);
-        if (!in.is_open())
-            throw std::runtime_error{"{} cannot be opened"_format(path)};
-        in.read(reinterpret_cast<char*>(bytes.data()), size);
-        // Taken before `peek`, which resets it.
-        const auto got = in.gcount();
-        if (exact && (got != size || in.peek() != std::ifstream::traits_type::eof()))
-            throw std::runtime_error{"{} changed while it was read"_format(path)};
-        bytes.resize(static_cast<size_t>(got));
-        return std::make_shared<const std::vector<std::byte>>(std::move(bytes));
-    }
 
     // An APNG: libvips reads only its first frame, so re-encoding it would send a still.  Its
     // animation chunk comes before the image data, so the head of the file is enough.
@@ -7628,6 +7712,9 @@ void Client::_fail_attachment_send(int64_t client_id, bool permanent) {
     }
 
     _emit_message(false, client_id);
+    // Nothing can retry an unsendable message, so a file it took is no longer needed.
+    if (permanent)
+        _sweep_outgoing();
 }
 
 // -- Core event handling ----------------------------------------------------------------------

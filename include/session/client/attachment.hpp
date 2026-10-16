@@ -27,12 +27,15 @@ struct OutgoingAttachment {
 
     /// Hands the file to libsession, which keeps it beneath `Client::set_cache_dir` (needed for
     /// this), reads it from there for the upload and any retry, and deletes it once nothing can
-    /// send it: when it has uploaded (a retry never uploads it again), or when its message is
-    /// deleted.
+    /// send it: when it has uploaded (a retry never uploads it again), when its message turns
+    /// `SendState::unsendable`, or when its message is deleted.
     ///
     /// The caller's file is removed once the message is stored, and must not be used afterwards.
     /// A send that throws, or whose callback reports an error, leaves the file at `path`.  A
     /// symbolic link is refused.
+    ///
+    /// Until it is uploaded, `Client::attachment_data` and `attachment_data_cached` serve it and
+    /// `Attachment::availability` says `cached`, since the caller no longer has it to draw from.
     ///
     /// `filename` defaults to `path`'s filename as it was, and `content_type` to what its
     /// extension implies, as without this.
