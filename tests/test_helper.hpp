@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <map>
 #include <nlohmann/json.hpp>
 #include <session/attachments.hpp>
@@ -464,6 +465,13 @@ class TestHelper {
     static std::filesystem::path cache_path(
             Client& c, std::string_view kind, std::string_view url) {
         return c._cache_path(kind, url);
+    }
+
+    template <typename Client>
+    static std::shared_ptr<std::promise<void>> hold_disk_loop(Client& c) {
+        auto release = std::make_shared<std::promise<void>>();
+        c._post_disk([f = release->get_future().share()] { f.wait(); });
+        return release;
     }
 
     /// Drives the database-to-config direction directly, which is what makes the round-trip

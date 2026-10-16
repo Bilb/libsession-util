@@ -388,6 +388,23 @@ class Client {
             std::function<void(const AttachmentProgress&)> on_progress,
             result_function<std::vector<std::byte>> cb);
 
+    /// An attachment's contents from the cache, or `err::not_cached` if they are not there: what
+    /// `attachment_data` answers without touching the network, for a display that must not start a
+    /// download by drawing -- one with auto-download off, say, whose user has not asked for the
+    /// file.  `Attachment::availability` says in advance which answer to expect.
+    ///
+    /// Marks the cached file as used, as `attachment_data` does.
+    ///
+    /// A cached file that turns out not to be readable -- gone from under us, or corrupt -- is
+    /// removed from the cache and answered as `err::not_cached`, and the messages showing it are
+    /// told that it is no longer cached.  So the caller's move after `not_cached` is the same
+    /// whichever it was: `attachment_data`, if a download is wanted.
+    ///
+    /// Fails with `err::message_not_found`, `err::attachment_not_found` or `err::not_cached`.
+    void attachment_data_cached(
+            int64_t message_id, size_t index, result_function<std::vector<std::byte>> cb);
+    std::vector<std::byte> attachment_data_cached(int64_t message_id, size_t index, await_t);
+
     /// Withdraws one request made by `attachment_data` or `save_attachment`, by the token it
     /// returned or that its progress reports carry: its callback, and the last progress report it
     /// gets, fail with `err::download_cancelled`, and a save leaves nothing behind.  An
@@ -591,6 +608,10 @@ class Client {
     void set_attachment_cache_limit(std::optional<int64_t> bytes, await_t);
     void attachment_cache_limit(result_function<std::optional<int64_t>> cb);
     std::optional<int64_t> attachment_cache_limit(await_t);
+
+    /// How stale a cache entry's last use must be before a read records a new one.  Eviction only
+    /// needs coarse recency, so an entry read again within this keeps the use it has.
+    static constexpr auto CACHE_TOUCH_INTERVAL = 1h;
 
     /// How much disk the cached attachments occupy at the moment, in bytes.
     ///
@@ -1026,7 +1047,8 @@ class Client {
     std::optional<std::pair<int64_t, std::string>> _cached_entry(
             sqlite::Connection& c, std::string_view url);
 
-    // Marks a cache entry as used now, which is what makes eviction least-recently-used.
+    // Marks a cache entry as used now, which is what makes eviction least-recently-used.  Does
+    // nothing within CACHE_TOUCH_INTERVAL of its last use.
     void _touch_cached(int64_t id);
 
     // Removes least-recently-used entries until the cache fits its limit, never touching `keep` --
@@ -1138,6 +1160,33 @@ class Client {
     // Whether a file somebody asked for, of the size its sender declared, is kept once fetched: it
     // needs somewhere to go, and to fit `requested_cache_max_size`.
     bool _caches_requested(std::optional<int64_t> size);
+
+    // Where a read that finishes on another loop hands its answer, on Core's loop.
+    using bytes_answer = std::function<void(Expected<std::vector<std::byte>>)>;
+
+    // Starts such a read on Core's loop, `wait` meaning as for `_read_cache_file`.
+    using bytes_read = std::function<void(bytes_answer, bool wait)>;
+
+    // The public handler and waiting forms of such a read: run `start` on Core's loop with
+    // somewhere to answer, and report what it answers or throws.
+    void _answer_bytes(bytes_read start, result_function<std::vector<std::byte>> cb);
+    std::vector<std::byte> _await_bytes(bytes_read start);
+
+    // Reads `file` on the disk loop, behind whatever is queued there, and hands it to `then` on
+    // Core's loop.  `wait` reads it right here instead, for a caller on Core's loop that must
+    // answer before returning.  Only for a file whose row the caller has just found.
+    void _read_cache_file(
+            std::filesystem::path file,
+            bool wait,
+            std::function<void(std::optional<std::vector<std::byte>>)> then);
+
+    // A cache entry whose file a read found missing, or unreadable and so removed: the entry is
+    // dropped, and the messages showing it told.
+    void _drop_unreadable(int64_t id, const std::string& name);
+
+    // These read on the disk loop and hand the answer to `done` on Core's loop.  They throw
+    // `session::error` rather than calling `done` when there is plainly nothing to read.
+    void _attachment_data_cached(int64_t message_id, size_t index, bytes_answer done, bool wait);
 
     // Decides what an arriving message's attachments are worth fetching unasked, sets whether it is
     // shown as a gallery, and starts whatever it decided on.  Does nothing without a cache
