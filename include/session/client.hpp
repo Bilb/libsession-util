@@ -1093,6 +1093,9 @@ class Client {
     // database rather than worked out at each of those, which delete in several different ways.
     void _withdraw_orphaned_requests();
 
+    // What everything that deletes messages or attachments calls once it has committed.
+    void _attachments_deleted();
+
     // Stops `found`'s transfer and forgets it if nobody is left on it, discarding whatever it was
     // keeping; true if it did.
     bool _abort_if_unwanted(std::map<std::string, std::shared_ptr<Transfer>>::iterator found);

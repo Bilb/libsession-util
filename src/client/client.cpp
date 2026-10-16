@@ -2234,6 +2234,11 @@ void Client::_cancel(uint64_t token, std::string_view why) {
     });
 }
 
+void Client::_attachments_deleted() {
+    _withdraw_orphaned_requests();
+    _sweep_outgoing();
+}
+
 void Client::_withdraw_orphaned_requests() {
     if (_in_flight.empty() && _saves.empty())
         return;
@@ -3177,7 +3182,7 @@ void Client::_clear_messages(const ConversationId& id) {
     _set_delete_before(id, now);
 
     if (emptied) {
-        _withdraw_orphaned_requests();
+        _attachments_deleted();
         _emit_history_replaced(id);
         _touch(id);
     }
@@ -3212,7 +3217,7 @@ void Client::_delete_conversation(const ConversationId& id, bool keep_messages) 
     _sync_conversation(id);
 
     if (emptied) {
-        _withdraw_orphaned_requests();
+        _attachments_deleted();
         _emit_history_replaced(id);
     }
     if (hidden)
@@ -3235,8 +3240,9 @@ void Client::_delete_contact(const ConversationId& id) {
         c.prepared_exec("DELETE FROM contacts WHERE account = ?", *account);
 
         // Messages, their raw content and their attachments follow the conversation by cascade;
-        // the files those attachments name belong to the user and are not unlinked.  The account
-        // row stays -- see _reconcile_contacts, which deletes the same way for the same reasons.
+        // the files those attachments name belong to the user and are not unlinked, but for those
+        // a send took, which `_attachments_deleted` collects.  The account row stays -- see
+        // _reconcile_contacts, which deletes the same way for the same reasons.
         removed = c.prepared_exec("DELETE FROM conversations WHERE dm = ?", *account) > 0;
         tx.commit();
     }
@@ -3246,7 +3252,7 @@ void Client::_delete_contact(const ConversationId& id) {
     _sync_contact(id);
 
     if (removed) {
-        _withdraw_orphaned_requests();
+        _attachments_deleted();
         _emit_conversation_removed(id);
         _emit_lists_replaced();
     }
@@ -3281,7 +3287,7 @@ bool Client::_delete_message(int64_t message_id, Deletion how_far) {
 
         // The rows describing the attachments, not the files they name.  Those belong to the user
         // in both directions -- a file they chose to send, or a place they asked a download to be
-        // put -- and nothing here has ever unlinked one.
+        // put -- except one a send took, which `_attachments_deleted` collects.
         c.prepared_exec("DELETE FROM message_attachments WHERE message = ?", message_id);
 
         // There is nothing left to read, so it stops being unread.  Recomputed rather than
@@ -3301,7 +3307,7 @@ bool Client::_delete_message(int64_t message_id, Deletion how_far) {
         tx.commit();
     }
 
-    _withdraw_orphaned_requests();
+    _attachments_deleted();
 
     if (convo) {
         // Updated rather than removed: the row is still there, and a client that draws a gap where
@@ -4136,7 +4142,7 @@ WHERE id = ?1
     }
 
     if (!cleared.empty() || !removed.empty())
-        _withdraw_orphaned_requests();
+        _attachments_deleted();
 
     for (const auto& id : added)
         _emit_conversation_added(id);
@@ -4496,7 +4502,7 @@ WHERE id = ?1 AND (exp_mode, exp_timer) IS NOT (?2, ?3)
     }
 
     if (history_changed)
-        _withdraw_orphaned_requests();
+        _attachments_deleted();
 
     if (created)
         _emit_conversation_added(me);

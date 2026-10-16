@@ -140,6 +140,36 @@ TEST_CASE("Client: a retry uploads the taken copy", "[client][send][take]") {
     CHECK(eventually_gone(s.c, owned));
 }
 
+TEST_CASE("Client: deleting a message removes the file it took", "[client][send][take]") {
+    Sandbox s;
+    auto file = s.write("draft.bin", contents(3000));
+
+    // No network: the upload fails and the message keeps the file for a retry.
+    auto id = s.send(file);
+    sync(*s.c);
+    REQUIRE(s.c->message(id, await)->send_state == SendState::failed);
+    auto owned = stored_path(s.c, id);
+    REQUIRE(std::filesystem::exists(owned));
+
+    REQUIRE(s.c->delete_message(id, await));
+    CHECK(eventually_gone(s.c, owned));
+}
+
+TEST_CASE(
+        "Client: clearing a conversation removes the files its messages took",
+        "[client][send][take]") {
+    Sandbox s;
+    auto id = s.send(s.write("a.bin", contents(3000)));
+    sync(*s.c);
+    auto owned = stored_path(s.c, id);
+    REQUIRE(std::filesystem::exists(owned));
+
+    // Clearing takes what is strictly older than now, so not a message sent this millisecond.
+    std::this_thread::sleep_for(5ms);
+    s.c->conversation(ConversationId::dm(s.me), await)->clear_messages(await);
+    CHECK(eventually_gone(s.c, owned));
+}
+
 TEST_CASE("Client: a refused send leaves the caller's file where it was", "[client][send][take]") {
     Sandbox s;
     auto body = contents(3000);
