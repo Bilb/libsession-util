@@ -4780,8 +4780,11 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
         // Without a url, an incoming attachment is one its sender gave no way to fetch, which no
         // attempt will change; an outgoing one has simply not been uploaded yet, and is here if it
         // was taken, until its message turns unsendable.
+        // A stat per taken row still to upload, which are few, so that a lost one is not offered.
+        std::error_code ec;
         bool taken = path && taken_name(*path) && !_cache_dir.empty() &&
-                     found->second->send_state != SendState::unsendable;
+                     found->second->send_state != SendState::unsendable &&
+                     std::filesystem::exists(_attachment_file(*path), ec);
         auto status = url                     ? _attachment_availability(*url, cached, unavailable)
                     : taken                   ? CacheStatus{AttachmentAvailability::cached}
                     : found->second->outgoing ? CacheStatus{}

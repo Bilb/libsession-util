@@ -373,3 +373,11 @@ TEST_CASE(
     REQUIRE(saved);
     CHECK(read_all(*saved) == body);
 }
+
+TEST_CASE("Client: a taken file that went missing is not offered", "[client][send][take]") {
+    Sandbox s;
+    auto id = s.send(s.write("lost.bin", contents(3000)));
+    sync(*s.c);
+    std::filesystem::remove(s.cache.path / stored_path(s.c, id));
+    CHECK(s.c->message(id, await)->attachments[0].availability == AttachmentAvailability::absent);
+}

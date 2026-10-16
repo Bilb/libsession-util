@@ -666,6 +666,9 @@ class Client {
     /// the message or config entry whose key originally opened them — and so the files are not
     /// readable by whoever ends up with the disk.  That protection is only as good as the
     /// database's: with an unencrypted database the key sits in plaintext beside them.
+    ///
+    /// The exception is `outgoing/`, where files a send took (`OutgoingAttachment::take_file`)
+    /// wait **unencrypted**, as the caller handed them over, until they upload or are dropped.
     void set_cache_dir(std::filesystem::path dir);
 
     /// A conversation's picture, decrypted and ready to decode.

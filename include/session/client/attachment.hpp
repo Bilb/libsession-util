@@ -38,6 +38,8 @@ struct OutgoingAttachment {
     /// Either happens on the calling thread, so a copy of a large file blocks the `send_message`
     /// call, callback form included.
     ///
+    /// It waits there **unencrypted**, as handed over, unlike the rest of the cache.
+    ///
     /// Until it is uploaded, `Client::attachment_data`, `attachment_data_cached` and
     /// `save_attachment` serve it and `Attachment::availability` says `cached`, since the caller
     /// no longer has it to draw from.
@@ -262,7 +264,8 @@ struct Attachment {
     ///
     /// `availability` is not an exception to that.  The cache is ours, at a path derived from the
     /// url rather than chosen by anybody, so it is a fact about this attachment and not about
-    /// somewhere the application happens to have put a copy.
+    /// somewhere the application happens to have put a copy.  The same goes for a file a send
+    /// took (`OutgoingAttachment::take_file`), which is ours until it uploads.
     bool uploaded = false;
 
     /// Whether the bytes are here, on their way, fetchable, or not to be had -- see
@@ -271,7 +274,8 @@ struct Attachment {
     /// Reported the same way for an outgoing attachment as an incoming one: whatever we send is
     /// kept on upload, unless it is larger than the whole attachment cache limit, then evicted like
     /// any cached file.  So "can I draw this without a download" has one answer regardless of
-    /// direction.
+    /// direction.  Before its upload, an attachment that took its file is `cached` while that
+    /// file is there, and an un-taken one is `absent`, its bytes being the caller's.
     AttachmentAvailability availability = AttachmentAvailability::absent;
 
     /// How far the transfer has got, when `availability` is `fetching`; both 0 otherwise.
