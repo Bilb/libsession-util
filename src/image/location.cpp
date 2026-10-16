@@ -12,58 +12,101 @@ namespace session::image {
 
 using namespace std::literals;
 
+// Every position and length below is a uint64_t: they add untrusted 32-bit fields, which would
+// wrap a 32-bit size_t.
+
 namespace {
 
     using mutable_bytes = std::span<std::byte>;
     using bytes = std::span<const std::byte>;
 
-    uint8_t u8(bytes b, size_t at) {
+    bool fits(bytes b, uint64_t at, uint64_t n) {
+        return at <= b.size() && n <= b.size() - at;
+    }
+
+    uint8_t u8(bytes b, uint64_t at) {
         return static_cast<uint8_t>(b[at]);
     }
 
-    bool has_at(bytes b, size_t at, std::string_view s) {
-        return at <= b.size() && b.size() - at >= s.size() &&
-               std::memcmp(b.data() + at, s.data(), s.size()) == 0;
+    bool has_at(bytes b, uint64_t at, std::string_view s) {
+        return fits(b, at, s.size()) && std::memcmp(b.data() + at, s.data(), s.size()) == 0;
     }
 
     std::string_view text_of(bytes b) {
         return {reinterpret_cast<const char*>(b.data()), b.size()};
     }
 
-    uint32_t be16(bytes b, size_t at) {
+    uint32_t be16(bytes b, uint64_t at) {
         return (uint32_t{u8(b, at)} << 8) | u8(b, at + 1);
     }
 
-    uint32_t be32(bytes b, size_t at) {
+    uint32_t be32(bytes b, uint64_t at) {
         return (be16(b, at) << 16) | be16(b, at + 2);
     }
 
-    uint32_t le32(bytes b, size_t at) {
+    uint64_t be64(bytes b, uint64_t at) {
+        return (uint64_t{be32(b, at)} << 32) | be32(b, at + 4);
+    }
+
+    uint32_t le32(bytes b, uint64_t at) {
         return uint32_t{u8(b, at)} | (uint32_t{u8(b, at + 1)} << 8) |
                (uint32_t{u8(b, at + 2)} << 16) | (uint32_t{u8(b, at + 3)} << 24);
     }
 
-    void put_be32(std::vector<std::byte>& out, uint32_t v) {
-        for (int shift = 24; shift >= 0; shift -= 8)
-            out.push_back(static_cast<std::byte>(v >> shift));
+    // A big-endian unsigned of `n` bytes, n in [0, 8].
+    uint64_t be_n(bytes b, uint64_t at, unsigned n) {
+        uint64_t v = 0;
+        for (unsigned i = 0; i < n; i++)
+            v = (v << 8) | u8(b, at + i);
+        return v;
     }
 
-    void put_le32(mutable_bytes b, size_t at, uint32_t v) {
+    void put_be32(mutable_bytes b, uint64_t at, uint32_t v) {
+        for (int i = 0; i < 4; i++)
+            b[at + i] = static_cast<std::byte>(v >> (24 - 8 * i));
+    }
+
+    void put_le32(mutable_bytes b, uint64_t at, uint32_t v) {
         for (int i = 0; i < 4; i++)
             b[at + i] = static_cast<std::byte>(v >> (8 * i));
     }
 
-    void zero(mutable_bytes b, size_t from, size_t to) {
-        std::fill(b.begin() + from, b.begin() + to, std::byte{0});
+    void fill(mutable_bytes b, uint64_t from, uint64_t to, std::byte with = std::byte{0}) {
+        std::fill(b.begin() + from, b.begin() + to, with);
     }
 
-    // Matched as words anywhere in the packet: a false match costs only the XMP, never the picture.
-    constexpr std::array PLACE_WORDS{"GPS"sv, "City"sv, "State"sv, "Country"sv, "Location"sv};
-
-    bool names_a_place(std::string_view xmp) {
-        return std::ranges::any_of(
-                PLACE_WORDS, [xmp](std::string_view w) { return xmp.find(w) != xmp.npos; });
+    // Lowercased, with NULs dropped so that UTF-16 XMP reads as its ASCII.
+    std::string folded(std::string_view text) {
+        std::string out;
+        out.reserve(text.size());
+        for (char c : text)
+            if (c != '\0')
+                out.push_back(c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c);
+        return out;
     }
+
+    bool mentions(std::string_view text, std::span<const std::string_view> words) {
+        const auto f = folded(text);
+        return std::ranges::any_of(words, [&f](std::string_view w) { return f.find(w) != f.npos; });
+    }
+
+    // Matched anywhere, in any case: a false match costs only the metadata, never the picture.
+    constexpr std::array PLACE_WORDS{
+            "gps"sv,
+            "latitude"sv,
+            "longitude"sv,
+            "altitude"sv,
+            "city"sv,
+            "state"sv,
+            "country"sv,
+            "location"sv};
+
+    bool names_a_place(std::string_view text) {
+        return mentions(text, PLACE_WORDS);
+    }
+
+    // What a motion photo's XMP says about the video kept after the picture.
+    constexpr std::array CONTAINER_WORDS{"container:directory"sv, "microvideo"sv, "motionphoto"sv};
 
     // MARK: EXIF
 
@@ -74,8 +117,8 @@ namespace {
 
     constexpr uint32_t GPS_IFD_TAG = 0x8825;
 
-    // Empties the GPS directory of a TIFF structure (EXIF's body) in place: its values and entries
-    // become zeros and its count 0, which is a valid empty directory, so nothing else moves.
+    // Empties every GPS directory IFD0 points at, in place: values and entries become zeros and
+    // the count 0, which is a valid empty directory, so nothing else in the structure moves.
     Exif empty_gps(mutable_bytes tiff) {
         bool le;
         if (has_at(tiff, 0, "II"))
@@ -85,16 +128,13 @@ namespace {
         else
             return Exif::unreadable;
 
-        auto fits = [&](uint64_t at, uint64_t n) {
-            return at <= tiff.size() && n <= tiff.size() - at;
-        };
         auto rd16 = [&](uint64_t at) -> std::optional<uint32_t> {
-            if (!fits(at, 2))
+            if (!fits(tiff, at, 2))
                 return std::nullopt;
             return le ? uint32_t{u8(tiff, at)} | (uint32_t{u8(tiff, at + 1)} << 8) : be16(tiff, at);
         };
         auto rd32 = [&](uint64_t at) -> std::optional<uint32_t> {
-            if (!fits(at, 4))
+            if (!fits(tiff, at, 4))
                 return std::nullopt;
             return le ? le32(tiff, at) : be32(tiff, at);
         };
@@ -104,53 +144,44 @@ namespace {
         if (magic != 42u || !ifd0)
             return Exif::unreadable;
         auto entries = rd16(*ifd0);
-        if (!entries || !fits(*ifd0 + 2, uint64_t{12} * *entries))
+        if (!entries || !fits(tiff, uint64_t{*ifd0} + 2, uint64_t{12} * *entries))
             return Exif::unreadable;
 
-        std::optional<uint32_t> gps;
+        bool emptied = false;
         for (uint32_t i = 0; i < *entries; i++) {
-            const uint64_t e = *ifd0 + 2 + uint64_t{12} * i;
+            const uint64_t e = uint64_t{*ifd0} + 2 + uint64_t{12} * i;
             if (rd16(e) != GPS_IFD_TAG)
                 continue;
-            auto type = rd16(e + 2);
-            if (rd32(e + 4) != 1u)
+            const auto type = *rd16(e + 2);
+            if (rd32(e + 4) != 1u || (type != 3 && type != 4 && type != 13))
                 return Exif::unreadable;
-            gps = type == 3u ? rd16(e + 8) : rd32(e + 8);
-            if (!gps)
+            const uint64_t gps = type == 3 ? *rd16(e + 8) : *rd32(e + 8);
+            auto count = rd16(gps);
+            if (!count || !fits(tiff, gps + 2, uint64_t{12} * *count))
                 return Exif::unreadable;
-            break;
-        }
-        if (!gps)
-            return Exif::untouched;
+            if (*count == 0)
+                continue;
 
-        auto count = rd16(*gps);
-        if (!count)
-            return Exif::unreadable;
-        if (*count == 0)
-            return Exif::untouched;
-        uint64_t end = *gps + 2 + uint64_t{12} * *count;
-        if (end > tiff.size())
-            return Exif::unreadable;
-
-        for (uint32_t i = 0; i < *count; i++) {
-            const uint64_t e = *gps + 2 + uint64_t{12} * i;
-            auto type = *rd16(e + 2);
-            auto n = *rd32(e + 4);
-            if (type >= TIFF_TYPE_SIZE.size() || TIFF_TYPE_SIZE[type] == 0)
-                return Exif::unreadable;
-            const uint64_t size = uint64_t{TIFF_TYPE_SIZE[type]} * n;
-            if (size <= 4)
-                continue;  // held in the entry itself
-            auto at = *rd32(e + 8);
-            if (!fits(at, size))
-                return Exif::unreadable;
-            zero(tiff, at, at + size);
+            for (uint32_t k = 0; k < *count; k++) {
+                const uint64_t g = gps + 2 + uint64_t{12} * k;
+                const auto field = *rd16(g + 2);
+                if (field >= TIFF_TYPE_SIZE.size())
+                    continue;  // no value TIFF defines, so nothing a reader would find
+                const uint64_t size = uint64_t{TIFF_TYPE_SIZE[field]} * *rd32(g + 4);
+                if (size <= 4)
+                    continue;  // held in the entry itself
+                // A value outside the structure is not in the file to remove.
+                if (const uint64_t at = *rd32(g + 8); fits(tiff, at, size))
+                    fill(tiff, at, at + size);
+            }
+            uint64_t end = gps + 2 + uint64_t{12} * *count;
+            // The pointer to a next directory, which a GPS directory should not have.
+            if (fits(tiff, end, 4))
+                end += 4;
+            fill(tiff, gps, end);
+            emptied = true;
         }
-        // The pointer to a next directory, which a GPS directory should not have.
-        if (fits(end, 4))
-            end += 4;
-        zero(tiff, *gps, end);
-        return Exif::emptied;
+        return emptied ? Exif::emptied : Exif::untouched;
     }
 
     // EXIF as JPEG and WebP writers may prefix it.
@@ -164,51 +195,58 @@ namespace {
 
     constexpr auto XMP_ID = "http://ns.adobe.com/xap/1.0/\0"sv;
     constexpr auto EXTENDED_XMP_ID = "http://ns.adobe.com/xmp/extension/\0"sv;
-    // GUID, full length and offset, ahead of each extended XMP chunk.
+    // GUID (32), full length (4) and this chunk's offset (4), ahead of each extended XMP chunk.
     constexpr size_t EXTENDED_XMP_HEADER = 40;
     constexpr auto MPF_ID = "MPF\0"sv;
     constexpr uint32_t MP_ENTRY_TAG = 0xB002;
     constexpr size_t MP_ENTRY_SIZE = 16;
 
-    constexpr uint8_t SOI = 0xD8, EOI = 0xD9, SOS = 0xDA, APP1 = 0xE1, APP2 = 0xE2, APP13 = 0xED,
-                      COM = 0xFE;
+    constexpr uint8_t SOI = 0xD8, EOI = 0xD9, SOS = 0xDA, APP1 = 0xE1, APP2 = 0xE2, APP11 = 0xEB,
+                      APP13 = 0xED, COM = 0xFE;
 
     struct Segment {
-        size_t marker;   // position of the marker byte, after its 0xFF
-        size_t payload;  // first byte after the length
-        size_t end;
+        uint64_t marker;   // position of the marker byte, after its 0xFF
+        uint64_t payload;  // first byte after the length
+        uint64_t end;
     };
 
     struct Jpeg {
         mutable_bytes file;
         bool changed = false;
+        std::vector<Segment> c2pa;           // APP11, decided once the rest is done
+        std::vector<Segment> container_xmp;  // XMP pointing past the last picture
+        std::vector<uint64_t> others;        // pictures the first one's MPF index names
 
         // A comment of zeros, the same length: what a removed segment becomes, so that nothing
         // after it moves.
         void blank(const Segment& s) {
             file[s.marker] = std::byte{COM};
-            zero(file, s.payload, s.end);
+            fill(file, s.payload, s.end);
             changed = true;
         }
 
-        // The picture starting at `start`, through its EOI.  Returns where it ends, and the
-        // absolute positions of the other pictures its MPF index names.
-        size_t picture(size_t start, std::vector<size_t>* others) {
-            const size_t n = file.size();
+        bytes payload(const Segment& s) const {
+            return bytes{file}.subspan(s.payload, s.end - s.payload);
+        }
+
+        // The picture starting at `start`, through its EOI.  Returns where it ends: the file's
+        // end when it does not, so nothing after a damaged picture is mistaken for a trailer.
+        uint64_t picture(uint64_t start, bool first) {
+            const uint64_t n = file.size();
             std::vector<Segment> xmp;
             std::string xmp_text;
+            std::vector<std::pair<uint32_t, Segment>> extended;
             bool in_scan = false;
-            size_t i = start + 2;
-            size_t end = n;
+            uint64_t i = start + 2;
+            uint64_t end = n;
 
             while (i < n) {
+                // Outside a scan this is padding a decoder skips over too.
                 if (u8(file, i) != 0xFF) {
-                    if (!in_scan)
-                        break;  // not a JPEG past here: leave the rest as it is
                     i++;
                     continue;
                 }
-                size_t m = i + 1;
+                uint64_t m = i + 1;
                 while (m < n && u8(file, m) == 0xFF)
                     m++;
                 if (m >= n)
@@ -223,48 +261,60 @@ namespace {
                     i = m + 1;
                     continue;
                 }
-                if (m + 3 > n)
+                if (in_scan && marker == SOI)
                     break;
-                const size_t len = be16(file, m + 1);
-                if (len < 2 || m + 1 + len > n)
+                if (!fits(file, m + 1, 2))
                     break;
-                Segment s{m, m + 3, m + 1 + len};
-                auto payload = mutable_bytes{file}.subspan(s.payload, s.end - s.payload);
+                const uint64_t len = be16(file, m + 1);
+                if (len < 2 || !fits(file, m + 1, len))
+                    break;
+                const Segment s{m, m + 3, m + 1 + len};
+                auto data = file.subspan(s.payload, s.end - s.payload);
 
-                if (marker == APP1 && has_at(payload, 0, EXIF_PREFIX)) {
-                    switch (empty_gps(payload.subspan(EXIF_PREFIX.size()))) {
+                if (marker == APP1 && has_at(data, 0, EXIF_PREFIX)) {
+                    switch (empty_gps(data.subspan(EXIF_PREFIX.size()))) {
                         case Exif::emptied: changed = true; break;
                         case Exif::unreadable: blank(s); break;
                         case Exif::untouched: break;
                     }
-                } else if (marker == APP1 && has_at(payload, 0, XMP_ID)) {
+                } else if (marker == APP1 && has_at(data, 0, XMP_ID)) {
                     xmp.push_back(s);
-                    xmp_text += text_of(payload.subspan(XMP_ID.size()));
-                } else if (marker == APP1 && has_at(payload, 0, EXTENDED_XMP_ID)) {
+                    xmp_text += text_of(data.subspan(XMP_ID.size()));
+                } else if (marker == APP1 && has_at(data, 0, EXTENDED_XMP_ID)) {
                     xmp.push_back(s);
-                    if (payload.size() > EXTENDED_XMP_ID.size() + EXTENDED_XMP_HEADER)
-                        xmp_text += text_of(
-                                payload.subspan(EXTENDED_XMP_ID.size() + EXTENDED_XMP_HEADER));
+                    const uint64_t header = EXTENDED_XMP_ID.size() + EXTENDED_XMP_HEADER;
+                    if (data.size() >= header)
+                        extended.emplace_back(be32(data, header - 4), s);
                 } else if (marker == APP13) {
                     blank(s);
-                } else if (marker == APP2 && others && has_at(payload, 0, MPF_ID)) {
-                    mp_index(payload.subspan(MPF_ID.size()), s.payload + MPF_ID.size(), *others);
+                } else if (marker == APP11) {
+                    c2pa.push_back(s);
+                } else if (marker == APP2 && first && has_at(data, 0, MPF_ID)) {
+                    mp_index(data.subspan(MPF_ID.size()), s.payload + MPF_ID.size());
                 }
 
                 in_scan = marker == SOS;
                 i = s.end;
             }
 
-            // Searched as one text: a GPS field can sit in the extended part, or straddle two.
-            if (names_a_place(xmp_text))
+            // In the order of their offsets, as one text: a field can straddle two chunks.
+            std::ranges::stable_sort(extended, {}, &std::pair<uint32_t, Segment>::first);
+            const uint64_t header = EXTENDED_XMP_ID.size() + EXTENDED_XMP_HEADER;
+            for (const auto& [offset, s] : extended)
+                xmp_text += text_of(payload(s).subspan(header));
+
+            if (names_a_place(xmp_text)) {
                 for (const auto& s : xmp)
                     blank(s);
+            } else if (first && mentions(xmp_text, CONTAINER_WORDS)) {
+                container_xmp = xmp;
+            }
             return end;
         }
 
         // The MPF index: a TIFF structure whose MP Entry field lists each picture's offset from the
         // index's own start.  The first picture, offset 0, is this one.
-        void mp_index(bytes mp, size_t base, std::vector<size_t>& others) {
+        void mp_index(bytes mp, uint64_t base) {
             bool le;
             if (has_at(mp, 0, "II"))
                 le = true;
@@ -272,21 +322,18 @@ namespace {
                 le = false;
             else
                 return;
-            auto fits = [&](uint64_t at, uint64_t k) {
-                return at <= mp.size() && k <= mp.size() - at;
-            };
             auto rd16 = [&](uint64_t at) {
                 return le ? uint32_t{u8(mp, at)} | (uint32_t{u8(mp, at + 1)} << 8) : be16(mp, at);
             };
             auto rd32 = [&](uint64_t at) { return le ? le32(mp, at) : be32(mp, at); };
 
-            if (!fits(4, 4))
+            if (!fits(mp, 4, 4))
                 return;
             const uint64_t ifd = rd32(4);
-            if (!fits(ifd, 2))
+            if (!fits(mp, ifd, 2))
                 return;
             const uint32_t entries = rd16(ifd);
-            if (!fits(ifd + 2, uint64_t{12} * entries))
+            if (!fits(mp, ifd + 2, uint64_t{12} * entries))
                 return;
             for (uint32_t i = 0; i < entries; i++) {
                 const uint64_t e = ifd + 2 + uint64_t{12} * i;
@@ -294,10 +341,10 @@ namespace {
                     continue;
                 const uint64_t size = rd32(e + 4);
                 const uint64_t at = rd32(e + 8);
-                if (size < MP_ENTRY_SIZE || !fits(at, size))
+                if (!fits(mp, at, size))
                     return;
                 for (uint64_t k = 0; k + MP_ENTRY_SIZE <= size; k += MP_ENTRY_SIZE)
-                    if (auto offset = rd32(at + k + 8); offset != 0)
+                    if (const uint64_t offset = rd32(at + k + 8); offset != 0)
                         others.push_back(base + offset);
                 return;
             }
@@ -307,14 +354,28 @@ namespace {
     std::optional<std::vector<std::byte>> jpeg_without_location(bytes file) {
         std::vector<std::byte> out{file.begin(), file.end()};
         Jpeg jpeg{out};
-        std::vector<size_t> others;
-        const size_t first_end = jpeg.picture(0, &others);
-        for (auto at : others)
-            if (at >= first_end && at + 3 <= out.size() && u8(out, at) == 0xFF &&
+        uint64_t last = jpeg.picture(0, true);
+        const uint64_t first_end = last;
+        for (auto at : jpeg.others)
+            if (at >= first_end && fits(out, at, 3) && u8(out, at) == 0xFF &&
                 u8(out, at + 1) == SOI)
-                jpeg.picture(at, nullptr);
-        if (!jpeg.changed)
+                last = std::max(last, jpeg.picture(at, false));
+
+        const bool trailer = last < out.size();
+        if (trailer)
+            for (const auto& s : jpeg.container_xmp)
+                jpeg.blank(s);
+
+        const bool c2pa_place = std::ranges::any_of(jpeg.c2pa, [&](const Segment& s) {
+            return names_a_place(text_of(jpeg.payload(s)));
+        });
+        if (c2pa_place || jpeg.changed || trailer)
+            for (const auto& s : jpeg.c2pa)
+                jpeg.blank(s);
+
+        if (!jpeg.changed && !trailer)
             return std::nullopt;
+        out.resize(last);
         return out;
     }
 
@@ -344,8 +405,8 @@ namespace {
 
     enum class Keep { as_is, changed, drop };
 
-    // A text chunk's verdict.  `text` is what follows the keyword's NUL; null when it is compressed
-    // and so cannot be searched.
+    // A text chunk's verdict.  `text` is what follows the keyword; null when it is compressed and
+    // so cannot be searched.
     Keep text_chunk(std::string_view keyword, std::optional<std::string_view> text) {
         if (keyword.starts_with(RAW_PROFILE_KEYWORD))
             return Keep::drop;
@@ -391,35 +452,47 @@ namespace {
     }
 
     std::optional<std::vector<std::byte>> png_without_location(bytes file) {
-        std::vector<std::byte> out{file.begin(), file.begin() + PNG_SIGNATURE.size()};
-        bool changed = false;
-        size_t i = PNG_SIGNATURE.size();
-        while (i < file.size()) {
-            if (file.size() - i < 12 || be32(file, i) > file.size() - i - 12)
-                break;
-            const size_t len = be32(file, i);
-            const auto type = text_of(file.subspan(i + 4, 4));
-            std::vector<std::byte> data{file.begin() + i + 8, file.begin() + i + 8 + len};
-            const size_t next = i + 12 + len;
+        std::vector<std::byte> out;
+        out.reserve(file.size());
+        out.insert(out.end(), file.begin(), file.begin() + PNG_SIGNATURE.size());
+        std::vector<std::pair<uint64_t, uint64_t>> c2pa;  // [start, end) in `out`
+        bool c2pa_place = false, changed = false;
 
-            switch (png_chunk(type, data)) {
-                case Keep::drop: changed = true; break;
-                case Keep::as_is:
-                    out.insert(out.end(), file.begin() + i, file.begin() + next);
-                    break;
-                case Keep::changed: {
-                    changed = true;
-                    const size_t at = out.size();
-                    put_be32(out, static_cast<uint32_t>(len));
-                    out.insert(out.end(), file.begin() + i + 4, file.begin() + i + 8);
-                    out.insert(out.end(), data.begin(), data.end());
-                    put_be32(out, png_crc(bytes{out}.subspan(at + 4)));
-                    break;
+        uint64_t i = PNG_SIGNATURE.size();
+        while (fits(file, i, 12)) {
+            const uint64_t len = be32(file, i);
+            if (!fits(file, i + 12, len))
+                break;
+            const uint64_t next = i + 12 + len;
+            const uint64_t at = out.size();
+            out.insert(out.end(), file.begin() + i, file.begin() + next);
+            const auto type = text_of(bytes{out}.subspan(at + 4, 4));
+            auto data = mutable_bytes{out}.subspan(at + 8, len);
+
+            if (type == "caBX") {
+                c2pa.emplace_back(at, out.size());
+                c2pa_place |= names_a_place(text_of(data));
+            } else {
+                switch (png_chunk(type, data)) {
+                    case Keep::as_is: break;
+                    case Keep::drop:
+                        out.resize(at);
+                        changed = true;
+                        break;
+                    case Keep::changed:
+                        put_be32(out, at + 8 + len, png_crc(bytes{out}.subspan(at + 4, len + 4)));
+                        changed = true;
+                        break;
                 }
             }
             i = next;
             if (type == "IEND")
                 break;
+        }
+        if (c2pa_place || (changed && !c2pa.empty())) {
+            for (auto it = c2pa.rbegin(); it != c2pa.rend(); ++it)
+                out.erase(out.begin() + it->first, out.begin() + it->second);
+            changed = true;
         }
         if (!changed)
             return std::nullopt;
@@ -431,64 +504,252 @@ namespace {
     // MARK: WebP
 
     constexpr uint8_t VP8X_XMP = 0x04, VP8X_EXIF = 0x08;
-    constexpr size_t RIFF_HEADER = 12, CHUNK_HEADER = 8;
+    constexpr uint64_t RIFF_HEADER = 12, CHUNK_HEADER = 8;
 
     std::optional<std::vector<std::byte>> webp_without_location(bytes file) {
-        const size_t riff_end = std::min<size_t>(file.size(), uint64_t{le32(file, 4)} + 8);
-        std::vector<std::byte> out{file.begin(), file.begin() + RIFF_HEADER};
-        std::optional<size_t> vp8x;
-        uint8_t cleared = 0;
-        bool changed = false;
+        const uint64_t riff_end = std::min<uint64_t>(file.size(), uint64_t{le32(file, 4)} + 8);
+        std::vector<std::byte> out;
+        out.reserve(file.size());
+        out.insert(out.end(), file.begin(), file.begin() + RIFF_HEADER);
+        std::optional<uint64_t> vp8x;
+        std::vector<std::pair<uint64_t, uint64_t>> c2pa;
+        bool c2pa_place = false, changed = false, exif_kept = false, xmp_kept = false;
 
-        size_t i = RIFF_HEADER;
-        while (i < riff_end) {
-            if (riff_end - i < CHUNK_HEADER)
-                break;
-            const size_t len = le32(file, i + 4);
-            const size_t padded = len + (len & 1);
+        uint64_t i = RIFF_HEADER;
+        while (i < riff_end && riff_end - i >= CHUNK_HEADER) {
+            const uint64_t len = le32(file, i + 4);
+            const uint64_t padded = len + (len & 1);
             if (padded > riff_end - i - CHUNK_HEADER)
                 break;
-            const auto fourcc = text_of(file.subspan(i, 4));
-            const size_t next = i + CHUNK_HEADER + padded;
-            std::vector<std::byte> chunk{file.begin() + i, file.begin() + next};
-            auto data = mutable_bytes{chunk}.subspan(CHUNK_HEADER, len);
+            const uint64_t next = i + CHUNK_HEADER + padded;
+            const uint64_t at = out.size();
+            out.insert(out.end(), file.begin() + i, file.begin() + next);
+            const auto fourcc = text_of(bytes{out}.subspan(at, 4));
+            auto data = mutable_bytes{out}.subspan(at + CHUNK_HEADER, len);
 
             bool keep = true;
-            if (fourcc == "VP8X" && len >= 1)
-                vp8x = out.size() + CHUNK_HEADER;
-            else if (fourcc == "EXIF") {
+            if (fourcc == "VP8X" && len >= 1) {
+                vp8x = at + CHUNK_HEADER;
+            } else if (fourcc == "EXIF") {
                 switch (empty_gps_after_prefix(data)) {
                     case Exif::emptied: changed = true; break;
-                    case Exif::unreadable:
-                        keep = false;
-                        cleared |= VP8X_EXIF;
-                        break;
+                    case Exif::unreadable: keep = false; break;
                     case Exif::untouched: break;
                 }
-            } else if (fourcc == "XMP " && names_a_place(text_of(data))) {
-                keep = false;
-                cleared |= VP8X_XMP;
+                exif_kept |= keep;
+            } else if (fourcc == "XMP ") {
+                keep = !names_a_place(text_of(data));
+                xmp_kept |= keep;
+            } else if (fourcc == "C2PA") {
+                c2pa.emplace_back(at, out.size());
+                c2pa_place |= names_a_place(text_of(data));
             }
-            if (keep)
-                out.insert(out.end(), chunk.begin(), chunk.end());
-            else
+            if (!keep) {
+                out.resize(at);
                 changed = true;
+            }
             i = next;
+        }
+        if (c2pa_place || (changed && !c2pa.empty())) {
+            for (auto it = c2pa.rbegin(); it != c2pa.rend(); ++it)
+                out.erase(out.begin() + it->first, out.begin() + it->second);
+            changed = true;
         }
         if (!changed)
             return std::nullopt;
 
         out.insert(out.end(), file.begin() + i, file.begin() + riff_end);
-        if (vp8x)
-            out[*vp8x] &= static_cast<std::byte>(~cleared);
+        if (vp8x) {
+            // Erasing C2PA chunks never moves VP8X, which comes first.
+            if (!exif_kept)
+                out[*vp8x] &= static_cast<std::byte>(~VP8X_EXIF);
+            if (!xmp_kept)
+                out[*vp8x] &= static_cast<std::byte>(~VP8X_XMP);
+        }
         put_le32(out, 4, static_cast<uint32_t>(out.size() - 8));
         // Anything past the RIFF body is not part of the picture, and is kept as it was.
         out.insert(out.end(), file.begin() + riff_end, file.end());
         return out;
     }
 
+    // MARK: HEIF
+
+    struct Box {
+        std::string_view type;
+        uint64_t body;  // first byte after the header
+        uint64_t end;
+    };
+
+    // The boxes laid end to end in [from, to).
+    std::vector<Box> boxes(bytes b, uint64_t from, uint64_t to) {
+        std::vector<Box> out;
+        while (to - from >= 8) {
+            uint64_t size = be32(b, from);
+            uint64_t header = 8;
+            if (size == 1) {
+                if (to - from < 16)
+                    break;
+                size = be64(b, from + 8);
+                header = 16;
+            } else if (size == 0) {
+                size = to - from;
+            }
+            if (size < header || size > to - from)
+                break;
+            out.push_back({text_of(b.subspan(from + 4, 4)), from + header, from + size});
+            from += size;
+        }
+        return out;
+    }
+
+    struct Item {
+        uint32_t id;
+        bool exif;  // else XMP
+    };
+
+    // The Exif and XMP items an `iinf` box lists.
+    std::vector<Item> metadata_items(bytes b, const Box& iinf) {
+        std::vector<Item> items;
+        if (iinf.end - iinf.body < 6)
+            return items;
+        const unsigned version = u8(b, iinf.body);
+        const uint64_t first = iinf.body + 4 + (version == 0 ? 2 : 4);
+        if (first > iinf.end)
+            return items;
+        for (const auto& infe : boxes(b, first, iinf.end)) {
+            if (infe.type != "infe" || infe.end - infe.body < 4)
+                continue;
+            const unsigned v = u8(b, infe.body);
+            if (v < 2)
+                continue;
+            const uint64_t id_size = v == 2 ? 2 : 4;
+            const uint64_t type_at = infe.body + 4 + id_size + 2;
+            if (type_at + 4 > infe.end)
+                continue;
+            const uint32_t id = static_cast<uint32_t>(be_n(b, infe.body + 4, id_size));
+            const auto type = text_of(b.subspan(type_at, 4));
+            if (type == "Exif") {
+                items.push_back({id, true});
+            } else if (type == "mime") {
+                // Item name, then content type, each NUL-ended.
+                auto rest = text_of(b.subspan(type_at + 4, infe.end - type_at - 4));
+                const auto name_end = rest.find('\0');
+                if (name_end == rest.npos)
+                    continue;
+                const auto content_type = folded(rest.substr(name_end + 1));
+                if (content_type.find("rdf+xml") != content_type.npos ||
+                    content_type.find("xmp") != content_type.npos)
+                    items.push_back({id, false});
+            }
+        }
+        return items;
+    }
+
+    // Where an item's bytes lie in the file, from `iloc`: [offset, offset + length) per extent.
+    // Empty for an item stored anywhere but the file body.
+    std::vector<std::pair<uint64_t, uint64_t>> item_extents(
+            bytes b, const Box& iloc, uint32_t want) {
+        std::vector<std::pair<uint64_t, uint64_t>> out;
+        uint64_t p = iloc.body;
+        auto need = [&](uint64_t n) { return n <= iloc.end - p; };
+        if (!need(6))
+            return out;
+        const unsigned version = u8(b, p);
+        const unsigned offset_size = u8(b, p + 4) >> 4, length_size = u8(b, p + 4) & 0xF;
+        const unsigned base_size = u8(b, p + 5) >> 4;
+        const unsigned index_size = (version == 1 || version == 2) ? (u8(b, p + 5) & 0xF) : 0;
+        if (version > 2 || offset_size > 8 || length_size > 8 || base_size > 8 || index_size > 8)
+            return out;
+        p += 6;
+        const unsigned count_size = version < 2 ? 2 : 4;
+        if (!need(count_size))
+            return out;
+        const uint64_t count = be_n(b, p, count_size);
+        p += count_size;
+
+        for (uint64_t k = 0; k < count; k++) {
+            const unsigned id_size = version < 2 ? 2 : 4;
+            if (!need(id_size))
+                return {};
+            const uint64_t id = be_n(b, p, id_size);
+            p += id_size;
+            unsigned method = 0;
+            if (version == 1 || version == 2) {
+                if (!need(2))
+                    return {};
+                method = be16(b, p) & 0xF;
+                p += 2;
+            }
+            if (!need(2 + base_size + 2))
+                return {};
+            const uint64_t reference = be16(b, p);
+            const uint64_t base = be_n(b, p + 2, base_size);
+            const uint64_t extents = be16(b, p + 2 + base_size);
+            p += 2 + base_size + 2;
+            const uint64_t extent_size = uint64_t{index_size} + offset_size + length_size;
+            if (extent_size * extents > iloc.end - p)
+                return {};
+            if (id == want && method == 0 && reference == 0)
+                for (uint64_t x = 0; x < extents; x++) {
+                    const uint64_t e = p + extent_size * x + index_size;
+                    const uint64_t offset = base + be_n(b, e, offset_size);
+                    uint64_t length = be_n(b, e + offset_size, length_size);
+                    if (offset > b.size())
+                        continue;
+                    if (length == 0 || length > b.size() - offset)
+                        length = b.size() - offset;
+                    out.emplace_back(offset, length);
+                }
+            p += extent_size * extents;
+        }
+        return out;
+    }
+
+    std::optional<std::vector<std::byte>> heif_without_location(bytes file) {
+        std::vector<std::byte> out{file.begin(), file.end()};
+        bool changed = false;
+        for (const auto& meta : boxes(out, 0, out.size())) {
+            if (meta.type != "meta" || meta.end - meta.body < 4)
+                continue;
+            const auto children = boxes(out, meta.body + 4, meta.end);
+            const auto iinf = std::ranges::find(children, "iinf"sv, &Box::type);
+            const auto iloc = std::ranges::find(children, "iloc"sv, &Box::type);
+            if (iinf == children.end() || iloc == children.end())
+                continue;
+
+            for (const auto& item : metadata_items(out, *iinf)) {
+                const auto extents = item_extents(out, *iloc, item.id);
+                if (item.exif && extents.size() == 1) {
+                    // A 4-byte offset to the TIFF header, then whatever precedes it.
+                    auto [at, length] = extents[0];
+                    auto data = mutable_bytes{out}.subspan(at, length);
+                    if (data.size() >= 4 && be32(data, 0) <= data.size() - 4) {
+                        auto r = empty_gps(data.subspan(4 + be32(data, 0)));
+                        if (r == Exif::emptied)
+                            changed = true;
+                        if (r != Exif::unreadable)
+                            continue;
+                    }
+                }
+                // Blanked where it lies: EXIF in several pieces or unreadable is zeroed whole, and
+                // XMP naming a place becomes spaces, which XMP allows as padding.
+                std::string text;
+                for (auto [at, length] : extents)
+                    text += text_of(bytes{out}.subspan(at, length));
+                if (!item.exif && !names_a_place(text))
+                    continue;
+                for (auto [at, length] : extents)
+                    fill(out, at, at + length, item.exif ? std::byte{0} : std::byte{' '});
+                changed |= !extents.empty();
+            }
+        }
+        if (!changed)
+            return std::nullopt;
+        return out;
+    }
+
     bool is_jpeg(bytes b) {
-        return b.size() >= 3 && u8(b, 0) == 0xFF && u8(b, 1) == SOI && u8(b, 2) == 0xFF;
+        return fits(b, 0, 3) && u8(b, 0) == 0xFF && u8(b, 1) == SOI && u8(b, 2) == 0xFF;
     }
     bool is_png(bytes b) {
         return has_at(b, 0, PNG_SIGNATURE);
@@ -496,11 +757,27 @@ namespace {
     bool is_webp(bytes b) {
         return has_at(b, 0, "RIFF") && has_at(b, 8, "WEBP");
     }
+    bool is_heif(bytes b) {
+        constexpr std::array brands{
+                "heic"sv,
+                "heix"sv,
+                "heim"sv,
+                "heis"sv,
+                "hevc"sv,
+                "hevx"sv,
+                "mif1"sv,
+                "msf1"sv,
+                "avif"sv,
+                "avis"sv};
+        return has_at(b, 4, "ftyp") &&
+               std::ranges::any_of(brands, [&](std::string_view s) { return has_at(b, 8, s); });
+    }
 
 }  // namespace
 
 bool may_carry_location(std::span<const std::byte> head) {
-    return head.size() >= location_sniff_size && (is_jpeg(head) || is_png(head) || is_webp(head));
+    return head.size() >= location_sniff_size &&
+           (is_jpeg(head) || is_png(head) || is_webp(head) || is_heif(head));
 }
 
 std::optional<std::vector<std::byte>> without_location(std::span<const std::byte> file) {
@@ -510,7 +787,9 @@ std::optional<std::vector<std::byte>> without_location(std::span<const std::byte
         return jpeg_without_location(file);
     if (is_png(file))
         return png_without_location(file);
-    return webp_without_location(file);
+    if (is_webp(file))
+        return webp_without_location(file);
+    return heif_without_location(file);
 }
 
 }  // namespace session::image
