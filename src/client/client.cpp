@@ -3,6 +3,7 @@
 #include <oxenc/hex.h>
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <debug_print.hpp>
 #include <fstream>
@@ -21,6 +22,7 @@
 #include <session/format.hpp>
 #include <session/hash.hpp>
 #include <session/image/content_types.hpp>
+#include <session/image/location.hpp>
 #include <session/image/probe.hpp>
 #include <session/image/rendition.hpp>
 #include <session/image/thumbhash.hpp>
@@ -4874,6 +4876,39 @@ std::optional<std::string> Client::_message_debug(int64_t message_id) {
 
 namespace {
 
+    // `path`'s bytes with any location metadata removed, or null when it is not a picture read
+    // for that or carries none.  What goes out, and what our own cached copy holds, in place of
+    // the file: the file itself is the application's, and is never rewritten.
+    //
+    // Throws when a picture cannot be read whole, or holds a location this cannot remove, since
+    // sending it as it is could send a location.
+    std::shared_ptr<const std::vector<std::byte>> outgoing_without_location(
+            const std::filesystem::path& path) {
+        std::ifstream in;
+        in.exceptions(std::ios::badbit);
+        in.open(path, std::ios::binary | std::ios::ate);
+        if (!in)
+            return nullptr;
+        const auto size = static_cast<uintmax_t>(in.tellg());
+        std::array<std::byte, image::location_sniff_size> buf;
+        const auto sniffed = static_cast<size_t>(std::min<uintmax_t>(size, buf.size()));
+        in.seekg(0);
+        in.read(reinterpret_cast<char*>(buf.data()), sniffed);
+        const auto head = std::span{buf}.first(sniffed);
+        if (static_cast<size_t>(in.gcount()) != sniffed || !image::may_carry_location(head))
+            return nullptr;
+
+        std::vector<std::byte> file(static_cast<size_t>(size));
+        std::ranges::copy(head, file.begin());
+        in.read(reinterpret_cast<char*>(file.data()) + sniffed,
+                static_cast<std::streamsize>(size - sniffed));
+        if (static_cast<uintmax_t>(in.gcount()) != size - sniffed)
+            throw std::runtime_error{"{} changed while it was read"_format(path.string())};
+        if (auto cleaned = image::without_location(file))
+            return std::make_shared<const std::vector<std::byte>>(*std::move(cleaned));
+        return nullptr;
+    }
+
     // The reference a quote puts on the wire, read from the message being replied to.
     struct WireRef {
         b33 author;
@@ -5331,17 +5366,33 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
                 path = std::move(path),
                 on_upload = std::move(on_upload)]() mutable {
         std::optional<int64_t> size;
+        std::shared_ptr<const std::vector<std::byte>> body;
         std::error_code ec;
         auto found = std::filesystem::file_size(path, ec);
-        if (!ec && std::filesystem::is_regular_file(path, ec) && !ec)
+        if (!ec && std::filesystem::is_regular_file(path, ec) && !ec) {
             size = static_cast<int64_t>(found);
+            try {
+                if ((body = outgoing_without_location(path)))
+                    size = static_cast<int64_t>(body->size());
+            } catch (const std::exception& e) {
+                log::warning(
+                        cat,
+                        "Attachment {} of message {} cannot be read: {}",
+                        index,
+                        client_id,
+                        e.what());
+                size.reset();
+            }
+        }
         call([this,
               client_id,
               index,
               path = std::move(path),
               size,
+              body = std::move(body),
               on_upload = std::move(on_upload)]() mutable {
-            _upload_one(client_id, index, std::move(path), size, std::move(on_upload));
+            _upload_one(
+                    client_id, index, std::move(path), size, std::move(body), std::move(on_upload));
         });
     });
 }
@@ -5351,6 +5402,7 @@ void Client::_upload_one(
         size_t index,
         std::string path,
         std::optional<int64_t> file_size,
+        std::shared_ptr<const std::vector<std::byte>> body,
         Conversation::upload_progress on_upload) {
     if (!file_size) {
         log::warning(
@@ -5387,6 +5439,7 @@ void Client::_upload_one(
 
     network::FileUploadRequest req;
     req.file = path;
+    req.data = body;
     req.domain = attachment::Domain::ATTACHMENT;
     // The limit this guards is the one onion requests impose, and an attachment goes to the file
     // server rather than through them; the server enforces its own.
@@ -5405,7 +5458,7 @@ void Client::_upload_one(
         };
     }
 
-    req.on_complete = [this, client_id, index, on_upload, plaintext_size](
+    req.on_complete = [this, client_id, index, on_upload, plaintext_size, body](
                               std::variant<std::pair<network::file_metadata, cleared_b32>, int16_t>
                                       result,
                               bool /*timeout*/) {
@@ -5413,7 +5466,7 @@ void Client::_upload_one(
         // Core's loop's alone.  Nobody is waiting on a callback here -- this is Client's
         // own continuation -- so a failure has to be turned into the message failing, which
         // is what the application is watching.
-        call([this, client_id, index, on_upload, plaintext_size, result = std::move(result)] {
+        call([this, client_id, index, on_upload, plaintext_size, body, result = std::move(result)] {
             try {
                 if (auto* err = std::get_if<int16_t>(&result)) {
                     log::warning(
@@ -5462,7 +5515,7 @@ void Client::_upload_one(
                 // After the url is recorded, since that is what says where the copy belongs -- and
                 // before the message is announced as sent, so a display reacting to that already
                 // sees the file as here rather than being told a moment later.
-                _cache_outgoing_attachment(client_id, index, url);
+                _cache_outgoing_attachment(client_id, index, url, body);
 
                 log::debug(
                         cat,
@@ -6020,13 +6073,16 @@ Client::RemoteFile Client::_remote_file(int64_t message_id, size_t index) {
     return p;
 }
 
-void Client::_cache_outgoing_attachment(int64_t client_id, size_t index, const std::string& url) {
+void Client::_cache_outgoing_attachment(
+        int64_t client_id,
+        size_t index,
+        const std::string& url,
+        std::shared_ptr<const std::vector<std::byte>> body) {
     if (_cache_dir.empty())
         return;
 
-    // Read back rather than passed in: the upload has just written this row, and threading what
-    // this needs through the network callback would grow what that has to carry for something that
-    // is not part of sending.
+    // The message read back from the row the upload has just written, rather than carried through
+    // the network callback; only the bytes sent, which the row cannot hold, come that way.
     auto msg = _message(client_id);
     if (!msg)
         return;
@@ -6068,14 +6124,15 @@ void Client::_cache_outgoing_attachment(int64_t client_id, size_t index, const s
     if (!stored)
         return;
 
-    // Copied on the disk loop, a chunk at a time, and recorded back here.  Re-read rather than kept
-    // from the upload, which streams the file rather than holding it.  Best effort throughout: a
-    // file moved or replaced between the upload finishing and this leaves nothing cached, which
-    // costs a download if the message is ever drawn again and nothing else.
+    // Copied on the disk loop, a chunk at a time, and recorded back here: the upload's own body
+    // when it sent one, else the file re-read.  Best effort throughout: a file moved or replaced
+    // between the upload finishing and this leaves nothing cached, which costs a download if the
+    // message is ever drawn again and nothing else.
     _post_disk([this,
                 client_id,
                 url,
                 size,
+                body = std::move(body),
                 source = std::filesystem::path{*stored},
                 file = _cache_path(cache::ATTACHMENT_DIR, url),
                 key = _cache_encryption_key()] {
@@ -6084,7 +6141,8 @@ void Client::_cache_outgoing_attachment(int64_t client_id, size_t index, const s
         // with bytes that are not the ones it identifies -- and unlike a missing cache entry, that
         // is wrong rather than merely slow.
         std::error_code ec;
-        if (std::filesystem::file_size(source, ec) != static_cast<uintmax_t>(size) || ec) {
+        if (body ? body->size() != static_cast<size_t>(size)
+                 : std::filesystem::file_size(source, ec) != static_cast<uintmax_t>(size) || ec) {
             log::debug(
                     cat,
                     "Not caching attachment of message {}: {} is no longer the file that was "
@@ -6096,12 +6154,15 @@ void Client::_cache_outgoing_attachment(int64_t client_id, size_t index, const s
 
         int64_t on_disk;
         try {
+            cache::Writer w{file, key, attachment::encrypted_padding(static_cast<size_t>(size))};
             std::ifstream in;
             in.exceptions(std::ios::badbit);
-            in.open(source, std::ios::binary);
-            cache::Writer w{file, key, attachment::encrypted_padding(static_cast<size_t>(size))};
+            if (body)
+                w.write(*body);
+            else
+                in.open(source, std::ios::binary);
             std::vector<std::byte> chunk(attachment::ENCRYPT_CHUNK_SIZE);
-            int64_t copied = 0;
+            int64_t copied = body ? size : 0;
             while (copied < size) {
                 in.read(reinterpret_cast<char*>(chunk.data()),
                         static_cast<std::streamsize>(chunk.size()));

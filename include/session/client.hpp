@@ -1195,13 +1195,17 @@ class Client {
     /// fetching back a file that came off this disk in the first place.
     ///
     /// Under the rule that would have applied had the same file arrived, plus anything on a
-    /// gallery-viewable message whatever that rule says -- see the definition.  Best effort: the
-    /// source is re-read, since the upload streamed it rather than holding it, and a file that has
-    /// since moved or changed is simply not cached.
+    /// gallery-viewable message whatever that rule says -- see the definition.  Best effort: `body`
+    /// is what the upload sent when it sent bytes rather than the file, else the source is re-read,
+    /// and a file that has since moved or changed is simply not cached.
     ///
     /// Call once the row carries the url, which is both where the copy belongs and what says the
     /// upload is done.
-    void _cache_outgoing_attachment(int64_t client_id, size_t index, const std::string& url);
+    void _cache_outgoing_attachment(
+            int64_t client_id,
+            size_t index,
+            const std::string& url,
+            std::shared_ptr<const std::vector<std::byte>> body);
 
     // The cache entry holding `url`, as (id, file name), found through the attachment rows that
     // reference it rather than by hashing the url.
@@ -1494,12 +1498,14 @@ class Client {
     void _derive_outgoing(int64_t client_id, Conversation::upload_progress on_upload);
 
     // The rest of `_upload_next`, once the disk loop has looked at the file: uploads attachment
-    // `index` from `path`, or fails the message for good if `file_size` says the file is gone.
+    // `index` from `path`, or from `body` when that is set, or fails the message for good if
+    // `file_size` says the file is gone.
     void _upload_one(
             int64_t client_id,
             size_t index,
             std::string path,
             std::optional<int64_t> file_size,
+            std::shared_ptr<const std::vector<std::byte>> body,
             Conversation::upload_progress on_upload);
 
     // Rebuilds the message's content with its now-uploaded attachments named in it, replaces what
