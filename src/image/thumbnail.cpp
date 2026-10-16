@@ -97,67 +97,85 @@ namespace detail {
             return image_ptr{out};
         }
 
-        // Scaled to cover side x side and cropped to its centre.  vips_thumbnail applies EXIF
-        // orientation, loads only the first frame of an animation, and shrinks on load where the
-        // format allows (JPEG, WebP, HEIF), so a 12 MP photo is never decoded at full size.  It
-        // converts from an embedded ICC profile only when given an output profile.
-        image_ptr cover(Source& source, const Info& info, uint32_t side) {
-            VipsImage* out = nullptr;
-            int rc;
-            if (platform_decodes(info.format)) {
-                // Decoded at the size whose shorter side is `side`; the platform may round that a
-                // pixel short, which the cover below then scales back up by that pixel.
-                uint64_t longer = std::max(info.width, info.height),
-                         shorter = std::min(info.width, info.height);
-                auto decoded = platform_decode(
-                        source,
-                        info.format,
-                        static_cast<uint32_t>((longer * side + shorter - 1) / shorter));
-                rc = vips_thumbnail_image(
-                        decoded.get(),
-                        &out,
-                        static_cast<int>(side),
-                        "height",
-                        static_cast<int>(side),
-                        "crop",
-                        VIPS_INTERESTING_CENTRE,
-                        "output_profile",
-                        "srgb",
-                        nullptr);
-            } else {
-                VipsSource* vsrc = source_access::vips(source);
-                if (vips_source_rewind(vsrc)) {
-                    source_access::rethrow_error(source);
-                    throw_vips_error("thumbnail: cannot rewind the source");
-                }
-                rc = vips_thumbnail_source(
-                        vsrc,
-                        &out,
-                        static_cast<int>(side),
-                        "height",
-                        static_cast<int>(side),
-                        "crop",
-                        VIPS_INTERESTING_CENTRE,
-                        "output_profile",
-                        "srgb",
-                        nullptr);
-                source_access::rethrow_error(source);
-            }
-            if (rc)
-                throw_vips_error("thumbnail: scaling failed");
-            return image_ptr{out};
-        }
-
     }  // namespace
+
+    bool acceptable(const Info& info) {
+        return info.decodable && info.within_pixel_limits(false) && info.width && info.height &&
+               !(info.decoded_whole &&
+                 uint64_t{info.width} * info.height * whole_decode_bytes_per_pixel(info) >
+                         max_whole_decode_bytes);
+    }
+
+    // vips_thumbnail applies EXIF orientation, loads only the first frame of an animation, and
+    // shrinks on load where the format allows (JPEG, WebP, HEIF), so a 12 MP photo is never
+    // decoded at full size.  It converts from an embedded ICC profile only when given an output
+    // profile.  Never enlarging is what the fit needs; a cover is given a box no larger than the
+    // picture, so it is never asked to.
+    image_ptr scaled(Source& source, const Info& info, uint32_t width, uint32_t height, bool crop) {
+        VipsImage* out = nullptr;
+        int rc;
+        auto w = static_cast<int>(width), h = static_cast<int>(height);
+        if (platform_decodes(info.format)) {
+            // Decoded at a size the fit below only ever shrinks: for a cover, the one whose
+            // shorter side is the box's; for a fit, the box's longer side.  The platform may round
+            // that a pixel short, which the cover then scales back up by that pixel.
+            uint64_t longer = std::max(info.width, info.height),
+                     shorter = std::min(info.width, info.height);
+            uint32_t max_side =
+                    crop ? static_cast<uint32_t>(
+                                   (longer * std::min(width, height) + shorter - 1) / shorter)
+                         : std::max(width, height);
+            auto decoded = platform_decode(source, info.format, max_side);
+            rc = vips_thumbnail_image(
+                    decoded.get(),
+                    &out,
+                    w,
+                    "height",
+                    h,
+                    "size",
+                    VIPS_SIZE_DOWN,
+                    "crop",
+                    crop ? VIPS_INTERESTING_CENTRE : VIPS_INTERESTING_NONE,
+                    "output_profile",
+                    "srgb",
+                    nullptr);
+        } else {
+            VipsSource* vsrc = source_access::vips(source);
+            if (vips_source_rewind(vsrc)) {
+                source_access::rethrow_error(source);
+                throw_vips_error("scaling: cannot rewind the source");
+            }
+            rc = vips_thumbnail_source(
+                    vsrc,
+                    &out,
+                    w,
+                    "height",
+                    h,
+                    "size",
+                    VIPS_SIZE_DOWN,
+                    "crop",
+                    crop ? VIPS_INTERESTING_CENTRE : VIPS_INTERESTING_NONE,
+                    "output_profile",
+                    "srgb",
+                    nullptr);
+            source_access::rethrow_error(source);
+        }
+        if (rc)
+            throw_vips_error("scaling failed");
+        return image_ptr{out};
+    }
+
+    std::vector<std::byte> finish(image_ptr img, Backdrop backdrop, int quality) {
+        if (vips_image_hasalpha(img.get()))
+            img = backdrop == Backdrop::checkerboard ? over_checkerboard(img.get())
+                                                     : over_white(img.get());
+        return encode_jpeg(img.get(), quality);
+    }
 
     std::optional<std::vector<std::byte>> thumbnail(
             Source& source, uint32_t edge, Backdrop backdrop) {
         auto info = probe(source);
-        if (!info || !info->decodable || !info->within_pixel_limits(false) || !info->width ||
-            !info->height ||
-            (info->decoded_whole &&
-             uint64_t{info->width} * info->height * whole_decode_bytes_per_pixel(*info) >
-                     max_whole_decode_bytes))
+        if (!info || !acceptable(*info))
             return std::nullopt;
 
         edge = std::clamp(edge, min_thumbnail_edge, max_thumbnail_edge);
@@ -167,11 +185,7 @@ namespace detail {
         // to the end of encoding; its own exception, rather than libvips' generic read error, is
         // what the caller needs.
         try {
-            auto img = cover(source, *info, side);
-            if (vips_image_hasalpha(img.get()))
-                img = backdrop == Backdrop::checkerboard ? over_checkerboard(img.get())
-                                                         : over_white(img.get());
-            return encode_jpeg(img.get(), thumbnail_quality);
+            return finish(scaled(source, *info, side, side, true), backdrop, thumbnail_quality);
         } catch (...) {
             source_access::rethrow_error(source);
             throw;
