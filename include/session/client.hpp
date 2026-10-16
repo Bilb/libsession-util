@@ -372,7 +372,8 @@ class Client {
     /// Returns false, having done nothing, if the message does not exist or is not
     /// `gallery_viewable` — a message that cannot be shown that way cannot be asked to be, so the
     /// stored decision can never disagree with the rule that governs it.  Clearing is always
-    /// allowed.
+    /// allowed.  Every message that can be shown as a gallery starts out shown as one, so this is
+    /// for a reader who wants the list, or the gallery back.
     ///
     /// Starts nothing.  Turning gallery mode on for a conversation that does not auto-download
     /// leaves its images unfetched, and getting them is the caller's move — `attachment_data` for
@@ -1354,10 +1355,9 @@ class Client {
     // The edge new thumbnails are made at: the stored setting, or failing that the constructor's.
     uint32_t _thumbnail_edge();
 
-    // Decides what an arriving message's attachments are worth fetching unasked, sets whether it is
-    // shown as a gallery, and starts whatever it decided on.  Does nothing without a cache
-    // directory: the point of fetching early is to have the file to hand, and with nowhere to keep
-    // it the download would be thrown away.
+    // Decides what an arriving message's attachments are worth fetching unasked, and starts
+    // whatever it decided on.  Does nothing without a cache directory: the point of fetching early
+    // is to have the file to hand, and with nowhere to keep it the download would be thrown away.
     void _auto_download(const ConversationId& convo, int64_t message_id);
 
     bool _set_gallery(int64_t message_id, bool gallery);

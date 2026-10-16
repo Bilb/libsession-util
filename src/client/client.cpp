@@ -1013,6 +1013,20 @@ static const std::string DISPLAYABLE_IMAGE_SQL = [] {
     return sql;
 }();
 
+// A message starts out shown as a gallery when every attachment is a picture Session displays;
+// set_gallery is a reader's later word on it.
+static void default_gallery(sqlite::Connection& c, int64_t message_id) {
+    c.prepared_exec(
+            R"(
+        UPDATE messages SET gallery = 1
+        WHERE id = ?1
+          AND EXISTS(SELECT 1 FROM message_attachments WHERE message = ?1)
+          AND NOT EXISTS(SELECT 1 FROM message_attachments
+                         WHERE message = ?1 AND NOT (content_type IS NOT NULL AND {}))
+    )"_format(DISPLAYABLE_IMAGE_SQL),
+            message_id);
+}
+
 // Checked on the calling thread, so that a caller's mistake surfaces where they made it rather than
 // in a callback.
 static std::optional<int64_t> checked_limit(std::string_view setter, std::optional<int64_t> bytes) {
@@ -3016,12 +3030,6 @@ void Client::_auto_download(const ConversationId& convo_id, int64_t message_id) 
     if (!msg || msg->attachments.empty())
         return;
 
-    // A gallery is the display this arrived ready for, so it is decided now rather than left to
-    // whoever opens the conversation: the setting may have changed by then, and the answer is meant
-    // to describe how the message arrived.
-    if (msg->gallery_viewable)
-        _set_gallery(message_id, true);
-
     auto max_size = core.globals.get_integer(AUTO_DL_MAX_KEY);
 
     std::vector<PendingAutoDownload> wanted;
@@ -4798,6 +4806,7 @@ int64_t Client::_send_message(
                     a.height ? std::optional<int64_t>{*a.height} : std::nullopt,
                     a.thumbhash);
         }
+        default_gallery(c, client_id);
 
         approved = approve_recipient(c, id, *this);
         tx.commit();
@@ -6795,6 +6804,7 @@ void Client::_on_message_received(core::ReceivedMessage&& msg) {
                     std::span<const std::byte>{msg.content});
 
             arrived_urls = store_incoming_attachments(c, client_id, data);
+            default_gallery(c, client_id);
 
             // Whether an arrival is unread is this layer's decision, not the trigger's.  Today
             // that is just "newer than the watermark"; mutes and message requests will land here.
@@ -6838,8 +6848,7 @@ void Client::_on_message_received(core::ReceivedMessage&& msg) {
         for (const auto& url : arrived_urls)
             _clear_resendable(url);
 
-        // Before the message is announced, so that a display reacting to it already sees whether
-        // this is a gallery rather than being told once and corrected a moment later.
+        // Before the message is announced, so that what it starts fetching is reported with it.
         _auto_download(convo_id, client_id);
         _emit_message(true, client_id);
     }
