@@ -922,10 +922,21 @@ class Client {
     uint32_t _default_thumbnail_edge;
     uint32_t _default_rendition_edge;
 
-    // Core, built from the options that are Core's: everything but Client's own.
+    // The SQL functions Client's queries call, on every connection the database opens.
+    static void _register_sql_functions(sqlite::Connection& c);
+
+    // Core, built from the options that are Core's: everything but Client's own.  An application's
+    // own `sqlite::post_open` runs after Client's.
     template <ClientOption... Opts>
     static core::Core _make_core(
             std::filesystem::path db_path, core::callbacks cbs, Opts&&... opts) {
+        auto theirs = core::detail::maybe_instance<sqlite::post_open>(opts...);
+        sqlite::post_open ours{
+                [theirs = theirs ? std::move(theirs->post_open) : nullptr](sqlite::Connection& c) {
+                    _register_sql_functions(c);
+                    if (theirs)
+                        theirs(c);
+                }};
         return std::apply(
                 [&]<typename... CoreOpts>(CoreOpts&&... core_opts) {
                     return core::Core{
@@ -933,10 +944,13 @@ class Client {
                             std::move(cbs),
                             core::schema_extension{
                                     "client", schema::MIGRATIONS, schema::FULL_SCHEMA},
+                            std::move(ours),
                             std::forward<CoreOpts>(core_opts)...};
                 },
                 std::tuple_cat([]<typename T>(T&& o) {
-                    if constexpr (core::CoreOption<T>)
+                    if constexpr (
+                            core::CoreOption<T> &&
+                            !std::same_as<std::remove_cvref_t<T>, sqlite::post_open>)
                         return std::tuple<std::remove_cvref_t<T>>{std::forward<T>(o)};
                     else
                         return std::tuple<>{};

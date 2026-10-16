@@ -35,10 +35,9 @@ inline constexpr std::string_view mime_whitespace = " \t\n\r";
 /// API: image/mime_essence
 ///
 /// `content_type` without its parameters or the whitespace around what is left, case kept:
-/// `" IMAGE/PNG ; foo=bar"` gives `"IMAGE/PNG"`.  Empty when nothing is left.  A NUL ends it as a
-/// `;` does, which is where SQLite's string functions stop.
+/// `" IMAGE/PNG ; foo=bar"` gives `"IMAGE/PNG"`.  Empty when nothing is left.
 constexpr std::string_view mime_essence(std::string_view content_type) {
-    content_type = content_type.substr(0, content_type.find_first_of(std::string_view{";\0", 2}));
+    content_type = content_type.substr(0, content_type.find(';'));
     auto first = content_type.find_first_not_of(mime_whitespace);
     if (first == std::string_view::npos)
         return {};

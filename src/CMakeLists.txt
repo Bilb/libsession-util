@@ -140,6 +140,7 @@ add_subdirectory(mnemonics)
 # design: core neither knows nor links this.
 add_libsession_util_library(client
     client/client.cpp
+    client/content_type_sql.cpp
     client/conversation.cpp
     client/download_cache.cpp
     client/conversation_id.cpp

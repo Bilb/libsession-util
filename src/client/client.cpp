@@ -1286,6 +1286,10 @@ namespace {
 
 static const std::string DISPLAYABLE_IMAGE_SQL = displayable_image_sql("content_type");
 
+void Client::_register_sql_functions(sqlite::Connection& c) {
+    register_content_type_functions(c);
+}
+
 // A message starts out shown as a gallery when every attachment is a picture Session displays;
 // set_gallery is a reader's later word on it.
 static void default_gallery(sqlite::Connection& c, int64_t message_id) {
