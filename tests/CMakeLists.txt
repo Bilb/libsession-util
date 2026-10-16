@@ -14,6 +14,7 @@ set(LIB_SESSION_UTESTS_SOURCES
     test_client/profile_pictures.cpp
     test_client/ids_and_schema.cpp
     test_client/interop_and_threading.cpp
+    test_client/location.cpp
     test_client/receiving.cpp
     test_client/rendition.cpp
     test_client/replies.cpp

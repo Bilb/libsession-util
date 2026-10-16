@@ -21,6 +21,7 @@
 #include <session/format.hpp>
 #include <session/hash.hpp>
 #include <session/image/content_types.hpp>
+#include <session/image/location.hpp>
 #include <session/image/probe.hpp>
 #include <session/image/rendition.hpp>
 #include <session/image/thumbhash.hpp>
@@ -4876,6 +4877,40 @@ std::optional<std::string> Client::_message_debug(int64_t message_id) {
 
 namespace {
 
+    // Larger than any file server takes: a picture past it is left as it is rather than read whole.
+    constexpr uintmax_t MAX_LOCATION_READ = 64 * 1024 * 1024;
+
+    // `path`'s bytes with any location metadata removed, or null when it carries none or cannot be
+    // read.  What goes out, and what our own cached copy holds, in place of the file: the file
+    // itself is the application's, and is never rewritten.
+    std::shared_ptr<const std::vector<std::byte>> outgoing_without_location(
+            const std::filesystem::path& path) {
+        try {
+            std::ifstream in;
+            in.exceptions(std::ios::badbit);
+            in.open(path, std::ios::binary | std::ios::ate);
+            if (!in)
+                return nullptr;
+            const auto size = static_cast<uintmax_t>(in.tellg());
+            if (size < image::location_sniff_size || size > MAX_LOCATION_READ)
+                return nullptr;
+            std::vector<std::byte> file(static_cast<size_t>(size));
+            in.seekg(0);
+            in.read(reinterpret_cast<char*>(file.data()), image::location_sniff_size);
+            if (!image::may_carry_location(std::span{file}.first(image::location_sniff_size)))
+                return nullptr;
+            in.read(reinterpret_cast<char*>(file.data()) + image::location_sniff_size,
+                    static_cast<std::streamsize>(size - image::location_sniff_size));
+            if (static_cast<uintmax_t>(in.gcount()) != size - image::location_sniff_size)
+                return nullptr;
+            if (auto cleaned = image::without_location(file))
+                return std::make_shared<const std::vector<std::byte>>(*std::move(cleaned));
+        } catch (const std::exception& e) {
+            log::debug(cat, "Could not read {} for location metadata: {}", path.string(), e.what());
+        }
+        return nullptr;
+    }
+
     // The reference a quote puts on the wire, read from the message being replied to.
     struct WireRef {
         b33 author;
@@ -5333,17 +5368,23 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
                 path = std::move(path),
                 on_upload = std::move(on_upload)]() mutable {
         std::optional<int64_t> size;
+        std::shared_ptr<const std::vector<std::byte>> body;
         std::error_code ec;
         auto found = std::filesystem::file_size(path, ec);
-        if (!ec && std::filesystem::is_regular_file(path, ec) && !ec)
+        if (!ec && std::filesystem::is_regular_file(path, ec) && !ec) {
             size = static_cast<int64_t>(found);
+            if ((body = outgoing_without_location(path)))
+                size = static_cast<int64_t>(body->size());
+        }
         call([this,
               client_id,
               index,
               path = std::move(path),
               size,
+              body = std::move(body),
               on_upload = std::move(on_upload)]() mutable {
-            _upload_one(client_id, index, std::move(path), size, std::move(on_upload));
+            _upload_one(
+                    client_id, index, std::move(path), size, std::move(body), std::move(on_upload));
         });
     });
 }
@@ -5353,6 +5394,7 @@ void Client::_upload_one(
         size_t index,
         std::string path,
         std::optional<int64_t> file_size,
+        std::shared_ptr<const std::vector<std::byte>> body,
         Conversation::upload_progress on_upload) {
     if (!file_size) {
         log::warning(
@@ -5389,6 +5431,7 @@ void Client::_upload_one(
 
     network::FileUploadRequest req;
     req.file = path;
+    req.data = std::move(body);
     req.domain = attachment::Domain::ATTACHMENT;
     // The limit this guards is the one onion requests impose, and an attachment goes to the file
     // server rather than through them; the server enforces its own.
@@ -6085,8 +6128,12 @@ void Client::_cache_outgoing_attachment(int64_t client_id, size_t index, const s
         // body, so storing something else under it would leave the cache answering for that url
         // with bytes that are not the ones it identifies -- and unlike a missing cache entry, that
         // is wrong rather than merely slow.
+        // Made again rather than kept from the upload, which may have been in an earlier run; the
+        // same file gives the same bytes.
+        auto body = outgoing_without_location(source);
         std::error_code ec;
-        if (std::filesystem::file_size(source, ec) != static_cast<uintmax_t>(size) || ec) {
+        if (body ? body->size() != static_cast<size_t>(size)
+                 : std::filesystem::file_size(source, ec) != static_cast<uintmax_t>(size) || ec) {
             log::debug(
                     cat,
                     "Not caching attachment of message {}: {} is no longer the file that was "
@@ -6098,12 +6145,15 @@ void Client::_cache_outgoing_attachment(int64_t client_id, size_t index, const s
 
         int64_t on_disk;
         try {
+            cache::Writer w{file, key, attachment::encrypted_padding(static_cast<size_t>(size))};
             std::ifstream in;
             in.exceptions(std::ios::badbit);
-            in.open(source, std::ios::binary);
-            cache::Writer w{file, key, attachment::encrypted_padding(static_cast<size_t>(size))};
+            if (body)
+                w.write(*body);
+            else
+                in.open(source, std::ios::binary);
             std::vector<std::byte> chunk(attachment::ENCRYPT_CHUNK_SIZE);
-            int64_t copied = 0;
+            int64_t copied = body ? size : 0;
             while (copied < size) {
                 in.read(reinterpret_cast<char*>(chunk.data()),
                         static_cast<std::streamsize>(chunk.size()));

@@ -1494,12 +1494,14 @@ class Client {
     void _derive_outgoing(int64_t client_id, Conversation::upload_progress on_upload);
 
     // The rest of `_upload_next`, once the disk loop has looked at the file: uploads attachment
-    // `index` from `path`, or fails the message for good if `file_size` says the file is gone.
+    // `index` from `path`, or from `body` when that is set, or fails the message for good if
+    // `file_size` says the file is gone.
     void _upload_one(
             int64_t client_id,
             size_t index,
             std::string path,
             std::optional<int64_t> file_size,
+            std::shared_ptr<const std::vector<std::byte>> body,
             Conversation::upload_progress on_upload);
 
     // Rebuilds the message's content with its now-uploaded attachments named in it, replaces what
