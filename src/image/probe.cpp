@@ -235,6 +235,7 @@ std::optional<Info> probe(Source& source) {
     if (info.orientation >= 5)
         std::swap(info.width, info.height);
     info.has_alpha = vips_image_hasalpha(img.get());
+    info.bands = static_cast<uint8_t>(img->Bands);
     info.bits_per_sample = static_cast<uint8_t>(8 * vips_format_sizeof_unsafe(img->BandFmt));
     int interlaced = 0;
     if (vips_image_get_typeof(img.get(), "interlaced"))
@@ -246,6 +247,18 @@ std::optional<Info> probe(Source& source) {
         case Format::heic: info.decoded_whole = !detail::platform_decodes(Format::heic); break;
         case Format::gif:
         case Format::avif: info.decoded_whole = true; break;
+    }
+    if (info.format == Format::jpeg && interlaced) {
+        // libvips says only whether chroma is subsampled, not how far: 4:2:2 reads as "4:2:0".
+        const char* subsample = nullptr;
+        bool subsampled = vips_image_get_typeof(img.get(), "jpeg-chroma-subsample") &&
+                          !vips_image_get_string(img.get(), "jpeg-chroma-subsample", &subsample) &&
+                          std::string_view{subsample} == "4:2:0";
+        // Coefficients come in 8x8 blocks of whole MCUs, at most 16x16 pixels.
+        uint64_t padded =
+                uint64_t{(img->Xsize + 15u) / 16u * 16u} * ((img->Ysize + 15u) / 16u * 16u);
+        uint64_t planes = subsampled && info.bands == 3 ? 2 : info.bands;
+        info.coefficient_bytes = 2 * padded * planes;
     }
     info.decodable = can_decode(info.format);
     info.size = source.size();

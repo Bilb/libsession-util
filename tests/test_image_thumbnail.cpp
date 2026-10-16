@@ -323,13 +323,13 @@ TEST_CASE(
         REQUIRE(vips_copy(black, &srgb, "interpretation", VIPS_INTERPRETATION_sRGB, nullptr) == 0);
         return image_ptr{srgb};
     };
-    // A progressive JPEG is budgeted at 10 bytes a pixel, about 35 MP.
-    auto under = solid(4097, 4096), over = solid(6400, 6400);
-
-    CHECK(thumb(save(under.get(), ".jpg[interlace]"), 64));
-    CHECK_FALSE(thumb(save(over.get(), ".jpg[interlace]"), 64));
+    // A progressive JPEG costs 2 bytes a coefficient, shrunk by 8 to a thumbnail: at 4:4:4 that is
+    // 6 bytes a pixel, about 58 MP.
+    auto under = solid(6400, 6400), over = solid(7800, 7800);
+    CHECK(thumb(save(under.get(), ".jpg[interlace,subsample_mode=off]"), 64));
+    CHECK_FALSE(thumb(save(over.get(), ".jpg[interlace,subsample_mode=off]"), 64));
     // A baseline JPEG shrinks as it decodes, so its size is no reason to refuse it.
-    CHECK(thumb(save(over.get(), ".jpg"), 64));
+    CHECK(thumb(save(over.get(), ".jpg[subsample_mode=off]"), 64));
 
     // 16 bits a sample cost 10 bytes a pixel against 8 bits' 6: 36 MP is over one, not the other.
     VipsImage *black, *deep, *grey;

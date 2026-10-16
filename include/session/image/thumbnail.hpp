@@ -15,9 +15,10 @@ inline constexpr uint32_t min_thumbnail_edge = 64;
 inline constexpr uint32_t max_thumbnail_edge = 1024;
 
 /// The most memory `thumbnail` lets an image decoded whole (`Info::decoded_whole`) take, estimated
-/// from its size at 6 to 27 bytes a pixel by format and bit depth: an 8-bit AVIF of about 23 MP, a
-/// progressive JPEG of about 35 MP.  Under `max_frame_pixels` alone, a file of a few hundred bytes
-/// could take gigabytes.
+/// from its size at 6 to 27 bytes a pixel by format and bit depth: an 8-bit AVIF of about 23 MP.  A
+/// progressive JPEG costs its `Info::coefficient_bytes` plus what it decodes to, which shrinking on
+/// load cuts: a 4:2:0 photo of about 50 MP at full size, about 87 MP for a thumbnail.  Under
+/// `max_frame_pixels` alone, a file of a few hundred bytes could take gigabytes.
 inline constexpr uint64_t max_whole_decode_bytes = uint64_t{336} << 20;
 
 /// The JPEG quality thumbnails are encoded at.
@@ -25,7 +26,7 @@ inline constexpr int thumbnail_quality = 90;
 
 /// Raised with any change to `thumbnail`, or to the decoders it uses, that could make a thumbnail
 /// of an image it refused before.  A caller that remembers refusals retries them once it changes.
-inline constexpr int thumbnailer_version = 2;
+inline constexpr int thumbnailer_version = 3;
 
 /// API: image/thumbnail
 ///

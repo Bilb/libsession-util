@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <session/attachments.hpp>
 #include <session/image/sendable.hpp>
+#include <session/image/thumbnail.hpp>
 #include <set>
 #include <string_view>
 
@@ -202,6 +203,39 @@ TEST_CASE(
     REQUIRE(info);
     CHECK(image::sendable_verdict(*info) == image::SendableVerdict::cannot_decode);
     CHECK_THROWS_AS(image::sendable(source, 10'000'000), std::runtime_error);
+}
+
+TEST_CASE(
+        "Sendable: a 45 MP progressive photo is re-encoded and has a thumbnail",
+        "[image][sendable][thumbnail]") {
+    // What a camera writes: 8134x5562, chroma subsampled.  Solid, so that it encodes quickly.
+    image::init();
+    VipsImage *black, *srgb;
+    REQUIRE(vips_black(&black, 8134, 5562, "bands", 3, nullptr) == 0);
+    image_ptr b{black};
+    REQUIRE(vips_copy(black, &srgb, "interpretation", VIPS_INTERPRETATION_sRGB, nullptr) == 0);
+    image_ptr photo{srgb};
+
+    auto check = [&](const char* suffix, bool sends) {
+        INFO(suffix);
+        auto jpeg = save(photo.get(), suffix);
+        image::Source source{std::span<const std::byte>{jpeg}};
+        auto info = image::probe(source);
+        REQUIRE(info);
+        CHECK(info->decoded_whole);
+        CHECK(image::thumbnail(source, 256));
+        CHECK(image::sendable_verdict(*info) ==
+              (sends ? image::SendableVerdict::encode : image::SendableVerdict::too_large));
+        if (!sends)
+            return;
+        auto out = image::sendable(source, 10'000'000);
+        REQUIRE(out);
+        CHECK(out->width == 2048);
+        CHECK(out->height == 1400);
+    };
+    check(".jpg[interlace,subsample_mode=on]", true);
+    // Unsubsampled, its coefficients and full-size decode for a 2048 box are over the budget.
+    check(".jpg[interlace,subsample_mode=off]", false);
 }
 
 TEST_CASE(

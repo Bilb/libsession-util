@@ -59,6 +59,14 @@ struct Info {
     /// The encoded size in bytes: Source::size().
     uint64_t size;
 
+    /// Bands a decoded pixel has: 1 for grey, 3 for colour, 4 for CMYK or with alpha.
+    uint8_t bands;
+
+    /// What a progressive JPEG's decoder holds whatever size it decodes to: 2 bytes for every DCT
+    /// coefficient of every component, chroma counted at no less than half of luma's resolution
+    /// when subsampled.  0 for anything else.
+    uint64_t coefficient_bytes;
+
     bool animated() const { return frames > 1; }
 
     /// An animation libvips decodes only the first frame of: an animated PNG (APNG), whatever its
