@@ -693,17 +693,21 @@ class Client::TakenFiles {
 
     // The caller's files go only now, so that a send refused or failed before this leaves them.
     void stored() {
-        for (const auto& [from, to] : _files) {
-            std::error_code ec;
-            if (!std::filesystem::remove(from, ec) && ec)
-                log::warning(
-                        cat,
-                        "send_message: could not remove {} once taken: {}",
-                        from.string(),
-                        ec.message());
-        }
+        // First: the message names the copies now, so nothing below may cost it them.
         _stored = true;
         _release();
+        for (const auto& [from, to] : _files) {
+            try {
+                std::error_code ec;
+                if (!std::filesystem::remove(from, ec) && ec)
+                    log::warning(
+                            cat,
+                            "send_message: could not remove {} once taken: {}",
+                            from.string(),
+                            ec.message());
+            } catch (...) {
+            }
+        }
     }
 
   private:
@@ -725,6 +729,61 @@ std::filesystem::path Client::_outgoing_dir() const {
     return _cache_dir.empty() ? std::filesystem::path{} : _cache_dir / cache::OUTGOING_DIR;
 }
 
+// The content type to advertise for a file whose sender did not name one.
+//
+// Deliberately shallow: this is a display hint a recipient uses to pick a viewer, not something
+// any decision depends on, and a platform that has a real UTI database (as every GUI client does)
+// should pass `OutgoingAttachment::content_type` rather than rely on this.  Everything unrecognised
+// is application/octet-stream, which is what Session's other clients also fall back to.
+static std::string infer_content_type(const std::filesystem::path& path) {
+    static const std::unordered_map<std::string_view, std::string_view> types{
+            {"jpg", "image/jpeg"},
+            {"jpeg", "image/jpeg"},
+            {"png", "image/png"},
+            {"gif", "image/gif"},
+            {"webp", "image/webp"},
+            {"heic", "image/heic"},
+            {"bmp", "image/bmp"},
+            {"tiff", "image/tiff"},
+            {"svg", "image/svg+xml"},
+            {"mp4", "video/mp4"},
+            {"mov", "video/quicktime"},
+            {"webm", "video/webm"},
+            {"mkv", "video/x-matroska"},
+            {"avi", "video/x-msvideo"},
+            {"mp3", "audio/mpeg"},
+            {"m4a", "audio/mp4"},
+            {"aac", "audio/aac"},
+            {"ogg", "audio/ogg"},
+            {"opus", "audio/opus"},
+            {"flac", "audio/flac"},
+            {"wav", "audio/wav"},
+            {"pdf", "application/pdf"},
+            {"txt", "text/plain"},
+            {"md", "text/markdown"},
+            {"csv", "text/csv"},
+            {"html", "text/html"},
+            {"json", "application/json"},
+            {"xml", "application/xml"},
+            {"zip", "application/zip"},
+            {"gz", "application/gzip"},
+            {"bz2", "application/x-bzip2"},
+            {"xz", "application/x-xz"},
+            {"7z", "application/x-7z-compressed"},
+            {"tar", "application/x-tar"},
+    };
+
+    auto ext = path.extension().string();
+    if (ext.starts_with('.'))
+        ext.erase(0, 1);
+    for (auto& ch : ext)
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+
+    if (auto found = types.find(ext); found != types.end())
+        return std::string{found->second};
+    return "application/octet-stream";
+}
+
 // A taken file is recorded as `outgoing/<name>`, relative to the cache directory, since that
 // directory's absolute path can change between runs (an iOS app container moves on update).
 static std::optional<std::string_view> taken_name(std::string_view stored) {
@@ -736,6 +795,9 @@ static std::optional<std::string_view> taken_name(std::string_view stored) {
         return std::nullopt;
     return name;
 }
+
+// Longer is dropped: it only names the file for a human, and a long one can overflow a filename.
+static constexpr size_t MAX_TAKEN_EXTENSION = 16;
 
 static std::string taken_path(std::string_view name) {
     return "{}/{}"_format(cache::OUTGOING_DIR, name);
@@ -771,8 +833,11 @@ std::shared_ptr<Client::TakenFiles> Client::_take_files(OutgoingMessage& msg) {
     for (auto& a : msg.attachments) {
         if (!a.take_file)
             continue;
-        // A fresh name with the original extension, which is what infers an unset content type.
-        auto name = random::random_base32(26) + a.path.extension().string();
+        if (!a.content_type)
+            a.content_type = infer_content_type(a.path);
+        // A fresh name, keeping a plausible extension for whoever looks in the directory.
+        auto ext = a.path.extension().string();
+        auto name = random::random_base32(26) + (ext.size() <= MAX_TAKEN_EXTENSION ? ext : "");
         auto to = dir / name;
         taken->claim(a.path, to);
         // Linked rather than renamed so that the caller's file stays until the message is stored;
@@ -785,6 +850,12 @@ std::shared_ptr<Client::TakenFiles> Client::_take_files(OutgoingMessage& msg) {
         if (ec)
             throw std::invalid_argument{"send_message: attachment {} cannot be taken: {}"_format(
                     a.path.string(), ec.message())};
+        // Checked on our own copy too, which nothing else writes: the caller's path can change
+        // between the check above and the link.
+        if (std::filesystem::is_symlink(to, ec))
+            throw std::invalid_argument{
+                    "send_message: attachment {} is a symbolic link, which take_file refuses"_format(
+                            a.path.string())};
         if (!a.filename)
             a.filename = a.path.filename().string();
         a.path = taken_path(name);
@@ -5373,61 +5444,6 @@ void Client::_dispatch_sends(
 
 // -- Attachments ------------------------------------------------------------------------------
 
-// The content type to advertise for a file whose sender did not name one.
-//
-// Deliberately shallow: this is a display hint a recipient uses to pick a viewer, not something
-// any decision depends on, and a platform that has a real UTI database (as every GUI client does)
-// should pass `OutgoingAttachment::content_type` rather than rely on this.  Everything unrecognised
-// is application/octet-stream, which is what Session's other clients also fall back to.
-static std::string infer_content_type(const std::filesystem::path& path) {
-    static const std::unordered_map<std::string_view, std::string_view> types{
-            {"jpg", "image/jpeg"},
-            {"jpeg", "image/jpeg"},
-            {"png", "image/png"},
-            {"gif", "image/gif"},
-            {"webp", "image/webp"},
-            {"heic", "image/heic"},
-            {"bmp", "image/bmp"},
-            {"tiff", "image/tiff"},
-            {"svg", "image/svg+xml"},
-            {"mp4", "video/mp4"},
-            {"mov", "video/quicktime"},
-            {"webm", "video/webm"},
-            {"mkv", "video/x-matroska"},
-            {"avi", "video/x-msvideo"},
-            {"mp3", "audio/mpeg"},
-            {"m4a", "audio/mp4"},
-            {"aac", "audio/aac"},
-            {"ogg", "audio/ogg"},
-            {"opus", "audio/opus"},
-            {"flac", "audio/flac"},
-            {"wav", "audio/wav"},
-            {"pdf", "application/pdf"},
-            {"txt", "text/plain"},
-            {"md", "text/markdown"},
-            {"csv", "text/csv"},
-            {"html", "text/html"},
-            {"json", "application/json"},
-            {"xml", "application/xml"},
-            {"zip", "application/zip"},
-            {"gz", "application/gzip"},
-            {"bz2", "application/x-bzip2"},
-            {"xz", "application/x-xz"},
-            {"7z", "application/x-7z-compressed"},
-            {"tar", "application/x-tar"},
-    };
-
-    auto ext = path.extension().string();
-    if (ext.starts_with('.'))
-        ext.erase(0, 1);
-    for (auto& ch : ext)
-        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-
-    if (auto found = types.find(ext); found != types.end())
-        return std::string{found->second};
-    return "application/octet-stream";
-}
-
 int64_t Client::_send_message(
         const ConversationId& id,
         const OutgoingMessage& msg,
@@ -6637,6 +6653,7 @@ void Client::_cache_outgoing_attachment(
                 size,
                 body = std::move(body),
                 source = _attachment_file(*stored),
+                taken = taken_name(*stored).has_value(),
                 file = _cache_path(cache::ATTACHMENT_DIR, url),
                 key = _cache_encryption_key()] {
         // The length has to still match what was uploaded.  A url names one particular encrypted
@@ -6684,8 +6701,9 @@ void Client::_cache_outgoing_attachment(
             return;
         }
 
-        // The local file stands in for the cached copy only when it is what was uploaded.
-        auto plain = body ? std::nullopt : std::optional{source};
+        // The local file stands in for the cached copy only when it is what was uploaded, and is
+        // not a taken file, which is removed right behind this.
+        auto plain = body || taken ? std::nullopt : std::optional{source};
         call([this, url, file, on_disk, plain] { _record_cached(url, file, on_disk, plain); });
     });
 }

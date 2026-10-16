@@ -381,3 +381,41 @@ TEST_CASE("Client: a taken file that went missing is not offered", "[client][sen
     std::filesystem::remove(s.cache.path / stored_path(s.c, id));
     CHECK(s.c->message(id, await)->attachments[0].availability == AttachmentAvailability::absent);
 }
+
+TEST_CASE(
+        "Client: a caller's relative path is never read as a taken file", "[client][send][take]") {
+    Sandbox s;
+    auto* net = attach_mock_network(s.c->core);
+    // Named as a taken file is, relative to the working directory rather than the cache.
+    struct Cwd {
+        std::filesystem::path was = std::filesystem::current_path();
+        ~Cwd() { std::filesystem::current_path(was); }
+    } cwd;
+    std::filesystem::current_path(s.dir);
+    std::filesystem::create_directories("outgoing");
+    auto body = contents(3000);
+    std::ofstream{"outgoing/mine.bin", std::ios::binary}.write(
+            reinterpret_cast<const char*>(body.data()), body.size());
+
+    auto id = s.send("outgoing/mine.bin", /*take=*/false);
+    sync(*s.c);
+    REQUIRE(accept_stores(*net) == 1);
+    CHECK(std::filesystem::path{stored_path(s.c, id)}.is_absolute());
+    CHECK(on_server(s.c, *net, id) == body);
+    CHECK(read_all(s.dir / "outgoing/mine.bin") == body);
+}
+
+TEST_CASE("Client: a taken file with a long extension is kept without it", "[client][send][take]") {
+    Sandbox s;
+    auto* net = attach_mock_network(s.c->core);
+    auto name = "notes." + std::string(40, 'x');
+    auto body = contents(3000);
+    auto id = s.send(s.write(name, body));
+    sync(*s.c);
+    REQUIRE(accept_stores(*net) == 1);
+    auto msg = s.c->message(id, await);
+    CHECK(msg->attachments[0].filename == name);
+    CHECK(msg->attachments[0].content_type == "application/octet-stream");
+    CHECK(std::filesystem::path{stored_path(s.c, id)}.extension().empty());
+    CHECK(on_server(s.c, *net, id) == body);
+}
