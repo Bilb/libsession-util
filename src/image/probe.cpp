@@ -112,6 +112,21 @@ namespace {
 
 }  // namespace
 
+bool recognized(Source& source) {
+    VipsSource* vsrc = detail::source_access::vips(source);
+    const char* loader = vips_foreign_find_load_source(vsrc);
+    detail::source_access::rethrow_error(source);
+    if (!loader) {
+        vips_error_clear();
+        return false;
+    }
+    if (std::string_view{loader} != "VipsForeignLoadHeifSource")
+        return true;
+    auto codec = heif_primary_codec(source);
+    detail::source_access::rethrow_error(source);
+    return codec == ITEM_HEVC || codec == ITEM_AV1;
+}
+
 std::optional<Info> probe(Source& source) {
     VipsSource* vsrc = detail::source_access::vips(source);
 

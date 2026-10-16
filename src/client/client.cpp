@@ -5368,39 +5368,55 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
 
 namespace {
 
-    // The most of a file read into memory to be sent from there; anything larger than the file
-    // server takes fails its upload regardless.
-    constexpr int64_t MAX_IN_MEMORY = 64 * 1024 * 1024;
-
     std::shared_ptr<const std::vector<std::byte>> read_whole(
             const std::string& path, int64_t size) {
         std::vector<std::byte> bytes(static_cast<size_t>(size));
         std::ifstream in;
         in.exceptions(std::ios::badbit);
         in.open(path, std::ios::binary);
+        if (!in.is_open())
+            throw std::runtime_error{"{} cannot be opened"_format(path)};
         in.read(reinterpret_cast<char*>(bytes.data()), size);
         if (in.gcount() != size || in.peek() != std::ifstream::traits_type::eof())
             throw std::runtime_error{"{} changed while it was read"_format(path)};
         return std::make_shared<const std::vector<std::byte>>(std::move(bytes));
     }
 
-    // An APNG: libvips reads only its first frame, so re-encoding it would send a still.
+    // An APNG: libvips reads only its first frame, so re-encoding it would send a still.  Its
+    // animation chunk comes before the image data, so the head of the file is enough.
     bool animated_png(std::span<const std::byte> b) {
         constexpr std::string_view signature = "\x89PNG\r\n\x1a\n";
         if (b.size() < signature.size() ||
             std::memcmp(b.data(), signature.data(), signature.size()) != 0)
             return false;
-        for (size_t at = signature.size(); at + 8 <= b.size();) {
+        // 64-bit, so a crafted length cannot wrap the position back on a 32-bit build.
+        for (uint64_t at = signature.size(); at + 8 <= b.size();) {
             uint64_t len = (uint64_t(b[at]) << 24) | (uint64_t(b[at + 1]) << 16) |
                            (uint64_t(b[at + 2]) << 8) | uint64_t(b[at + 3]);
             std::string_view type{reinterpret_cast<const char*>(b.data()) + at + 4, 4};
             if (type == "acTL")
                 return true;
-            if (type == "IDAT")
+            if (type == "IDAT" || len > 0x7FFF'FFFF)
                 return false;
             at += 12 + len;
         }
         return false;
+    }
+
+    // Enough of a PNG's start to hold every chunk before its image data.
+    constexpr int64_t PNG_HEAD = 64 * 1024;
+
+    std::shared_ptr<const std::vector<std::byte>> read_whole_head(
+            const std::string& path, int64_t most) {
+        std::vector<std::byte> bytes(static_cast<size_t>(most));
+        std::ifstream in;
+        in.exceptions(std::ios::badbit);
+        in.open(path, std::ios::binary);
+        if (!in.is_open())
+            throw std::runtime_error{"{} cannot be opened"_format(path)};
+        in.read(reinterpret_cast<char*>(bytes.data()), most);
+        bytes.resize(static_cast<size_t>(in.gcount()));
+        return std::make_shared<const std::vector<std::byte>>(std::move(bytes));
     }
 
 }  // namespace
@@ -5416,11 +5432,13 @@ void Client::_convert_outgoing(
     struct Converted {
         Outcome outcome = Outcome::as_is;
         // What is uploaded: the re-encoded picture, or the file's own bytes as they were looked
-        // at.  Null only for a file too large to hold, which the file server refuses anyway.
+        // at.
         std::shared_ptr<const std::vector<std::byte>> body;
         std::string content_type;
         uint32_t width = 0, height = 0;
         std::optional<std::vector<std::byte>> thumbhash;
+        // Too large because it is past the decode limits, rather than the file server's.
+        bool undecodable = false;
     };
 
     // The limit the upload itself is held to; without a network the upload fails regardless.
@@ -5430,34 +5448,48 @@ void Client::_convert_outgoing(
     auto convert = [path, file_size, declared_image, max_size, client_id, index] {
         Converted out;
         try {
-            if (file_size <= MAX_IN_MEMORY)
+            // Held whole when it could be sent as it is, so that what is sent is what was looked
+            // at; a larger one can only go out re-encoded, read from its path.
+            const bool fits = static_cast<uint64_t>(file_size) <= max_size;
+            if (fits)
                 out.body = read_whole(path, file_size);
             auto source = out.body ? image::Source{std::span<const std::byte>{*out.body}}
                                    : image::Source{std::filesystem::path{path}};
+            auto refuse = [&] {
+                out = Converted{.outcome = Outcome::too_large};
+                return out;
+            };
             auto info = image::probe(source);
-            // Not a picture libvips knows; one that says it is a picture is shown as a file.
             if (!info) {
+                // A picture whose header is damaged: never sent as it is.
+                if (image::recognized(source))
+                    throw std::runtime_error{"its header cannot be read"};
+                if (!fits)
+                    return refuse();
+                // Not a picture libvips knows; one that says it is a picture is shown as a file.
                 out.outcome = declared_image ? Outcome::original : Outcome::as_is;
                 return out;
             }
-            if (out.body && animated_png(*out.body)) {
-                out.outcome = Outcome::original;
-                return out;
-            }
-            switch (image::sendable_verdict(*info)) {
+            auto apng = out.body ? animated_png(*out.body)
+                      : info->format == image::Format::png
+                              ? animated_png(*read_whole_head(path, PNG_HEAD))
+                              : false;
+            auto verdict =
+                    apng ? image::SendableVerdict::cannot_decode : image::sendable_verdict(*info);
+            switch (verdict) {
                 case image::SendableVerdict::cannot_decode:
+                    if (!fits)
+                        return refuse();
                     out.outcome = Outcome::original;
                     return out;
                 case image::SendableVerdict::too_large:
-                    out.outcome = Outcome::too_large;
+                    out = Converted{.outcome = Outcome::too_large, .undecodable = true};
                     return out;
                 case image::SendableVerdict::encode: break;
             }
             auto sendable = image::sendable(source, max_size);
-            if (!sendable) {
-                out.outcome = Outcome::too_large;
-                return out;
-            }
+            if (!sendable)
+                return refuse();
             out.outcome = Outcome::converted;
             out.content_type = std::move(sendable->content_type);
             out.width = sendable->width;
@@ -5491,7 +5523,8 @@ void Client::_convert_outgoing(
             case Outcome::too_large:
                 return fail(
                         err::attachment_too_large,
-                        "the picture does not fit the file server's limit",
+                        c.undecodable ? "the picture is too large to decode"
+                                      : "the file does not fit the file server's limit",
                         /*permanent=*/true);
             case Outcome::unreadable:
                 return fail(
@@ -5520,7 +5553,8 @@ void Client::_convert_outgoing(
                 conn.prepared_exec(
                         R"(
                     UPDATE message_attachments
-                    SET content_type = ?3, filename = ?4, width = ?5, height = ?6, thumbhash = ?7
+                    SET content_type = ?3, filename = ?4, width = ?5, height = ?6,
+                        thumbhash = coalesce(?7, thumbhash)
                     WHERE message = ?1 AND idx = ?2 AND url IS NULL
                 )",
                         client_id,
