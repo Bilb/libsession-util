@@ -2,6 +2,7 @@
 
 #include <SessionProtos.pb.h>
 
+#include <algorithm>
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -20,6 +21,7 @@
 #include <session/format.hpp>
 #include <session/random.hpp>
 #include <session/session_protocol.hpp>
+#include <stdexcept>
 #include <thread>
 
 #include "../test_helper.hpp"
@@ -86,8 +88,9 @@ struct TempClient {
 
 /// Opens `path` as an install from before client migration `first_missing` has it: the client
 /// schema built from `client_schema_base` with every migration ahead of `first_missing` replayed,
-/// which is what an upgraded install has.  A Client opened on it afterwards runs the rest.  An
-/// empty name replays every migration.
+/// which is the client schema an upgraded install has, under today's Core schema (Core's own
+/// migrations are not replayed).  A Client opened on it afterwards runs the rest.  An empty name
+/// replays every migration.
 ///
 /// Two opens, because Core builds an owner's schema from a full schema only while none of its
 /// migrations are recorded, and never replays onto one it built.
@@ -100,10 +103,9 @@ inline core::Core open_client_schema_before(
     if (stop == all.end() && !first_missing.empty())
         throw std::invalid_argument{fmt::format("no client migration named {}", first_missing)};
     {
-        core::Core base{
-                path, core::schema_extension{"client", {}, client_test::client_schema_base}};
+        core::Core base{path, core::schema_extension{"client", {}, client_schema_base}};
     }
-    return core::Core{path, core::schema_extension{"client", all.first(stop - all.begin()), {}}};
+    return core::Core{path, core::schema_extension{"client", std::span{all.begin(), stop}, {}}};
 }
 
 /// A cache directory that removes itself, so a failing assertion cannot leave one behind.

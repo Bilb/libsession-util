@@ -228,6 +228,7 @@ TEST_CASE("Client: upgrading for AUTOINCREMENT keeps every row and reference", "
 }
 
 TEST_CASE("Client: the base schema and every migration make today's schema", "[client][schema]") {
+    // Schema only: a migration that seeds rows is not checked here.
     TempClient fresh;
     TempClient upgraded{TempClient::unopened};
     open_client_schema_before(upgraded.path, {});
