@@ -5673,6 +5673,12 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
     auto [idx, stored, flags, content_type] = *next;
     if (taken_name(stored) && _cache_dir.empty()) {
         // Not missing, only unreachable this run: a later one that sets the directory can retry.
+        log::warning(
+                cat,
+                "Attachment {} of message {} is not sent: no cache directory holds {}",
+                idx,
+                client_id,
+                stored);
         if (on_upload)
             on_upload(
                     static_cast<size_t>(idx),
@@ -5812,6 +5818,13 @@ void Client::_convert_outgoing(
 
     auto finish = [this, client_id, index, path, file_size, on_upload](Converted c) mutable {
         auto fail = [&](std::string_view code, std::string message, bool permanent) {
+            log::warning(
+                    cat,
+                    "Attachment {} of message {} is not sent ({}): {}",
+                    index,
+                    client_id,
+                    code,
+                    message);
             if (on_upload)
                 on_upload(index, 0, 0, unexpected{Error{code, std::move(message)}});
             _fail_attachment_send(client_id, permanent);
@@ -5877,6 +5890,11 @@ void Client::_convert_outgoing(
     });
     // Not sent unconverted: a picture going out as it is would carry everything it holds.
     if (!posted) {
+        log::warning(
+                cat,
+                "Attachment {} of message {} is not sent: the client is shutting down",
+                index,
+                client_id);
         if (on_upload)
             on_upload(
                     index,
