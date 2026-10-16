@@ -89,10 +89,9 @@ struct default_thumbnail_edge {
     uint32_t px;
 };
 
-/// The rendition edge used when neither the application nor a stored setting gives one: a box a
-/// 1080p screen fills.  An application passes its own longest screen side, at its density, through
-/// `default_rendition_edge`.
-inline constexpr uint32_t DEFAULT_RENDITION_EDGE = 1920;
+/// The rendition edge used when neither the application nor a stored setting gives one: the edge a
+/// picture is sent at (`image::sendable_edge`), so a received picture is drawn as a sent one is.
+inline constexpr uint32_t DEFAULT_RENDITION_EDGE = 2048;
 
 /// As `default_thumbnail_edge`, for the renditions `Client::attachment_rendition` serves: the box
 /// they are made to fit, for as long as none has been stored with `Client::set_rendition_edge`.
@@ -480,29 +479,32 @@ class Client {
             int64_t message_id, size_t index, result_function<std::vector<std::byte>> cb);
     std::vector<std::byte> attachment_thumbnail(int64_t message_id, size_t index, await_t);
 
-    /// An attachment's rendition: the whole picture as a JPEG fitting inside a `rendition_edge`
-    /// box, for a viewer to draw in place of the original whatever format that was.  See
-    /// `image::rendition` for exactly what it is.
+    /// An attachment's rendition: the whole picture re-encoded as a JPEG, or a WebP when it has
+    /// transparency or is animated, fitting inside a `rendition_edge` box, for a viewer to draw in
+    /// place of the original whatever format that was.  See `image::rendition` for exactly what it
+    /// is.  A picture already a JPEG or WebP within the box (`image::rendition_is_original`) is its
+    /// own rendition, served as it is.
     ///
-    /// **From the cache only, never the network**, and made only when first asked for: nothing
-    /// decodes a picture nobody opened.  Asked for a cached picture that has none yet, this queues
-    /// it ahead of everything else waiting to be made and fails with `err::no_rendition`; when it
-    /// is made, `messages_updated` reports `Attachment::has_rendition` true, and asking again
-    /// serves it.  Nothing waits on the decode, which runs on another thread and would otherwise
-    /// deadlock a caller on Core's loop.  Until then, the thumbnail is what there is to draw.
+    /// **From the cache only, never the network.**  Made as soon as a picture Session displays is
+    /// cached, after its thumbnail; one cached before that is made when first asked for, queued
+    /// ahead of everything else waiting to be made, and the ask fails with `err::no_rendition`.
+    /// When it is made, `messages_updated` reports `Attachment::has_rendition` true, and asking
+    /// again serves it.  Nothing waits on the decode, which runs on another thread and would
+    /// otherwise deadlock a caller on Core's loop.  Until then, the original if the platform
+    /// decodes it, else the thumbnail.
     ///
     /// Kept, evicted, counted and read as a thumbnail is: part of the file's cache entry, gone
     /// with it, and marking the file used when read.  A picture no rendition can be made of is
     /// refused under `image::renderer_version` and not tried again until that rises.
     ///
-    /// An animation gets none, and asking queues nothing: its original is what a viewer plays,
-    /// and `Attachment::picture` says which pictures those are.
+    /// For an attachment sent as its original file (`Attachment::original_file`) asking never
+    /// queues one: it is a file to export, not a picture to open.
     ///
     /// Fails with:
     ///
     /// - `err::message_not_found`, `err::attachment_not_found` — there is no such attachment.
     /// - `err::no_rendition` — none yet, or none ever: not cached, not a picture Session
-    ///   displays, an animation, or refused.
+    ///   displays, an original file, or refused.
     void attachment_rendition(
             int64_t message_id, size_t index, result_function<std::vector<std::byte>> cb);
     std::vector<std::byte> attachment_rendition(int64_t message_id, size_t index, await_t);
@@ -1327,6 +1329,8 @@ class Client {
         int64_t entry;
         cache::Derived kind;
         std::optional<std::filesystem::path> plain;  // as `_record_cached`'s
+        // Asked for by someone looking at it: no thumbnail queued later goes ahead of it.
+        bool hurried = false;
     };
     std::deque<PendingDerived> _derived_pending;
     bool _derived_running = false;
@@ -1358,7 +1362,7 @@ class Client {
             int64_t entry,
             cache::Derived kind,
             std::string name,
-            std::optional<std::vector<std::byte>> jpeg,
+            std::optional<std::vector<std::byte>> made,
             bool failed,
             std::optional<PictureFacts> facts);
 
@@ -1508,9 +1512,21 @@ class Client {
     // them into the row, so the pointer carries a placeholder.  Then `_upload_next`.
     void _derive_outgoing(int64_t client_id, Conversation::upload_progress on_upload);
 
-    // The rest of `_upload_next`, once the disk loop has looked at the file: uploads attachment
-    // `index` from `path`, or from `body` when that is set, or fails the message for good if
-    // `file_size` says the file is gone.
+    // Between the disk loop's look at the file and its upload: a picture this build decodes is
+    // re-encoded on the derive loop (`image::sendable`) and its row rewritten to describe what is
+    // sent; a picture it cannot decode is flagged as the original file; anything else goes as it
+    // is, from the very bytes that were looked at.
+    void _convert_outgoing(
+            int64_t client_id,
+            size_t index,
+            std::string path,
+            int64_t file_size,
+            bool declared_image,
+            Conversation::upload_progress on_upload);
+
+    // The rest of `_upload_next`, once the file is known: uploads attachment `index` from `path`,
+    // or from `body` when that is set, or fails the message for good if `file_size` says the file
+    // is gone.
     void _upload_one(
             int64_t client_id,
             size_t index,

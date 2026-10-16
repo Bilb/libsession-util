@@ -14,7 +14,7 @@ set(LIB_SESSION_UTESTS_SOURCES
     test_client/profile_pictures.cpp
     test_client/ids_and_schema.cpp
     test_client/interop_and_threading.cpp
-    test_client/location.cpp
+    test_client/sending_pictures.cpp
     test_client/receiving.cpp
     test_client/picture_info.cpp
     test_client/rendition.cpp
@@ -51,11 +51,11 @@ set(LIB_SESSION_UTESTS_SOURCES
     test_group_members.cpp
     test_hash.cpp
     test_image_jpeg.cpp
-    test_image_location.cpp
     test_image_platform.cpp
     test_image_probe.cpp
     test_image_thumbhash.cpp
     test_image_rendition.cpp
+    test_image_sendable.cpp
     test_image_thumbnail.cpp
     test_image_vips.cpp
     #test_logging.cpp  # Handled separately, see below

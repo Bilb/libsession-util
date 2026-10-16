@@ -5,6 +5,7 @@
 #include <session/image/probe.hpp>
 #include <session/image/rendition.hpp>
 #include <session/image/thumbnail.hpp>
+#include <string_view>
 #include <vector>
 
 #include "image_drawing.hpp"
@@ -78,35 +79,43 @@ TEST_CASE("rendition applies EXIF orientation and carries no metadata", "[image]
     CHECK_FALSE(has_marker(*out, 0xFE));
 }
 
-TEST_CASE("rendition draws transparency over a checkerboard", "[image][rendition]") {
-    auto png =
-            save(draw(
-                         256,
-                         256,
-                         [](int x, int y) {
-                             bool middle = x >= 96 && x < 160 && y >= 96 && y < 160;
-                             return middle ? RED : rgba{0, 255, 0, 0};
-                         },
-                         4)
-                         .get(),
-                 ".png");
-    auto out = render(png, 1000);
-    REQUIRE(size_of(out) == std::pair{256, 256});
-    auto img = decode_jpeg(*out);
-    constexpr rgba LIGHT{0xFF, 0xFF, 0xFF, 255}, DARK{0xCC, 0xCC, 0xCC, 255};
-    CHECK(near(pixel(img.get(), 4, 4), LIGHT, 12));
-    CHECK(near(pixel(img.get(), 12, 4), DARK, 12));
-    CHECK(near(pixel(img.get(), 128, 128), RED));
-}
-
-TEST_CASE("rendition of an animation is its first frame", "[image][rendition]") {
-    for (const char* suffix : {".gif", ".webp"}) {
-        INFO(suffix);
-        auto anim = save(
-                draw(80, 60, [](int, int y) { return y < 60 ? RED : BLUE; }, 3, 2).get(), suffix);
-        auto out = render(anim, 1000);
-        REQUIRE(size_of(out) == std::pair{80, 60});
-        CHECK(near(pixel(decode_jpeg(*out).get(), 40, 30), RED));
+TEST_CASE("rendition keeps transparency and animation, as a WebP", "[image][rendition]") {
+    // What a WebP rendition holds is `sendable`'s; here only that the rendition chooses it.
+    struct Case {
+        const char* what;
+        std::vector<std::byte> file;
+        int frames;
+    };
+    std::vector<Case> cases{
+            {"a transparent PNG",
+             save(draw(
+                          64, 48, [](int x, int) { return rgba{255, 0, 0, uint8_t(x * 4)}; }, 4)
+                          .get(),
+                  ".png"),
+             1},
+            {"an animated GIF",
+             save(draw(
+                          80, 60, [](int, int y) { return y < 60 ? RED : BLUE; }, 3, 2)
+                          .get(),
+                  ".gif"),
+             2},
+            {"an animated WebP",
+             save(draw(
+                          80, 60, [](int, int y) { return y < 60 ? RED : BLUE; }, 3, 2)
+                          .get(),
+                  ".webp"),
+             2},
+    };
+    for (auto& c : cases) {
+        INFO(c.what);
+        auto out = render(c.file, 1000);
+        REQUIRE(out);
+        CHECK(std::string_view{reinterpret_cast<const char*>(out->data()) + 8, 4} == "WEBP");
+        image_ptr img{vips_image_new_from_buffer(out->data(), out->size(), "n=-1", nullptr)};
+        REQUIRE(img);
+        CHECK(vips_image_get_n_pages(img.get()) == c.frames);
+        if (c.frames == 1)
+            CHECK(vips_image_hasalpha(img.get()));
     }
 }
 
@@ -115,4 +124,45 @@ TEST_CASE("rendition refuses what thumbnail refuses", "[image][rendition]") {
     CHECK_FALSE(render(pdf, 1000));
     // Over the whole-decode budget, as the thumbnail test establishes for this fixture.
     CHECK_FALSE(render(image_fixtures::avif8_4900x4900, 1000));
+}
+
+TEST_CASE(
+        "rendition_is_original says yes only to what rendition would make the same",
+        "[image][rendition]") {
+    using image::Format;
+    const image::Info photo{Format::jpeg, 2048, 1536, 1, 1, false, false, 8, true, 0};
+    auto with = [&](auto change) {
+        auto info = photo;
+        change(info);
+        return info;
+    };
+    struct Case {
+        const char* what;
+        image::Info info;
+        bool yes;
+    };
+    for (const auto& c : std::vector<Case>{
+                 {"a JPEG within the edge", photo, true},
+                 {"a WebP within the edge", with([](auto& i) { i.format = Format::webp; }), true},
+                 {"an animated WebP",
+                  with([](auto& i) {
+                      i.format = Format::webp;
+                      i.frames = 8;
+                  }),
+                  true},
+                 {"one pixel over the edge", with([](auto& i) { i.width = 2049; }), false},
+                 {"a PNG", with([](auto& i) { i.format = Format::png; }), false},
+                 {"16 bits a sample", with([](auto& i) { i.bits_per_sample = 16; }), false},
+                 {"stored sideways", with([](auto& i) { i.orientation = 6; }), false},
+                 {"not decodable", with([](auto& i) { i.decodable = false; }), false},
+                 {"frames past the pixel limit",
+                  with([](auto& i) {
+                      i.format = Format::webp;
+                      i.frames = image::max_total_pixels / (2048 * 1536) + 1;
+                  }),
+                  false},
+         }) {
+        INFO(c.what);
+        CHECK(image::rendition_is_original(c.info, 2048) == c.yes);
+    }
 }

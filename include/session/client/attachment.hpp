@@ -35,17 +35,25 @@ struct OutgoingAttachment {
     /// present differently.
     bool voice_message = false;
 
+    /// Sends the file exactly as it is, metadata included, flagged so that recipients offer it as
+    /// a file to export rather than as a picture.  Otherwise a picture this build decodes is sent
+    /// re-encoded (`image::sendable`): `content_type`, the filename's extension, the size and the
+    /// fields below then describe what was sent rather than the file at `path`.  A picture this
+    /// build does not decode (a format it does not read, an animated PNG) is sent as if this were
+    /// set; one too large to decode is refused with `err::attachment_too_large`.
+    bool original_file = false;
+
     /// Pixel dimensions, for visual media.  Recipients use them to lay out a placeholder before
-    /// the file itself has been fetched.  Supplied values are sent as given; for a picture Session
-    /// displays (`image::displayable_image_types`) that the caller left unset, libsession reads
-    /// them from the file before the upload.
+    /// the file itself has been fetched.  Supplied values are sent as given unless the picture is
+    /// re-encoded; for a picture Session displays (`image::displayable_image_types`) that the
+    /// caller left unset, libsession reads them from the file before the upload.
     std::optional<uint32_t> width;
     std::optional<uint32_t> height;
 
     /// ThumbHash of the image, for a recipient to draw in the attachment's place until the file
     /// itself arrives.  Advisory and unvalidated: libsession carries the bytes and never looks
     /// inside them.  Derived as `width`/`height` are when left unset
-    /// (`image::thumbhash::of_picture`).
+    /// (`image::thumbhash::of_picture`), and from the re-encoded picture when there is one.
     std::optional<std::vector<std::byte>> thumbhash;
 };
 
@@ -204,6 +212,11 @@ struct Attachment {
     /// differently.
     bool voice_message = false;
 
+    /// The sender's file exactly as it was, metadata included
+    /// (`OutgoingAttachment::original_file`). Shown as a file to export, never opened as a picture,
+    /// though its thumbnail is drawn.
+    bool original_file = false;
+
     std::optional<uint32_t> width;
     std::optional<uint32_t> height;
     std::optional<std::vector<std::byte>> thumbhash;
@@ -264,16 +277,17 @@ struct Attachment {
     bool has_thumbnail = false;
 
     /// Whether `Client::attachment_rendition` has a rendition to serve: the whole picture as a
-    /// JPEG at the rendition edge, for a viewer to draw in place of the original.  Made only when
-    /// first asked for, and otherwise kept, evicted and reported exactly as `has_thumbnail` is.
+    /// JPEG or WebP (the bytes say which) at the rendition edge, for a viewer to draw in place of
+    /// the original.  Made once the picture's thumbnail is, and otherwise kept, evicted and
+    /// reported exactly as `has_thumbnail` is.
     bool has_rendition = false;
 
     /// What the cached file's header says, once libsession has read it, which it does when it
     /// first makes a thumbnail or rendition from it: a little after the file arrives, reported
     /// through `messages_updated` as `has_thumbnail` is.  Unset until then, and again once the
-    /// file leaves the cache.  What a viewer decides from: an animation is played from the
-    /// original, a still picture drawn from its rendition, and one that could not be read is the
-    /// platform's to decode or not.
+    /// file leaves the cache.  What a viewer decides from: a picture is drawn from its rendition,
+    /// an animation played from it; until that is made, the original if the platform decodes it,
+    /// else the thumbnail; and one that could not be read is the platform's to decode or not.
     std::optional<PictureInfo> picture;
 
     /// When the *recipient* of this message last saved this attachment -- us, on an incoming one,

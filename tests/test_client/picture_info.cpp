@@ -1,5 +1,6 @@
 #include <session/image/rendition.hpp>
 
+#include "../../src/image/vips_internal.hpp"
 #include "derived_fixture.hpp"
 #include "image_fixtures.hpp"
 
@@ -60,6 +61,7 @@ TEST_CASE("Client: a cached picture reports what its header says", "[client][pic
         CHECK(a.picture->width == 4900);
         CHECK(a.picture->height == 4900);
         CHECK(a.picture->frames == 1);
+        // Its thumbnail was refused, so no rendition is queued after it; one asked for is refused.
         CHECK_FALSE(a.picture->rendition_refused);
         CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
         settle(*f.c);
@@ -88,9 +90,7 @@ TEST_CASE("Client: a cached picture reports what its header says", "[client][pic
     }
 }
 
-TEST_CASE(
-        "Client: an animation gets no rendition: its original is what there is",
-        "[client][picture]") {
+TEST_CASE("Client: an animation's rendition is animated", "[client][picture]") {
     Fixture f;
     auto suffix = GENERATE(".gif", ".webp");
     INFO(suffix);
@@ -105,11 +105,11 @@ TEST_CASE(
     // The tile still gets its first frame.
     CHECK(a.has_thumbnail);
 
-    // Asking queues nothing and records nothing: there is no refusal to remember.
-    CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
-    CHECK(TestHelper::thumbnails_queued(*f.c) == 0);
     settle(*f.c);
-    CHECK_FALSE(f.attachment(id).has_rendition);
-    CHECK_FALSE(f.attachment(id).picture->rendition_refused);
-    CHECK(f.db_get("SELECT count(*) FROM attachment_derived WHERE kind = ?", rendition_kind) == 0);
+    REQUIRE(f.attachment(id).has_rendition);
+    auto webp = f.c->attachment_rendition(id, 0, await);
+    image::detail::image_ptr img{
+            vips_image_new_from_buffer(webp.data(), webp.size(), "n=-1", nullptr)};
+    REQUIRE(img);
+    CHECK(vips_image_get_n_pages(img.get()) == 4);
 }
