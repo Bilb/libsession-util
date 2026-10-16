@@ -70,7 +70,7 @@ struct OutgoingAttachment {
 
     /// Pixel dimensions, for visual media.  Recipients use them to lay out a placeholder before
     /// the file itself has been fetched.  Supplied values are sent as given unless the picture is
-    /// re-encoded; for a picture Session displays (`image::displayable_image_types`) that the
+    /// re-encoded; for a picture Session displays (`image::is_displayable_image`) that the
     /// caller left unset, libsession reads them from the file before the upload.
     std::optional<uint32_t> width;
     std::optional<uint32_t> height;
@@ -96,7 +96,7 @@ struct OutgoingAttachment {
 enum class AutoDownload : int {
     none = 0,               ///< Nothing; every attachment waits to be asked for.
     image_attachments = 1,  ///< Attachments whose content type is one Session displays as an
-                            ///< image; see image::displayable_image_types.
+                            ///< image; see image::is_displayable_image.
     all = 2,                ///< Every attachment.
 };
 
@@ -214,7 +214,7 @@ struct PictureInfo {
     uint32_t height = 0;
 
     /// 1 for a still picture, more for an animation, 0 when the file could not be read as a
-    /// picture at all.
+    /// picture at all.  An animated PNG counts as an animation, and is never given a rendition.
     uint32_t frames = 0;
 
     /// Whether `Client::attachment_rendition` has refused this picture under the current
@@ -300,7 +300,7 @@ struct Attachment {
     /// change to the message -- and false again when the file leaves the cache.
     ///
     /// Never true for anything but a picture Session displays (see
-    /// `image::displayable_image_types`) that libsession could decode.  Videos have none.
+    /// `image::is_displayable_image`) that libsession could decode.  Videos have none.
     bool has_thumbnail = false;
 
     /// Whether `Client::attachment_rendition` has a rendition to serve: the whole picture as a

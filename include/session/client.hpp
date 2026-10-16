@@ -497,7 +497,9 @@ class Client {
     ///
     /// Kept, evicted, counted and read as a thumbnail is: part of the file's cache entry, gone
     /// with it, and marking the file used when read.  A picture no rendition can be made of is
-    /// refused under `image::renderer_version` and not tried again until that rises.
+    /// refused under `image::renderer_version` and not tried again until that rises.  So is an
+    /// animated PNG, whatever its content type: libvips decodes only its first frame, so the
+    /// original is what a viewer draws (`image::Info::first_frame_only`).
     ///
     /// For an attachment sent as its original file (`Attachment::original_file`) asking never
     /// queues one: it is a file to export, not a picture to open.

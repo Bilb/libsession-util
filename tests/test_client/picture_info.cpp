@@ -1,6 +1,7 @@
 #include <session/image/rendition.hpp>
 
 #include "../../src/image/vips_internal.hpp"
+#include "../image_drawing.hpp"
 #include "derived_fixture.hpp"
 #include "image_fixtures.hpp"
 
@@ -112,4 +113,25 @@ TEST_CASE("Client: an animation's rendition is animated", "[client][picture]") {
             vips_image_new_from_buffer(webp.data(), webp.size(), "n=-1", nullptr)};
     REQUIRE(img);
     CHECK(vips_image_get_n_pages(img.get()) == 4);
+}
+
+TEST_CASE(
+        "Client: an animated PNG has a thumbnail and no rendition, whatever it is labelled",
+        "[client][picture][rendition]") {
+    Fixture f;
+    auto type = GENERATE("image/apng", "IMAGE/APNG; charset=binary", "image/png");
+    INFO(type);
+    auto [id, url] = f.arrive(image_test::animated_png(picture(400, 300), 3), type);
+    settle(*f.c);
+    auto a = f.attachment(id);
+    CHECK(a.has_thumbnail);
+    REQUIRE(a.picture);
+    CHECK(a.picture->frames == 3);
+    CHECK(a.picture->animated());
+    CHECK(a.picture->width == 400);
+    // Refused when made after the thumbnail, so the viewer draws the animation itself.
+    CHECK_FALSE(a.has_rendition);
+    CHECK(a.picture->rendition_refused);
+    CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
+    CHECK(f.c->message(id, await)->gallery);
 }

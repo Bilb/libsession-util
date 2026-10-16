@@ -10,31 +10,53 @@ namespace session::image {
 /// The attachment content types Session treats as images: what a message may be shown as a gallery
 /// of, what counts as an image in a conversation's preview, and what the `image_attachments`
 /// auto-download mode fetches.  These are the formats the libvips loader whitelist accepts
-/// (`allowed_loaders` in vips.hpp), and the two lists are to be kept in step.
+/// (`allowed_loaders` in vips.hpp), and the two lists are to be kept in step.  Lowercase, and
+/// compared against a content type's `mime_essence`.
 ///
 /// HEIC/HEIF is deliberately absent even though some platforms can decode it: Session clients
 /// convert HEIC to JPEG before sending, so one that arrives anyway is treated as a file.
 ///
 /// `image/jpg` and `image/pjpeg` are not registered types, but are what some senders label JPEGs.
-inline constexpr std::array<std::string_view, 7> displayable_image_types{
+/// `image/apng` is an animated PNG, which libvips decodes as its first frame only: it has a
+/// thumbnail but no rendition, and is sent as its original file.
+inline constexpr std::array<std::string_view, 8> displayable_image_types{
         "image/jpeg",
         "image/jpg",
         "image/pjpeg",
         "image/png",
+        "image/apng",
         "image/webp",
         "image/gif",
         "image/avif",
 };
 
+/// The whitespace `mime_essence` trims: HTTP's, as the WHATWG MIME type parser has it.
+inline constexpr std::string_view mime_whitespace = " \t\n\r";
+
+/// API: image/mime_essence
+///
+/// `content_type` without its parameters or the whitespace around what is left, case kept:
+/// `" IMAGE/PNG ; foo=bar"` gives `"IMAGE/PNG"`.  Empty when nothing is left.  A NUL ends it as a
+/// `;` does, which is where SQLite's string functions stop.
+constexpr std::string_view mime_essence(std::string_view content_type) {
+    content_type = content_type.substr(0, content_type.find_first_of(std::string_view{";\0", 2}));
+    auto first = content_type.find_first_not_of(mime_whitespace);
+    if (first == std::string_view::npos)
+        return {};
+    return content_type.substr(first, content_type.find_last_not_of(mime_whitespace) - first + 1);
+}
+
 /// API: image/is_displayable_image
 ///
-/// Whether `content_type` is one of `displayable_image_types`, ignoring ASCII case: MIME types are
-/// case-insensitive.  A content type is a sender's claim about a file, so this decides how an
+/// Whether the `mime_essence` of `content_type` is one of `displayable_image_types`, ignoring ASCII
+/// case: MIME types are case-insensitive, and a parameter such as `charset=binary` does not change
+/// what the file is.  A content type is a sender's claim about a file, so this decides how an
 /// attachment is presented, not whether its bytes are safe to decode; decoding enforces the loader
 /// whitelist on the actual content.
 constexpr bool is_displayable_image(std::string_view content_type) {
+    auto essence = mime_essence(content_type);
     return std::ranges::any_of(displayable_image_types, [&](std::string_view type) {
-        return string_iequal(content_type, type);
+        return string_iequal(essence, type);
     });
 }
 

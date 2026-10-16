@@ -29,7 +29,8 @@ inline constexpr size_t max_sendable_attempts = 8;
 enum class SendableVerdict {
     /// Re-encode it.
     encode,
-    /// Not decode it at all: a format this build does not read (HEIC off Apple, say).
+    /// Not decode it at all: a format this build does not read (HEIC off Apple, say), or an
+    /// animation it reads only the first frame of (`Info::first_frame_only`).
     cannot_decode,
     /// Decode it only past the decode limits `thumbnail` keeps to.
     too_large,

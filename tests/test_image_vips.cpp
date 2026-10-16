@@ -121,6 +121,7 @@ TEST_CASE("every displayable image type has a whitelisted loader", "[image][vips
             {"image/jpg", "VipsForeignLoadJpeg"},
             {"image/pjpeg", "VipsForeignLoadJpeg"},
             {"image/png", "VipsForeignLoadPng"},
+            {"image/apng", "VipsForeignLoadPng"},
             {"image/webp", "VipsForeignLoadWebp"},
             {"image/gif", "VipsForeignLoadNsgif"},
             {"image/avif", "VipsForeignLoadHeif"},

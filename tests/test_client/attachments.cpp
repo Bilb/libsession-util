@@ -1632,6 +1632,15 @@ TEST_CASE("Client: a conversation set to auto-download fetches on arrival", "[cl
         arrive("h6", false, "image/svg+xml");
         CHECK(net->downloads.empty());
         CHECK_FALSE(c->conversation(convo, await)->messages(await)[0].gallery_viewable);
+        arrive("h7", false, "image/jpeg2000");
+        CHECK(net->downloads.empty());
+    }
+
+    SECTION("images only fetches an image whose content type has parameters") {
+        c->conversation(convo, await)->set_auto_download(AutoDownload::image_attachments, await);
+        arrive("h8", false, "Image/PNG ; charset=binary");
+        CHECK(net->downloads.size() == 1);
+        CHECK(c->conversation(convo, await)->messages(await)[0].gallery);
     }
 
     SECTION("all fetches both, and an all-image message opens as a gallery") {
@@ -2139,9 +2148,14 @@ TEST_CASE("Client: only image types we display count as images", "[client][attac
             {"image/webp", true},
             {"image/gif", true},
             {"image/avif", true},
-            // MIME types are case-insensitive.
+            {"image/apng", true},
+            // MIME types are case-insensitive, and parameters do not change what the file is.
             {"IMAGE/PNG", true},
             {"Image/WebP", true},
+            {"image/jpeg; charset=binary", true},
+            {" IMAGE/PNG ; foo=bar", true},
+            {"image/jpegx", false},
+            {"image/jpeg2000", false},
             // Image types we will not decode, so not images as far as presentation goes.
             {"image/svg+xml", false},
             {"image/tiff", false},
