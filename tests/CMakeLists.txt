@@ -15,6 +15,7 @@ set(LIB_SESSION_UTESTS_SOURCES
     test_client/ids_and_schema.cpp
     test_client/interop_and_threading.cpp
     test_client/sending_pictures.cpp
+    test_client/taking_files.cpp
     test_client/receiving.cpp
     test_client/picture_info.cpp
     test_client/rendition.cpp

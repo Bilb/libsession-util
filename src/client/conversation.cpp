@@ -163,10 +163,13 @@ ExistingAttachmentCounts Conversation::existing_attachments(await_t) {
 void Conversation::send_message(
         OutgoingMessage msg, upload_progress on_upload, result_function<int64_t> cb) {
     _client->_require_sendable("send_message", id, msg);
+    auto taken = _client->_take_files(msg);
     _client->_async(
-            [c = _client, id = id, msg = std::move(msg), on_upload = std::move(on_upload)] {
-                return c->_send_message(id, msg, on_upload);
-            },
+            [c = _client,
+             id = id,
+             msg = std::move(msg),
+             on_upload = std::move(on_upload),
+             taken = std::move(taken)] { return c->_send_message(id, msg, on_upload, taken); },
             std::move(cb));
 }
 void Conversation::send_message(OutgoingMessage msg, result_function<int64_t> cb) {
@@ -177,7 +180,10 @@ int64_t Conversation::send_message(OutgoingMessage msg, await_t) {
 }
 int64_t Conversation::send_message(OutgoingMessage msg, upload_progress on_upload, await_t) {
     _client->_require_sendable("send_message", id, msg);
-    return _client->call_get([&] { return _client->_send_message(id, msg, std::move(on_upload)); });
+    auto taken = _client->_take_files(msg);
+    return _client->call_get([&] {
+        return _client->_send_message(id, msg, std::move(on_upload), std::move(taken));
+    });
 }
 
 // -- Destroying ---------------------------------------------------------------------------------

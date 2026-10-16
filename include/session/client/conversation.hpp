@@ -375,11 +375,13 @@ class Conversation {
     /// up afterwards.
     ///
     /// The files are only checked here.  Each is read when its upload comes up, and again by a
-    /// retry that still has to upload it, so it must stay at its `path`, unchanged, until then.
+    /// retry that still has to upload it, so it must stay at its `path`, unchanged, until then --
+    /// unless `OutgoingAttachment::take_file` hands it over, in which case it is moved here.
     ///
     /// @throws std::invalid_argument if any attachment's file is not a readable, non-empty file,
-    /// or if `reply_to` names a message that does not exist or belongs to another conversation;
-    /// thrown on the calling thread, before anything is stored or dispatched.
+    /// if one with `take_file` cannot be moved or there is no cache directory to move it to, or if
+    /// `reply_to` names a message that does not exist or belongs to another conversation; thrown
+    /// on the calling thread, before anything is stored or dispatched.
     using upload_progress = std::function<void(
             size_t index, int64_t sent, int64_t total, std::optional<Expected<void>> result)>;
     void send_message(OutgoingMessage msg, upload_progress on_upload, result_function<int64_t> cb);

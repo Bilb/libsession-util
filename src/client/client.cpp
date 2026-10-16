@@ -667,6 +667,144 @@ void Client::_require_sendable(
                         op, *msg.reply_to)};
 }
 
+class Client::TakenFiles {
+  public:
+    explicit TakenFiles(Client& client) : _client{client} {}
+    TakenFiles(const TakenFiles&) = delete;
+    TakenFiles& operator=(const TakenFiles&) = delete;
+
+    ~TakenFiles() {
+        if (!_stored)
+            for (const auto& [from, to] : _files) {
+                std::error_code ec;
+                std::filesystem::remove(to, ec);
+            }
+        _release();
+    }
+
+    // Claimed before the file exists, so that a sweep which lists it already knows to keep it.
+    void claim(std::filesystem::path from, std::filesystem::path to) {
+        {
+            std::lock_guard lock{_client._taking_mutex};
+            _client._taking.insert(to.filename().string());
+        }
+        _files.emplace_back(std::move(from), std::move(to));
+    }
+
+    // The caller's files go only now, so that a send refused or failed before this leaves them.
+    void stored() {
+        for (const auto& [from, to] : _files) {
+            std::error_code ec;
+            if (!std::filesystem::remove(from, ec) && ec)
+                log::warning(
+                        cat,
+                        "send_message: could not remove {} once taken: {}",
+                        from.string(),
+                        ec.message());
+        }
+        _stored = true;
+        _release();
+    }
+
+  private:
+    void _release() {
+        if (_released)
+            return;
+        _released = true;
+        std::lock_guard lock{_client._taking_mutex};
+        for (const auto& [from, to] : _files)
+            _client._taking.erase(to.filename().string());
+    }
+
+    Client& _client;
+    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> _files;
+    bool _stored = false, _released = false;
+};
+
+std::filesystem::path Client::_outgoing_dir() const {
+    return _cache_dir.empty() ? std::filesystem::path{} : _cache_dir / cache::OUTGOING_DIR;
+}
+
+static bool inside(const std::filesystem::path& dir, const std::filesystem::path& file) {
+    return !dir.empty() && file.parent_path() == dir;
+}
+
+std::shared_ptr<Client::TakenFiles> Client::_take_files(OutgoingMessage& msg) {
+    if (std::ranges::none_of(msg.attachments, &OutgoingAttachment::take_file))
+        return nullptr;
+    auto dir = _outgoing_dir();
+    if (dir.empty())
+        throw std::invalid_argument{"send_message: take_file needs a cache directory"};
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec)
+        throw std::invalid_argument{
+                "send_message: cannot create {}: {}"_format(dir.string(), ec.message())};
+
+    auto taken = std::make_shared<TakenFiles>(*this);
+    for (auto& a : msg.attachments) {
+        if (!a.take_file)
+            continue;
+        // A fresh name with the original extension, which is what infers an unset content type.
+        auto to = dir / (random::random_base32(26) + a.path.extension().string());
+        taken->claim(a.path, to);
+        // Linked rather than renamed so that the caller's file stays until the message is stored;
+        // copied where a link cannot be made, such as across filesystems.
+        std::filesystem::create_hard_link(a.path, to, ec);
+        if (ec) {
+            ec.clear();
+            std::filesystem::copy_file(a.path, to, ec);
+        }
+        if (ec)
+            throw std::invalid_argument{"send_message: attachment {} cannot be taken: {}"_format(
+                    a.path.string(), ec.message())};
+        if (!a.filename)
+            a.filename = a.path.filename().string();
+        a.path = std::move(to);
+    }
+    return taken;
+}
+
+void Client::_sweep_outgoing() {
+    auto dir = _outgoing_dir();
+    if (dir.empty())
+        return;
+
+    // Ordered as `_sweep_cache` is: a name the listing saw was claimed in `_taking` before its file
+    // existed, and leaves `_taking` on Core's loop only once its row is there.
+    _post_disk([this, root = _cache_dir, dir] {
+        auto names = cache::list(root, cache::OUTGOING_DIR);
+        call([this, dir, names = std::move(names)]() mutable {
+            std::unordered_set<std::string> needed;
+            try {
+                auto c = core.database().conn();
+                for (auto path :
+                     c.prepared_results<std::string>("SELECT path FROM message_attachments"
+                                                     " WHERE url IS NULL AND path IS NOT NULL"))
+                    if (std::filesystem::path file{path}; inside(dir, file))
+                        needed.insert(file.filename().string());
+            } catch (const std::exception& e) {
+                log::warning(cat, "Outgoing file sweep failed: {}", e.what());
+                return;
+            }
+            {
+                std::lock_guard lock{_taking_mutex};
+                needed.insert(_taking.begin(), _taking.end());
+            }
+            std::erase_if(names, [&](const std::string& name) { return needed.contains(name); });
+            if (names.empty())
+                return;
+            _post_disk([dir, names = std::move(names)] {
+                for (const auto& name : names) {
+                    std::error_code ec;
+                    std::filesystem::remove(dir / name, ec);
+                }
+                log::debug(cat, "Removed {} outgoing file(s) no message needs", names.size());
+            });
+        });
+    });
+}
+
 void Client::_require_dm(std::string_view op, const ConversationId& id) {
     // Checked on the calling thread so caller error surfaces at the call site rather than inside
     // the loop, where the callback form would only be able to log it.
@@ -745,6 +883,7 @@ bool Client::delete_message(int64_t message_id, await_t) {
 void Client::set_cache_dir(std::filesystem::path dir) {
     _cache_dir = std::move(dir);
     _sweep_cache();
+    _sweep_outgoing();
     call([this] { _reload_auto_downloads(); });
 }
 
@@ -2169,12 +2308,14 @@ void Client::send_message(
         Conversation::upload_progress on_upload,
         result_function<int64_t> cb) {
     _require_sendable("send_message", id, msg);
+    auto taken = _take_files(msg);
 
-    _async(
-            [this, id, msg = std::move(msg), on_upload = std::move(on_upload)] {
-                return _send_message(id, msg, on_upload);
-            },
-            std::move(cb));
+    _async([this,
+            id,
+            msg = std::move(msg),
+            on_upload = std::move(on_upload),
+            taken = std::move(taken)] { return _send_message(id, msg, on_upload, taken); },
+           std::move(cb));
 }
 
 void Client::send_message(
@@ -2228,7 +2369,8 @@ int64_t Client::send_message(
         Conversation::upload_progress on_upload,
         await_t) {
     _require_sendable("send_message", id, msg);
-    return call_get([&] { return _send_message(id, msg, std::move(on_upload)); });
+    auto taken = _take_files(msg);
+    return call_get([&] { return _send_message(id, msg, std::move(on_upload), std::move(taken)); });
 }
 
 void Client::conversation(
@@ -5145,7 +5287,8 @@ static std::string infer_content_type(const std::filesystem::path& path) {
 int64_t Client::_send_message(
         const ConversationId& id,
         const OutgoingMessage& msg,
-        Conversation::upload_progress on_upload) {
+        Conversation::upload_progress on_upload,
+        std::shared_ptr<TakenFiles> taken) {
     const auto& attachments = msg.attachments;
     if (attachments.empty())
         return _send_message(id, msg);
@@ -5232,6 +5375,8 @@ int64_t Client::_send_message(
         approved = approve_recipient(c, id, *this);
         tx.commit();
     }
+    if (taken)
+        taken->stored();
 
     if (approved) {
         _sync_contact(id);
@@ -5620,6 +5765,20 @@ void Client::_convert_outgoing(
     }
 }
 
+void Client::_drop_taken_file(int64_t client_id, size_t index) {
+    auto path = core.database().conn().prepared_maybe_get<std::string>(
+            "SELECT path FROM message_attachments WHERE message = ?1 AND idx = ?2",
+            client_id,
+            static_cast<int64_t>(index));
+    if (!path || !inside(_outgoing_dir(), *path))
+        return;
+    // Posted after the cache copy, which may read the file: the disk loop runs them in order.
+    _post_disk([file = std::move(*path)] {
+        std::error_code ec;
+        std::filesystem::remove(file, ec);
+    });
+}
+
 void Client::_upload_one(
         int64_t client_id,
         size_t index,
@@ -5739,6 +5898,7 @@ void Client::_upload_one(
                 // before the message is announced as sent, so a display reacting to that already
                 // sees the file as here rather than being told a moment later.
                 _cache_outgoing_attachment(client_id, index, url, body);
+                _drop_taken_file(client_id, index);
 
                 log::debug(
                         cat,

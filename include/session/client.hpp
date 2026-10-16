@@ -4,6 +4,8 @@
 #include <deque>
 #include <filesystem>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <oxen/quic/loop.hpp>
 #include <session/client/attachment.hpp>
@@ -300,9 +302,9 @@ class Client {
     /// See `Conversation::send_message` for what the arguments mean and what `on_upload` reports.
     ///
     /// @throws std::invalid_argument if the conversation is not a DM (groups and communities are
-    /// not implemented yet), if an attachment cannot be read, or if `reply_to` names a message that
-    /// does not exist or belongs to another conversation; thrown on the calling thread, before
-    /// anything is stored or dispatched.
+    /// not implemented yet), if an attachment cannot be read or taken, or if `reply_to` names a
+    /// message that does not exist or belongs to another conversation; thrown on the calling
+    /// thread, before anything is stored or dispatched.
     void send_message(
             const ConversationId& id,
             OutgoingMessage msg,
@@ -1496,10 +1498,36 @@ class Client {
             bool include_deleted);
     std::optional<Message> _message(int64_t id);
     int64_t _send_message(const ConversationId& id, const OutgoingMessage& msg);
+
+    // The files a send took over (`OutgoingAttachment::take_file`), until its message is stored.
+    // Dropped before `stored()`, it removes its copies and leaves the caller's files alone.
+    class TakenFiles;
+
+    // Copies or links each `take_file` attachment into `_outgoing_dir()` and points it there.  On
+    // the calling thread, after `_require_sendable`; null when nothing was taken.
+    std::shared_ptr<TakenFiles> _take_files(OutgoingMessage& msg);
+
     int64_t _send_message(
             const ConversationId& id,
             const OutgoingMessage& msg,
-            Conversation::upload_progress on_upload);
+            Conversation::upload_progress on_upload,
+            std::shared_ptr<TakenFiles> taken = nullptr);
+
+    // Removes the file attachment `index` took, once it is uploaded and its cached copy is under
+    // way.  A retry never uploads it again.
+    void _drop_taken_file(int64_t client_id, size_t index);
+
+    // Where taken files are kept, or empty without a cache directory.
+    std::filesystem::path _outgoing_dir() const;
+
+    // Removes what `_outgoing_dir()` holds that no message still has to upload.  Listed on the disk
+    // loop and decided on Core's, as `_sweep_cache` is.
+    void _sweep_outgoing();
+
+    // Names taken into `_outgoing_dir()` whose message is not stored yet, which a sweep must keep.
+    // Locked because taking happens on the caller's thread.
+    std::mutex _taking_mutex;
+    std::unordered_set<std::string> _taking;
 
     // Uploads the message's first attachment that has no url yet and, when there are none left,
     // finishes the send.  Each upload's completion calls this again, so the chain runs one file at

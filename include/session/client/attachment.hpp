@@ -21,8 +21,20 @@ constexpr size_t MAX_THUMBHASH_SIZE = 25;
 /// against a draft for as long as the user takes to write it.
 struct OutgoingAttachment {
     /// The file to send.  Read when its upload comes up and again by any retry, not by
-    /// `send_message` itself, so it must stay here, unchanged, until the upload is done.
+    /// `send_message` itself, so without `take_file` it must stay here, unchanged, until the upload
+    /// is done.
     std::filesystem::path path;
+
+    /// Hands the file to libsession.  Once the message is stored the file is moved out of `path`
+    /// into libsession's own storage beneath `Client::set_cache_dir`, read from there for the
+    /// upload and any retry, and deleted once the message no longer needs it: when it has
+    /// uploaded (a retry never uploads it again), or when the message is deleted.  The caller must
+    /// not use `path` afterwards.  A send that throws, or whose callback reports an error, leaves
+    /// the file at `path`.
+    ///
+    /// `filename` defaults to `path`'s filename as it was, and `content_type` to what its
+    /// extension implies, as without this.  Needs a cache directory.
+    bool take_file = false;
 
     /// MIME type to advertise.  Recipients use it to decide how to display the attachment; when
     /// unset it is inferred from the filename's extension.
