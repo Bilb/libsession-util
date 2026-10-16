@@ -11,5 +11,5 @@ extern "C" __attribute__((visibility("default"))) bool session_shared_link_check
     if (!session::image::thumbhash::valid({hash, hash_len}))
         return false;
     session::client::Client client{std::filesystem::path{db}};
-    return client.message(0, session::await).has_value();
+    return client.attachment_thumbnail(0, 0, session::await).empty();
 }

@@ -44,6 +44,14 @@ struct Info {
 
     bool has_alpha;
 
+    /// Whether decoding holds a whole frame in memory, however small the result is to be: GIF,
+    /// AVIF, progressive JPEG, interlaced PNG, animated WebP, and HEIC except on Apple platforms.
+    /// The others stream or shrink as they decode, at a fraction of the memory.
+    bool decoded_whole;
+
+    /// Bits a sample takes once decoded: 8, or 16 for a 16-bit PNG and a HEIF of over 8 bits.
+    uint8_t bits_per_sample;
+
     /// Whether this build can decode the image: `can_decode(format)`.
     bool decodable;
 

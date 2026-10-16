@@ -151,6 +151,7 @@ target_link_libraries(
     PUBLIC
     core
     PRIVATE
+    image
     libsession::protos
 )
 
@@ -256,6 +257,7 @@ add_libsession_util_library(image
     image/probe.cpp
     image/source.cpp
     image/thumbhash.cpp
+    image/thumbnail.cpp
     image/vips.cpp
 )
 target_link_libraries(image

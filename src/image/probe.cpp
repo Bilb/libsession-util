@@ -166,6 +166,18 @@ std::optional<Info> probe(Source& source) {
     if (info.orientation >= 5)
         std::swap(info.width, info.height);
     info.has_alpha = vips_image_hasalpha(img.get());
+    info.bits_per_sample = static_cast<uint8_t>(8 * vips_format_sizeof_unsafe(img->BandFmt));
+    int interlaced = 0;
+    if (vips_image_get_typeof(img.get(), "interlaced"))
+        vips_image_get_int(img.get(), "interlaced", &interlaced);
+    switch (info.format) {
+        case Format::jpeg:
+        case Format::png: info.decoded_whole = interlaced != 0; break;
+        case Format::webp: info.decoded_whole = info.animated(); break;
+        case Format::heic: info.decoded_whole = !detail::platform_decodes(Format::heic); break;
+        case Format::gif:
+        case Format::avif: info.decoded_whole = true; break;
+    }
     info.decodable = can_decode(info.format);
     info.size = source.size();
     return info;

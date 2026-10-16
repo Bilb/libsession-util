@@ -25,6 +25,7 @@ using image::Format;
 using image::detail::image_ptr;
 using image_fixtures::avif_64x48;
 using image_fixtures::heic_64x48;
+using image_fixtures::heic_p3_rotated;
 
 namespace {
 
@@ -155,6 +156,14 @@ TEST_CASE("probe reads each accepted format's header", "[image][probe]") {
         CHECK(info->decodable == (heif_have_decoder_for_format(heif_compression_HEVC) != 0));
 #endif
     }
+
+    SECTION("HEIC's rotation is applied to its dimensions once, not again for its EXIF") {
+        auto info = probe_bytes(heic_p3_rotated);
+        REQUIRE(info);
+        CHECK(info->format == Format::heic);
+        CHECK(info->width == 48);
+        CHECK(info->height == 64);
+    }
 }
 
 TEST_CASE("probe reports display dimensions after EXIF orientation", "[image][probe]") {
@@ -275,4 +284,27 @@ TEST_CASE("probe throws a decryption error rather than calling it not an image",
             image::probe(src),
             std::runtime_error,
             Message("Attachment decryption failed: invalid key or corrupted data"));
+}
+
+TEST_CASE("probe says which images are decoded whole", "[image][probe]") {
+    auto whole = [](std::span<const std::byte> data) {
+        auto info = probe_bytes(data);
+        REQUIRE(info);
+        return info->decoded_whole;
+    };
+    auto img = make_image(64, 48);
+    CHECK_FALSE(whole(save(img.get(), ".jpg")));
+    CHECK(whole(save(img.get(), ".jpg[interlace]")));
+    CHECK_FALSE(whole(save(img.get(), ".png")));
+    CHECK(whole(save(img.get(), ".png[interlace]")));
+    CHECK_FALSE(whole(save(img.get(), ".webp")));
+    CHECK(whole(save(make_image(64, 48, 3, 2).get(), ".webp")));
+    CHECK(whole(save(img.get(), ".gif")));
+    CHECK(whole(avif_64x48));
+    // ImageIO decodes HEIC at the size asked for.
+#ifdef __APPLE__
+    CHECK_FALSE(whole(heic_64x48));
+#else
+    CHECK(whole(heic_64x48));
+#endif
 }

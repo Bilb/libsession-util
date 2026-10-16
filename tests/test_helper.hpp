@@ -467,6 +467,59 @@ class TestHelper {
         return c._cache_path(kind, url);
     }
 
+    /// Whether a Client has no thumbnail queued or being made.  Made on a thread of their own and
+    /// then written and recorded, so this is the only way a test can know that nothing more is
+    /// coming, rather than that nothing has come yet.
+    template <typename Client>
+    static bool thumbnails_idle(Client& c) {
+        return c.core.call_get([&c] { return !c._thumb_running && c._thumb_pending.empty(); });
+    }
+
+    /// Makes a Client act as though a thumbnail were being made, so that whatever is queued from
+    /// now on stays queued: what the process ending with thumbnails still to make leaves behind.
+    template <typename Client>
+    static void stall_thumbnails(Client& c) {
+        c.core.call_get([&c] { c._thumb_running = true; });
+    }
+
+    /// Queues what a Client queues at open.
+    template <typename Client>
+    static void thumbnail_pass(Client& c) {
+        c.core.call_get([&c] { c._thumbnail_pass(); });
+    }
+
+    /// Makes a Client act as though it were decoding `entry`'s thumbnail, with no answer to come.
+    template <typename Client>
+    static void pretend_thumbnail_attempt(Client& c, int64_t entry) {
+        c.core.call_get([&c, entry] {
+            c._thumb_running = true;
+            c._thumb_attempt = entry;
+        });
+    }
+
+    template <typename Client>
+    static size_t thumbnails_queued(Client& c) {
+        return c.core.call_get([&c] { return c._thumb_pending.size(); });
+    }
+
+    template <typename Client>
+    static std::vector<int64_t> thumbnails_pending(Client& c) {
+        return c.core.call_get([&c] {
+            std::vector<int64_t> entries;
+            for (const auto& p : c._thumb_pending)
+                entries.push_back(p.entry);
+            return entries;
+        });
+    }
+
+    /// Occupies a Client's thumbnail thread, or its disk loop, until the returned promise is set:
+    /// whatever is posted there meanwhile waits behind it.
+    template <typename Client>
+    static std::shared_ptr<std::promise<void>> hold_thumbnail_thread(Client& c) {
+        auto release = std::make_shared<std::promise<void>>();
+        c._post_thumbnail([f = release->get_future().share()] { f.wait(); });
+        return release;
+    }
     template <typename Client>
     static std::shared_ptr<std::promise<void>> hold_disk_loop(Client& c) {
         auto release = std::make_shared<std::promise<void>>();
