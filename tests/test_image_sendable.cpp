@@ -2,11 +2,13 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <cstdio>
+#include <optional>
 #include <session/attachments.hpp>
 #include <session/image/sendable.hpp>
 #include <session/image/thumbnail.hpp>
 #include <set>
 #include <string_view>
+#include <utility>
 
 #include "image_drawing.hpp"
 #include "image_fixtures.hpp"
@@ -17,6 +19,25 @@ using namespace std::literals;
 namespace {
 
 using bytes = std::vector<std::byte>;
+
+// `jpeg` with its progressive frame header claiming `sampling` for every component, and the size
+// given if any: a header libvips reads as subsampled whatever the factors' real effect.
+bytes patched_sof(bytes jpeg, uint8_t sampling, std::optional<std::pair<uint16_t, uint16_t>> size) {
+    auto text = std::string_view{reinterpret_cast<const char*>(jpeg.data()), jpeg.size()};
+    auto sof = text.find("\xFF\xC2"sv);
+    REQUIRE(sof != std::string_view::npos);
+    if (size) {
+        auto [w, h] = *size;
+        jpeg[sof + 5] = std::byte(h >> 8);
+        jpeg[sof + 6] = std::byte(h & 0xFF);
+        jpeg[sof + 7] = std::byte(w >> 8);
+        jpeg[sof + 8] = std::byte(w & 0xFF);
+    }
+    auto n = static_cast<size_t>(jpeg[sof + 9]);
+    for (size_t i = 0; i < n; i++)
+        jpeg[sof + 10 + 3 * i + 1] = std::byte{sampling};
+    return jpeg;
+}
 
 std::string_view text(const bytes& b) {
     return {reinterpret_cast<const char*>(b.data()), b.size()};
@@ -257,6 +278,29 @@ TEST_CASE(
     check(".jpg[interlace,subsample_mode=on]", true);
     // Unsubsampled, its coefficients and full-size decode for a 2048 box are over the budget.
     check(".jpg[interlace,subsample_mode=off]", false);
+
+    // Every component at 2x1 is subsampled to libvips, but each is still at full resolution.
+    auto all_wide = patched_sof(save(photo.get(), ".jpg[interlace,subsample_mode=off]"), 0x21, {});
+    image::Source source{std::span<const std::byte>{all_wide}};
+    auto info = image::probe(source);
+    REQUIRE(info);
+    CHECK(image::sendable_verdict(*info) == image::SendableVerdict::too_large);
+}
+
+TEST_CASE(
+        "Sendable: a tiny progressive JPEG claiming a huge frame of full-size components gets no "
+        "thumbnail",
+        "[image][sendable][thumbnail]") {
+    // A couple of KB that would have libjpeg allocate about 500 MB of coefficients.
+    auto small = save(
+            draw(64, 48, [](int, int) { return RED; }).get(), ".jpg[interlace,subsample_mode=off]");
+    auto bomb = patched_sof(small, 0x21, std::pair<uint16_t, uint16_t>{11000, 7600});
+    image::Source source{std::span<const std::byte>{bomb}};
+    auto info = image::probe(source);
+    REQUIRE(info);
+    CHECK(info->width == 11000);
+    CHECK(info->coefficient_bytes == 3ull * 1376 * 950 * 128);
+    CHECK_FALSE(image::thumbnail(source, 256));
 }
 
 TEST_CASE(

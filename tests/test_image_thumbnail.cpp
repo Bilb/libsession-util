@@ -351,6 +351,26 @@ TEST_CASE(
     CHECK_FALSE(thumb(image_fixtures::avif10_3700x3700, 64));
 }
 
+TEST_CASE(
+        "a progressive JPEG's output is costed at the shrink a cover or a fit would load it at",
+        "[image][thumbnail]") {
+    // Tall: a cover to 256 is bound by the 2000 side, shrinking by 2; a fit by 16000, by 8.
+    image::Info info{};
+    info.format = image::Format::jpeg;
+    info.width = 2000;
+    info.height = 16000;
+    info.frames = 1;
+    info.orientation = 1;
+    info.decoded_whole = true;
+    info.bits_per_sample = 8;
+    info.decodable = true;
+    info.bands = 3;
+    // Room for the output at 1/8 (1.5 MB) and not at 1/2 (24 MB).
+    info.coefficient_bytes = image::max_whole_decode_bytes - (10 << 20);
+    CHECK(image::detail::acceptable(info, 256, false));
+    CHECK_FALSE(image::detail::acceptable(info, 256, true));
+}
+
 TEST_CASE("thumbhash::of_picture hashes a scaled-down, upright picture", "[image][thumbhash]") {
     auto photo = draw(640, 480, [](int x, int) { return x < 320 ? RED : BLUE; });
     vips_image_set_int(photo.get(), "orientation", 6);

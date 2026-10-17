@@ -111,8 +111,9 @@ namespace detail {
 
     uint64_t whole_decode_bytes(const Info& info, uint32_t box, bool crop) {
         if (info.coefficient_bytes) {
-            // Measured with this build at 4:2:0 and 4:4:4, decoded at full size and shrunk by 8:
-            // never under the peak above a baseline JPEG's, and at most 10% over it.
+            // What a progressive decode takes beyond a baseline one.  Measured at 45 MP: within 1%
+            // under and 3% over for a thumbnail; for a full-size send the output term is all
+            // margin, the extra being the coefficients alone.
             uint64_t s = jpeg_shrink(info, box, crop);
             return info.coefficient_bytes +
                    (info.width + s - 1) / s * ((info.height + s - 1) / s) * info.bands;
