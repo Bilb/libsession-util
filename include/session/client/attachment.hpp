@@ -249,6 +249,11 @@ struct Attachment {
     /// `image::displayable_image_types`) that libsession could decode.  Videos have none.
     bool has_thumbnail = false;
 
+    /// Whether `Client::attachment_rendition` has a rendition to serve: the whole picture as a
+    /// JPEG at the rendition edge, for a viewer to draw in place of the original.  Made only when
+    /// first asked for, and otherwise kept, evicted and reported exactly as `has_thumbnail` is.
+    bool has_rendition = false;
+
     /// When the *recipient* of this message last saved this attachment -- us, on an incoming one,
     /// and the other party on one we sent.  The same fact from either end, so it does not have to
     /// be read differently depending on `Message::outgoing`.

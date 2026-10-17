@@ -1,4 +1,5 @@
 #include "client_schema_before_006.hpp"
+#include "client_schema_before_009.hpp"
 #include "common.hpp"
 
 // ── ConversationId ──────────────────────────────────────────────────────────────────────────────
@@ -226,4 +227,63 @@ TEST_CASE("Client: upgrading for AUTOINCREMENT keeps every row and reference", "
     REQUIRE(messages.size() == 2);
     CHECK(messages.front().body == "after");
     CHECK(messages.front().id > file_msg);
+}
+
+TEST_CASE("Client: upgrading moves thumbnails into attachment_derived", "[client][schema]") {
+    TempClient c{TempClient::unopened};
+    auto db = [](core::Core& core, auto&& f) {
+        return TestHelper::on_loop(core, [&] {
+            auto conn = core.database().conn();
+            return f(conn);
+        });
+    };
+
+    {
+        auto old = open_client_schema_before(
+                c.path, "009_attachment_derived", client_schema_before_009);
+        REQUIRE(TestHelper::migration_applied(old, "client:008_auto_download_pending"));
+        REQUIRE_FALSE(TestHelper::migration_applied(old, "client:009_attachment_derived"));
+        db(old, [&](sqlite::Connection& conn) {
+            // One with a thumbnail counted in its size, one refused, one with neither.
+            conn.prepared_exec(
+                    "INSERT INTO attachment_cache (name, size, last_used, thumbnail, "
+                    "thumbnail_failed)"
+                    " VALUES ('a', 110, 1, 10, NULL), ('b', 50, 2, NULL, 2), ('c', 70, 3, NULL, "
+                    "NULL)");
+            return 0;
+        });
+    }
+
+    c.reopen();
+    REQUIRE(TestHelper::migration_applied(c->core, "client:009_attachment_derived"));
+
+    using row = std::tuple<std::string, int64_t, std::optional<int64_t>, std::optional<int64_t>>;
+    auto rows = db(c->core, [&](sqlite::Connection& conn) {
+        std::vector<row> out;
+        for (auto [name, size, dsize, failed] : conn.prepared_results<
+                                                std::string,
+                                                int64_t,
+                                                std::optional<int64_t>,
+                                                std::optional<int64_t>>(R"(
+            SELECT c.name, c.size, d.size, d.failed FROM attachment_cache c
+                LEFT JOIN attachment_derived d ON d.entry = c.id AND d.kind = 1
+            ORDER BY c.name)"))
+            out.emplace_back(name, size, dsize, failed);
+        return out;
+    });
+    CHECK(rows == std::vector<row>{
+                          {"a", 100, 10, std::nullopt},
+                          {"b", 50, std::nullopt, 2},
+                          {"c", 70, std::nullopt, std::nullopt}});
+
+    // The columns are gone, and the total still counts both files.
+    auto columns = db(c->core, [&](sqlite::Connection& conn) {
+        std::vector<std::string> names;
+        for (auto name : conn.prepared_results<std::string>(
+                     "SELECT name FROM pragma_table_info('attachment_cache')"))
+            names.push_back(name);
+        return names;
+    });
+    CHECK(columns == std::vector<std::string>{"id", "name", "size", "last_used"});
+    CHECK(c->attachment_cache_size(await) == 230);
 }

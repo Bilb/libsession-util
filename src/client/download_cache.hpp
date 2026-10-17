@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
@@ -131,14 +132,35 @@ class Writer {
 /// what is *not* referenced, and a download that has not finished is not referenced yet.
 inline constexpr std::string_view PARTIAL_SUFFIX = ".part";
 
-/// What a cached attachment's thumbnail is called: its file's name with this appended, beside it.
-/// A sweep reads a name with this suffix as belonging to the entry named by the rest.
-inline constexpr std::string_view THUMBNAIL_SUFFIX = ".thumb";
+/// The images made from a cached attachment, as `attachment_derived.kind` stores them.
+enum class Derived : int { thumbnail = 1, rendition = 2 };
+
+/// What a derived image is called: its file's name with the kind's suffix appended, beside it.  A
+/// sweep reads a name with one of these suffixes as belonging to the entry named by the rest.
+struct DerivedKind {
+    Derived kind;
+    std::string_view suffix;
+};
+inline constexpr std::array DERIVED_KINDS{
+        DerivedKind{Derived::thumbnail, ".thumb"}, DerivedKind{Derived::rendition, ".view"}};
+
+inline constexpr std::string_view THUMBNAIL_SUFFIX = DERIVED_KINDS[0].suffix;
+
+inline std::string_view derived_suffix(Derived kind) {
+    for (const auto& k : DERIVED_KINDS)
+        if (k.kind == kind)
+            return k.suffix;
+    return {};
+}
+
+inline std::string derived_name(std::string_view name, Derived kind) {
+    std::string out{name};
+    out += derived_suffix(kind);
+    return out;
+}
 
 inline std::string thumbnail_name(std::string_view name) {
-    std::string thumb{name};
-    thumb += THUMBNAIL_SUFFIX;
-    return thumb;
+    return derived_name(name, Derived::thumbnail);
 }
 
 /// The names of the finished files in `dir/kind`, in no particular order.
