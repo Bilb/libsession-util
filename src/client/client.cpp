@@ -5673,6 +5673,12 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
     auto [idx, stored, flags, content_type] = *next;
     if (taken_name(stored) && _cache_dir.empty()) {
         // Not missing, only unreachable this run: a later one that sets the directory can retry.
+        log::warning(
+                cat,
+                "Attachment {} of message {} is not sent: no cache directory holds {}",
+                idx,
+                client_id,
+                stored);
         if (on_upload)
             on_upload(
                     static_cast<size_t>(idx),
@@ -5685,9 +5691,6 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
     }
     auto path = utf8_string(_attachment_file(stored));
     const bool original = (flags & ATTACHMENT_FLAG_ORIGINAL_FILE) != 0;
-    const bool declared_image =
-            content_type &&
-            string_iequal(image::mime_essence(*content_type).substr(0, 6), "image/");
 
     // Checked here rather than only at send_message, because that check is on the other side of
     // however long the message sat waiting: a file present when it was attached can be gone by the
@@ -5698,7 +5701,7 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
                 index = static_cast<size_t>(idx),
                 path = std::move(path),
                 original,
-                declared_image,
+                content_type = std::move(content_type),
                 on_upload = std::move(on_upload)]() mutable {
         std::optional<int64_t> size;
         std::error_code ec;
@@ -5711,7 +5714,7 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
               path = std::move(path),
               size,
               original,
-              declared_image,
+              content_type = std::move(content_type),
               on_upload = std::move(on_upload)]() mutable {
             // TODO: remove a video's metadata (MP4/MOV location) before sending; it goes out as
             // picked.
@@ -5719,7 +5722,12 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
                 return _upload_one(
                         client_id, index, std::move(path), size, nullptr, std::move(on_upload));
             _convert_outgoing(
-                    client_id, index, std::move(path), *size, declared_image, std::move(on_upload));
+                    client_id,
+                    index,
+                    std::move(path),
+                    *size,
+                    std::move(content_type),
+                    std::move(on_upload));
         });
     });
 }
@@ -5729,7 +5737,7 @@ void Client::_convert_outgoing(
         size_t index,
         std::string path,
         int64_t file_size,
-        bool declared_image,
+        std::optional<std::string> content_type,
         Conversation::upload_progress on_upload) {
     enum class Outcome { as_is, original, converted, too_large, unreadable };
     struct Converted {
@@ -5744,16 +5752,16 @@ void Client::_convert_outgoing(
         bool undecodable = false;
     };
 
-    // The limit the upload itself is held to; without a network the upload fails regardless.
-    auto net = core.network();
-    const size_t max_size = net ? net->file_server_config.max_file_size : 10'000'000;
+    const uint64_t max_encrypted_size = _attachment_max_encrypted_size();
 
-    auto convert = [path, file_size, declared_image, max_size, client_id, index] {
+    auto convert = [path, file_size, content_type, max_encrypted_size, client_id, index] {
         Converted out;
         try {
             // Held whole when it could be sent as it is, so that what is sent is what was looked
             // at; a larger one can only go out re-encoded, read from its path.
-            const bool fits = static_cast<uint64_t>(file_size) <= max_size;
+            const bool fits = static_cast<uint64_t>(file_size) <= max_encrypted_size &&
+                              attachment::encrypted_size(static_cast<size_t>(file_size)) <=
+                                      max_encrypted_size;
             if (fits)
                 out.body = read_file(path, file_size);
             auto source = out.body ? image::Source{std::span<const std::byte>{*out.body}}
@@ -5762,29 +5770,22 @@ void Client::_convert_outgoing(
                 out = Converted{.outcome = Outcome::too_large};
                 return out;
             };
-            auto info = image::probe(source);
-            if (!info) {
-                // A picture whose header is damaged: never sent as it is.
-                if (image::recognized(source))
+            switch (image::send_plan(source, content_type, max_encrypted_size)) {
+                case image::SendPlan::unreadable:
+                case image::SendPlan::missing:
                     throw std::runtime_error{"its header cannot be read"};
-                if (!fits)
-                    return refuse();
-                // Not a picture libvips knows; one that says it is a picture is shown as a file.
-                out.outcome = declared_image ? Outcome::original : Outcome::as_is;
-                return out;
-            }
-            switch (image::sendable_verdict(*info)) {
-                case image::SendableVerdict::cannot_decode:
-                    if (!fits)
-                        return refuse();
-                    out.outcome = Outcome::original;
-                    return out;
-                case image::SendableVerdict::too_large:
+                case image::SendPlan::too_large_for_server: return refuse();
+                case image::SendPlan::too_large_to_decode:
                     out = Converted{.outcome = Outcome::too_large, .undecodable = true};
                     return out;
-                case image::SendableVerdict::encode: break;
+                case image::SendPlan::original_cannot_decode:
+                case image::SendPlan::original_animated_png:
+                    out.outcome = Outcome::original;
+                    return out;
+                case image::SendPlan::as_is: return out;
+                case image::SendPlan::reencoded: break;
             }
-            auto sendable = image::sendable(source, max_size);
+            auto sendable = image::sendable(source, max_encrypted_size);
             if (!sendable)
                 return refuse();
             out.outcome = Outcome::converted;
@@ -5798,8 +5799,9 @@ void Client::_convert_outgoing(
             } catch (const std::exception&) {
             }
         } catch (const std::exception& e) {
-            // Never sent as it is: a picture that failed to re-encode would carry everything.
-            log::warning(
+            // Never sent as it is: a picture that failed to re-encode would carry everything.  The
+            // detail at debug only, since it can name the user's file.
+            log::debug(
                     cat,
                     "Attachment {} of message {} could not be read for sending: {}",
                     index,
@@ -5811,21 +5813,33 @@ void Client::_convert_outgoing(
     };
 
     auto finish = [this, client_id, index, path, file_size, on_upload](Converted c) mutable {
-        auto fail = [&](std::string_view code, std::string message, bool permanent) {
+        // `reason` is what is logged, and never names the file; `message` is the caller's.
+        auto fail = [&](std::string_view code,
+                        std::string_view reason,
+                        std::string message,
+                        bool permanent) {
+            log::warning(
+                    cat,
+                    "Attachment {} of message {} is not sent ({}): {}",
+                    index,
+                    client_id,
+                    code,
+                    reason);
             if (on_upload)
                 on_upload(index, 0, 0, unexpected{Error{code, std::move(message)}});
             _fail_attachment_send(client_id, permanent);
         };
         switch (c.outcome) {
-            case Outcome::too_large:
-                return fail(
-                        err::attachment_too_large,
-                        c.undecodable ? "the picture is too large to decode"
-                                      : "the file does not fit the file server's limit",
-                        /*permanent=*/true);
+            case Outcome::too_large: {
+                std::string_view reason = c.undecodable
+                                                ? "the picture is too large to decode"
+                                                : "the file does not fit the file server's limit";
+                return fail(err::attachment_too_large, reason, std::string{reason}, true);
+            }
             case Outcome::unreadable:
                 return fail(
                         err::attachment_unreadable,
+                        "it could not be read",
                         "{} could not be read for sending"_format(path),
                         /*permanent=*/false);
             case Outcome::original:
@@ -5877,6 +5891,11 @@ void Client::_convert_outgoing(
     });
     // Not sent unconverted: a picture going out as it is would carry everything it holds.
     if (!posted) {
+        log::warning(
+                cat,
+                "Attachment {} of message {} is not sent: the client is shutting down",
+                index,
+                client_id);
         if (on_upload)
             on_upload(
                     index,
@@ -5885,6 +5904,59 @@ void Client::_convert_outgoing(
                     unexpected{Error{err::upload_failed, "the client is shutting down"}});
         _fail_attachment_send(client_id);
     }
+}
+
+uint64_t Client::_attachment_max_encrypted_size() {
+    // Without a network the upload fails regardless.
+    auto net = core.network();
+    return net ? net->file_server_config.max_file_size : 10'000'000;
+}
+
+static image::SendPlan send_plan_of(
+        const std::filesystem::path& path,
+        const std::optional<std::string>& content_type,
+        uint64_t max_encrypted_size) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec) || ec)
+        return image::SendPlan::missing;
+    try {
+        image::Source source{path};
+        return image::send_plan(
+                source,
+                content_type ? *content_type : infer_content_type(path),
+                max_encrypted_size);
+    } catch (const std::exception&) {
+        return image::SendPlan::unreadable;
+    }
+}
+
+void Client::attachment_send_plan(
+        std::filesystem::path path,
+        std::optional<std::string> content_type,
+        result_function<image::SendPlan> cb) {
+    call([this,
+          path = std::move(path),
+          content_type = std::move(content_type),
+          cb = std::move(cb)]() mutable {
+        _post_disk([this,
+                    path = std::move(path),
+                    content_type = std::move(content_type),
+                    max_encrypted_size = _attachment_max_encrypted_size(),
+                    cb = std::move(cb)]() mutable {
+            auto plan = send_plan_of(path, content_type, max_encrypted_size);
+            call([this, plan, cb = std::move(cb)]() mutable {
+                _report(cb, Expected<image::SendPlan>{plan});
+            });
+        });
+    });
+}
+
+image::SendPlan Client::attachment_send_plan(
+        const std::filesystem::path& path,
+        const std::optional<std::string>& content_type,
+        await_t) {
+    return send_plan_of(
+            path, content_type, call_get([this] { return _attachment_max_encrypted_size(); }));
 }
 
 void Client::_drop_taken_file(int64_t client_id, size_t index) {
@@ -5911,10 +5983,10 @@ void Client::_upload_one(
     if (!file_size) {
         log::warning(
                 cat,
-                "Attachment {} of message {} is gone ({}); the message cannot be sent",
+                "Attachment {} of message {} is gone; the message cannot be sent",
                 index,
-                client_id,
-                path);
+                client_id);
+        log::debug(cat, "Attachment {} of message {} was {}", index, client_id, path);
         if (on_upload)
             on_upload(
                     index,

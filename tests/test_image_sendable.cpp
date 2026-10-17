@@ -226,6 +226,32 @@ TEST_CASE(
     CHECK_THROWS_AS(image::sendable(source, 10'000'000), std::runtime_error);
 }
 
+TEST_CASE("Sendable: send_plan says what a send does from the header", "[image][sendable]") {
+    auto plan = [](const bytes& file, std::optional<std::string_view> type, uint64_t max = 10'000) {
+        image::Source source{std::span<const std::byte>{file}};
+        return image::send_plan(source, type, max);
+    };
+    auto photo = save(draw(40, 30, [](int, int) { return RED; }).get(), ".jpg");
+    bytes text(500, std::byte{'t'});
+    CHECK(plan(photo, "image/jpeg") == image::SendPlan::reencoded);
+    // Re-encoding is what shrinks a picture, so its own size is no reason to refuse it.
+    CHECK(plan(photo, std::nullopt, 10) == image::SendPlan::reencoded);
+    CHECK(plan(text, "text/plain") == image::SendPlan::as_is);
+    CHECK(plan(text, std::nullopt) == image::SendPlan::as_is);
+    CHECK(plan(text, " Image/TIFF; x=y") == image::SendPlan::original_cannot_decode);
+    CHECK(plan(text, "image/tiff", 10) == image::SendPlan::too_large_for_server);
+    auto apng = animated_png(save(draw(40, 30, [](int, int) { return RED; }).get(), ".png"));
+    CHECK(plan(apng, "image/png", 1'000'000) == image::SendPlan::original_animated_png);
+    CHECK(plan(apng, "image/png", 10) == image::SendPlan::too_large_for_server);
+    // The limit is on the encrypted file.
+    bytes edge(9'956'278, std::byte{'t'});
+    CHECK(plan(edge, std::nullopt, 10'000'000) == image::SendPlan::as_is);
+    edge.push_back(std::byte{'t'});
+    CHECK(plan(edge, std::nullopt, 10'000'000) == image::SendPlan::too_large_for_server);
+    bytes cut{photo.begin(), photo.begin() + 20};
+    CHECK(plan(cut, "image/jpeg") == image::SendPlan::unreadable);
+}
+
 TEST_CASE(
         "Sendable: a 45 MP progressive photo is re-encoded and has a thumbnail",
         "[image][sendable][thumbnail]") {

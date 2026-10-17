@@ -58,4 +58,13 @@ constexpr bool is_displayable_image(std::string_view content_type) {
     });
 }
 
+/// API: image/declares_image
+///
+/// Whether `content_type` says its file is a picture of any kind (`image/...`), displayable or not:
+/// one that turns out not to be a picture libvips reads is sent as its original file rather than
+/// as an ordinary one.
+constexpr bool declares_image(std::string_view content_type) {
+    return string_iequal(mime_essence(content_type).substr(0, 6), "image/");
+}
+
 }  // namespace session::image
