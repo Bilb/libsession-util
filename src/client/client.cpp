@@ -20,6 +20,7 @@
 #include <session/config/local.hpp>
 #include <session/config/user_groups.hpp>
 #include <session/config/user_profile.hpp>
+#include <session/file.hpp>
 #include <session/format.hpp>
 #include <session/hash.hpp>
 #include <session/image/content_types.hpp>
@@ -623,17 +624,17 @@ void Client::_require_readable(const std::vector<OutgoingAttachment>& attachment
     for (const auto& a : attachments) {
         std::error_code ec;
         if (!std::filesystem::is_regular_file(a.path, ec) || ec)
-            throw std::invalid_argument{
-                    "send_message: attachment {} is not a readable file"_format(a.path.string())};
+            throw std::invalid_argument{"send_message: attachment {} is not a readable file"_format(
+                    utf8_string(a.path))};
         if (std::filesystem::file_size(a.path, ec) == 0 || ec)
             throw std::invalid_argument{
-                    "send_message: attachment {} is empty"_format(a.path.string())};
+                    "send_message: attachment {} is empty"_format(utf8_string(a.path))};
         // Thrown rather than dropped, unlike the incoming side: this is our own caller's value, so
         // the mistake is reported where it was made -- the same reason the checks above throw.
         if (a.thumbhash && a.thumbhash->size() > MAX_THUMBHASH_SIZE)
             throw std::invalid_argument{
                     "send_message: attachment {} has a thumbhash longer than {} bytes"_format(
-                            a.path.string(), MAX_THUMBHASH_SIZE)};
+                            utf8_string(a.path), MAX_THUMBHASH_SIZE)};
     }
 }
 
@@ -665,6 +666,253 @@ void Client::_require_sendable(
         throw std::invalid_argument{
                 "{}: reply_to message {} does not exist in this conversation"_format(
                         op, *msg.reply_to)};
+}
+
+class Client::TakenFiles {
+  public:
+    explicit TakenFiles(Client& client) : _client{client} {}
+    TakenFiles(const TakenFiles&) = delete;
+    TakenFiles& operator=(const TakenFiles&) = delete;
+
+    ~TakenFiles() {
+        if (!_stored)
+            for (const auto& [from, to] : _files) {
+                std::error_code ec;
+                std::filesystem::remove(to, ec);
+            }
+        _release();
+    }
+
+    // Claimed before the file exists, so that a sweep which lists it already knows to keep it.
+    void claim(std::filesystem::path from, std::filesystem::path to) {
+        {
+            std::lock_guard lock{_client._taking_mutex};
+            _client._taking.insert(utf8_string(to.filename()));
+        }
+        _files.emplace_back(std::move(from), std::move(to));
+    }
+
+    // The caller's files go only now, so that a send refused or failed before this leaves them.
+    void stored() {
+        // First: the message names the copies now, so nothing below may cost it them.
+        _stored = true;
+        _release();
+        for (const auto& [from, to] : _files) {
+            try {
+                std::error_code ec;
+                if (!std::filesystem::remove(from, ec) && ec)
+                    log::warning(
+                            cat,
+                            "send_message: could not remove {} once taken: {}",
+                            utf8_string(from),
+                            ec.message());
+            } catch (...) {
+            }
+        }
+    }
+
+  private:
+    void _release() {
+        if (_released)
+            return;
+        _released = true;
+        std::lock_guard lock{_client._taking_mutex};
+        for (const auto& [from, to] : _files)
+            _client._taking.erase(utf8_string(to.filename()));
+    }
+
+    Client& _client;
+    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> _files;
+    bool _stored = false, _released = false;
+};
+
+std::filesystem::path Client::_outgoing_dir() const {
+    return _cache_dir.empty() ? std::filesystem::path{} : _cache_dir / cache::OUTGOING_DIR;
+}
+
+// The content type to advertise for a file whose sender did not name one.
+//
+// Deliberately shallow: this is a display hint a recipient uses to pick a viewer, not something
+// any decision depends on, and a platform that has a real UTI database (as every GUI client does)
+// should pass `OutgoingAttachment::content_type` rather than rely on this.  Everything unrecognised
+// is application/octet-stream, which is what Session's other clients also fall back to.
+static std::string infer_content_type(const std::filesystem::path& path) {
+    static const std::unordered_map<std::string_view, std::string_view> types{
+            {"jpg", "image/jpeg"},
+            {"jpeg", "image/jpeg"},
+            {"png", "image/png"},
+            {"gif", "image/gif"},
+            {"webp", "image/webp"},
+            {"heic", "image/heic"},
+            {"bmp", "image/bmp"},
+            {"tiff", "image/tiff"},
+            {"svg", "image/svg+xml"},
+            {"mp4", "video/mp4"},
+            {"mov", "video/quicktime"},
+            {"webm", "video/webm"},
+            {"mkv", "video/x-matroska"},
+            {"avi", "video/x-msvideo"},
+            {"mp3", "audio/mpeg"},
+            {"m4a", "audio/mp4"},
+            {"aac", "audio/aac"},
+            {"ogg", "audio/ogg"},
+            {"opus", "audio/opus"},
+            {"flac", "audio/flac"},
+            {"wav", "audio/wav"},
+            {"pdf", "application/pdf"},
+            {"txt", "text/plain"},
+            {"md", "text/markdown"},
+            {"csv", "text/csv"},
+            {"html", "text/html"},
+            {"json", "application/json"},
+            {"xml", "application/xml"},
+            {"zip", "application/zip"},
+            {"gz", "application/gzip"},
+            {"bz2", "application/x-bzip2"},
+            {"xz", "application/x-xz"},
+            {"7z", "application/x-7z-compressed"},
+            {"tar", "application/x-tar"},
+    };
+
+    auto ext = utf8_string(path.extension());
+    if (ext.starts_with('.'))
+        ext.erase(0, 1);
+    for (auto& ch : ext)
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+
+    if (auto found = types.find(ext); found != types.end())
+        return std::string{found->second};
+    return "application/octet-stream";
+}
+
+// A taken file is recorded as `outgoing/<name>`, relative to the cache directory, since that
+// directory's absolute path can change between runs (an iOS app container moves on update).
+static std::optional<std::string_view> taken_name(std::string_view stored) {
+    auto dir = cache::OUTGOING_DIR;
+    if (stored.size() <= dir.size() + 1 || !stored.starts_with(dir) || stored[dir.size()] != '/')
+        return std::nullopt;
+    auto name = stored.substr(dir.size() + 1);
+    if (name.find('/') != std::string_view::npos)
+        return std::nullopt;
+    return name;
+}
+
+// Longer is dropped: it only names the file for a human, and a long one can overflow a filename.
+static constexpr size_t MAX_TAKEN_EXTENSION = 16;
+
+static std::string taken_path(std::string_view name) {
+    return "{}/{}"_format(cache::OUTGOING_DIR, name);
+}
+
+std::filesystem::path Client::_attachment_file(const std::string& stored) const {
+    if (taken_name(stored) && !_cache_dir.empty())
+        return _cache_dir / utf8_path(stored);
+    return utf8_path(stored);
+}
+
+std::shared_ptr<Client::TakenFiles> Client::_take_files(OutgoingMessage& msg) {
+    if (std::ranges::none_of(msg.attachments, &OutgoingAttachment::take_file))
+        return nullptr;
+    auto dir = _outgoing_dir();
+    if (dir.empty())
+        throw std::invalid_argument{"send_message: take_file needs a cache directory"};
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec)
+        throw std::invalid_argument{
+                "send_message: cannot create {}: {}"_format(utf8_string(dir), ec.message())};
+
+    // Refused rather than followed: taking the target would delete a file the caller never named,
+    // and taking the link would leave the file behind and the copy dangling.
+    for (const auto& a : msg.attachments)
+        if (a.take_file && std::filesystem::is_symlink(a.path, ec))
+            throw std::invalid_argument{
+                    "send_message: attachment {} is a symbolic link, which take_file refuses"_format(
+                            utf8_string(a.path))};
+
+    auto taken = std::make_shared<TakenFiles>(*this);
+    for (auto& a : msg.attachments) {
+        if (!a.take_file)
+            continue;
+        if (!a.content_type)
+            a.content_type = infer_content_type(a.path);
+        // A fresh name, keeping a plausible extension for whoever looks in the directory.
+        auto ext = utf8_string(a.path.extension());
+        auto name = random::random_base32(26) + (ext.size() <= MAX_TAKEN_EXTENSION ? ext : "");
+        auto to = dir / utf8_path(name);
+        taken->claim(a.path, to);
+        // Linked rather than renamed so that the caller's file stays until the message is stored;
+        // copied where a link cannot be made, such as across filesystems.
+        std::filesystem::create_hard_link(a.path, to, ec);
+        if (ec) {
+            ec.clear();
+            std::filesystem::copy_file(a.path, to, ec);
+        }
+        if (ec)
+            throw std::invalid_argument{"send_message: attachment {} cannot be taken: {}"_format(
+                    utf8_string(a.path), ec.message())};
+        // Checked on our own copy too, which nothing else writes: the caller's path can change
+        // between the check above and the link.
+        if (std::filesystem::is_symlink(to, ec))
+            throw std::invalid_argument{
+                    "send_message: attachment {} is a symbolic link, which take_file refuses"_format(
+                            utf8_string(a.path))};
+        if (!a.filename)
+            a.filename = utf8_string(a.path.filename());
+        a.path = taken_path(name);
+    }
+    return taken;
+}
+
+void Client::_sweep_outgoing() {
+    auto dir = _outgoing_dir();
+    if (dir.empty())
+        return;
+
+    // Ordered as `_sweep_cache` is: a name the listing saw was claimed in `_taking` before its file
+    // existed, and leaves `_taking` on Core's loop only once its row is there.
+    _post_disk([this, root = _cache_dir, dir] {
+        auto names = cache::list(root, cache::OUTGOING_DIR);
+        if (names.empty())
+            return;
+        call([this, dir, names = std::move(names)]() mutable {
+            std::unordered_set<std::string> needed;
+            try {
+                auto c = core.database().conn();
+                // Batched to stay well inside SQLite's limit on bound parameters.
+                constexpr size_t batch = 500;
+                for (size_t at = 0; at < names.size(); at += batch) {
+                    auto n = std::min(batch, names.size() - at);
+                    auto st = c.prepared_st(R"(
+                SELECT a.path FROM message_attachments a JOIN messages m ON m.id = a.message
+                WHERE a.path IN ({}) AND a.url IS NULL AND m.send_state IS NOT {}
+            )"_format(sqlite::placeholders(n), static_cast<int>(SendState::unsendable)));
+                    for (size_t i = 0; i < n; i++)
+                        st->bind(static_cast<int>(i + 1), taken_path(names[at + i]));
+                    for (auto path : sqlite::IterableStatementWrapper<std::string>{std::move(st)})
+                        if (auto name = taken_name(path))
+                            needed.emplace(*name);
+                }
+            } catch (const std::exception& e) {
+                log::warning(cat, "Outgoing file sweep failed: {}", e.what());
+                return;
+            }
+            {
+                std::lock_guard lock{_taking_mutex};
+                needed.insert(_taking.begin(), _taking.end());
+            }
+            std::erase_if(names, [&](const std::string& name) { return needed.contains(name); });
+            if (names.empty())
+                return;
+            _post_disk([dir, names = std::move(names)] {
+                for (const auto& name : names) {
+                    std::error_code ec;
+                    std::filesystem::remove(dir / utf8_path(name), ec);
+                }
+                log::debug(cat, "Removed {} outgoing file(s) no message needs", names.size());
+            });
+        });
+    });
 }
 
 void Client::_require_dm(std::string_view op, const ConversationId& id) {
@@ -745,6 +993,7 @@ bool Client::delete_message(int64_t message_id, await_t) {
 void Client::set_cache_dir(std::filesystem::path dir) {
     _cache_dir = std::move(dir);
     _sweep_cache();
+    _sweep_outgoing();
     call([this] { _reload_auto_downloads(); });
 }
 
@@ -1347,6 +1596,28 @@ void Client::_attachment_data(
         result_function<std::vector<std::byte>> cb,
         std::function<void()> ended) {
 
+    // Ours to serve until it is uploaded, as the caller's own file would have been.
+    if (auto file = [&] {
+            auto c = core.database().conn();
+            return _taken_unsent(c, message_id, index);
+        }())
+        return _read_taken_file(
+                std::move(*file),
+                false,
+                [this, message_id, index, cb = std::move(cb), ended = std::move(ended)](
+                        auto bytes) {
+                    if (bytes)
+                        _report(cb, Expected<std::vector<std::byte>>{std::move(*bytes)});
+                    else
+                        _report(cb,
+                                Expected<std::vector<std::byte>>{unexpected{Error{
+                                        err::download_failed,
+                                        "Attachment {} of message {} has not been uploaded and "
+                                        "its file is gone"_format(index, message_id)}}});
+                    if (ended)
+                        ended();
+                });
+
     auto remote = _remote_file(message_id, index);
     // An auto-download exists to fill the cache, and has already been held to its own limit.
     bool caching = automatic || _caches_requested(remote.size);
@@ -1465,6 +1736,69 @@ void Client::_read_cache_file(
     });
 }
 
+namespace {
+
+    // Up to `size` bytes of `path`, or with `exact` exactly that many and then its end, so that a
+    // file changed while it is read is not taken for the one that was looked at.
+    std::shared_ptr<const std::vector<std::byte>> read_file(
+            const std::string& path, int64_t size, bool exact) {
+        std::vector<std::byte> bytes(static_cast<size_t>(size));
+        std::ifstream in;
+        in.exceptions(std::ios::badbit);
+        in.open(utf8_path(path), std::ios::binary);
+        if (!in.is_open())
+            throw std::runtime_error{"{} cannot be opened"_format(path)};
+        in.read(reinterpret_cast<char*>(bytes.data()), size);
+        // Taken before `peek`, which resets it.
+        const auto got = in.gcount();
+        if (exact && (got != size || in.peek() != std::ifstream::traits_type::eof()))
+            throw std::runtime_error{"{} changed while it was read"_format(path)};
+        bytes.resize(static_cast<size_t>(got));
+        return std::make_shared<const std::vector<std::byte>>(std::move(bytes));
+    }
+
+}  // namespace
+
+std::optional<std::filesystem::path> Client::_taken_unsent(
+        sqlite::Connection& c, int64_t message_id, size_t index) {
+    if (_cache_dir.empty())
+        return std::nullopt;
+    auto path = c.prepared_maybe_get<std::string>(
+            R"(
+        SELECT a.path FROM message_attachments a JOIN messages m ON m.id = a.message
+        WHERE a.message = ? AND a.idx = ? AND a.url IS NULL AND a.path IS NOT NULL
+          AND m.outgoing AND m.send_state IS NOT ?
+    )",
+            message_id,
+            static_cast<int64_t>(index),
+            static_cast<int>(SendState::unsendable));
+    if (!path || !taken_name(*path))
+        return std::nullopt;
+    return _attachment_file(*path);
+}
+
+void Client::_read_taken_file(
+        std::filesystem::path file,
+        bool wait,
+        std::function<void(std::optional<std::vector<std::byte>>)> then) {
+    auto read = [file = std::move(file)]() -> std::optional<std::vector<std::byte>> {
+        std::error_code ec;
+        auto size = std::filesystem::file_size(file, ec);
+        if (ec)
+            return std::nullopt;
+        try {
+            return *read_file(utf8_string(file), static_cast<int64_t>(size), true);
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    };
+    if (wait)
+        return then(read());
+    _post_disk([this, read = std::move(read), then = std::move(then)]() mutable {
+        call([then = std::move(then), bytes = read()]() mutable { then(std::move(bytes)); });
+    });
+}
+
 void Client::_attachment_data_cached(
         int64_t message_id, size_t index, bytes_answer done, bool wait) {
     auto c = core.database().conn();
@@ -1474,6 +1808,16 @@ void Client::_attachment_data_cached(
             static_cast<int64_t>(index));
     if (!url)
         throw_missing_attachment(c, message_id, index);
+    if (!*url)
+        if (auto file = _taken_unsent(c, message_id, index))
+            return _read_taken_file(
+                    std::move(*file),
+                    wait,
+                    [message_id, index, done = std::move(done)](auto bytes) {
+                        if (bytes)
+                            return done(std::move(*bytes));
+                        done(unexpected{not_cached(message_id, index).err()});
+                    });
     auto entry = *url && !_cache_dir.empty() ? _cached_entry(c, **url) : std::nullopt;
     if (!entry)
         throw not_cached(message_id, index);
@@ -2095,6 +2439,11 @@ void Client::_cancel(uint64_t token, std::string_view why) {
     });
 }
 
+void Client::_attachments_deleted() {
+    _withdraw_orphaned_requests();
+    _sweep_outgoing();
+}
+
 void Client::_withdraw_orphaned_requests() {
     if (_in_flight.empty() && _saves.empty())
         return;
@@ -2169,12 +2518,14 @@ void Client::send_message(
         Conversation::upload_progress on_upload,
         result_function<int64_t> cb) {
     _require_sendable("send_message", id, msg);
+    auto taken = _take_files(msg);
 
-    _async(
-            [this, id, msg = std::move(msg), on_upload = std::move(on_upload)] {
-                return _send_message(id, msg, on_upload);
-            },
-            std::move(cb));
+    _async([this,
+            id,
+            msg = std::move(msg),
+            on_upload = std::move(on_upload),
+            taken = std::move(taken)] { return _send_message(id, msg, on_upload, taken); },
+           std::move(cb));
 }
 
 void Client::send_message(
@@ -2228,7 +2579,8 @@ int64_t Client::send_message(
         Conversation::upload_progress on_upload,
         await_t) {
     _require_sendable("send_message", id, msg);
-    return call_get([&] { return _send_message(id, msg, std::move(on_upload)); });
+    auto taken = _take_files(msg);
+    return call_get([&] { return _send_message(id, msg, std::move(on_upload), std::move(taken)); });
 }
 
 void Client::conversation(
@@ -2285,9 +2637,9 @@ uint64_t Client::save_attachment(
     // Checked on the calling thread so a caller's own mistake surfaces at the call site, where they
     // still have a stack to make sense of it.
     if (std::filesystem::is_directory(dest))
-        throw std::invalid_argument{"save_attachment: {} is a directory"_format(dest.string())};
+        throw std::invalid_argument{"save_attachment: {} is a directory"_format(utf8_string(dest))};
     if (auto dir = dest.parent_path(); !dir.empty() && !std::filesystem::is_directory(dir))
-        throw std::invalid_argument{"save_attachment: {} does not exist"_format(dir.string())};
+        throw std::invalid_argument{"save_attachment: {} does not exist"_format(utf8_string(dir))};
 
     // Not _async: what that reports is the *start* of the transfer, and the answer a caller wants
     // is whether the file arrived, which is minutes away.  So the callback is carried down to the
@@ -3035,7 +3387,7 @@ void Client::_clear_messages(const ConversationId& id) {
     _set_delete_before(id, now);
 
     if (emptied) {
-        _withdraw_orphaned_requests();
+        _attachments_deleted();
         _emit_history_replaced(id);
         _touch(id);
     }
@@ -3070,7 +3422,7 @@ void Client::_delete_conversation(const ConversationId& id, bool keep_messages) 
     _sync_conversation(id);
 
     if (emptied) {
-        _withdraw_orphaned_requests();
+        _attachments_deleted();
         _emit_history_replaced(id);
     }
     if (hidden)
@@ -3093,8 +3445,9 @@ void Client::_delete_contact(const ConversationId& id) {
         c.prepared_exec("DELETE FROM contacts WHERE account = ?", *account);
 
         // Messages, their raw content and their attachments follow the conversation by cascade;
-        // the files those attachments name belong to the user and are not unlinked.  The account
-        // row stays -- see _reconcile_contacts, which deletes the same way for the same reasons.
+        // the files those attachments name belong to the user and are not unlinked, but for those
+        // a send took, which `_attachments_deleted` collects.  The account row stays -- see
+        // _reconcile_contacts, which deletes the same way for the same reasons.
         removed = c.prepared_exec("DELETE FROM conversations WHERE dm = ?", *account) > 0;
         tx.commit();
     }
@@ -3104,7 +3457,7 @@ void Client::_delete_contact(const ConversationId& id) {
     _sync_contact(id);
 
     if (removed) {
-        _withdraw_orphaned_requests();
+        _attachments_deleted();
         _emit_conversation_removed(id);
         _emit_lists_replaced();
     }
@@ -3139,7 +3492,7 @@ bool Client::_delete_message(int64_t message_id, Deletion how_far) {
 
         // The rows describing the attachments, not the files they name.  Those belong to the user
         // in both directions -- a file they chose to send, or a place they asked a download to be
-        // put -- and nothing here has ever unlinked one.
+        // put -- except one a send took, which `_attachments_deleted` collects.
         c.prepared_exec("DELETE FROM message_attachments WHERE message = ?", message_id);
 
         // There is nothing left to read, so it stops being unread.  Recomputed rather than
@@ -3159,7 +3512,7 @@ bool Client::_delete_message(int64_t message_id, Deletion how_far) {
         tx.commit();
     }
 
-    _withdraw_orphaned_requests();
+    _attachments_deleted();
 
     if (convo) {
         // Updated rather than removed: the row is still there, and a client that draws a gap where
@@ -3979,13 +4332,8 @@ WHERE id = ?1
             c.prepared_exec("DELETE FROM contacts WHERE account = ?", account);
 
             // Messages, their raw content and their attachments go with the conversation, by
-            // cascade.  The files those attachments name are the user's -- theirs to attach, or
-            // theirs to have saved -- so nothing is unlinked.
-            //
-            // That stops being the whole story once attachments are cached: a cached file *is*
-            // ours, and cascade will take the row naming it without any of our code running,
-            // leaving the file on disk with nothing left pointing at it.  Whatever adds that cache
-            // has to collect the paths here, before this delete, rather than trusting the cascade.
+            // cascade.  The files a user's paths name are theirs and are not unlinked; those a send
+            // took are ours, and `_attachments_deleted` collects them after the cascade.
             if (c.prepared_exec("DELETE FROM conversations WHERE dm = ?", account) > 0)
                 removed.push_back(id);
         }
@@ -3994,7 +4342,7 @@ WHERE id = ?1
     }
 
     if (!cleared.empty() || !removed.empty())
-        _withdraw_orphaned_requests();
+        _attachments_deleted();
 
     for (const auto& id : added)
         _emit_conversation_added(id);
@@ -4354,7 +4702,7 @@ WHERE id = ?1 AND (exp_mode, exp_timer) IS NOT (?2, ?3)
     }
 
     if (history_changed)
-        _withdraw_orphaned_requests();
+        _attachments_deleted();
 
     if (created)
         _emit_conversation_added(me);
@@ -4440,7 +4788,8 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
                       WHERE d.entry = c.id AND d.kind = {} AND d.size IS NOT NULL),
                c.width, c.height, c.frames,
                coalesce((SELECT d.failed FROM attachment_derived d
-                         WHERE d.entry = c.id AND d.kind = {}), 0) = {}
+                         WHERE d.entry = c.id AND d.kind = {}), 0) = {},
+               a.path
         FROM message_attachments a LEFT JOIN attachment_cache c ON c.id = a.cached
         WHERE a.message IN ({}) ORDER BY a.message, a.idx
     )"_format(static_cast<int>(cache::Derived::thumbnail),
@@ -4471,7 +4820,8 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
                  picture_width,
                  picture_height,
                  frames,
-                 rendition_refused] :
+                 rendition_refused,
+                 path] :
          sqlite::IterableStatementWrapper<
                  int64_t,
                  int64_t,
@@ -4493,14 +4843,22 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
                  std::optional<int64_t>,
                  std::optional<int64_t>,
                  std::optional<int64_t>,
-                 int>{std::move(st)}) {
+                 int,
+                 std::optional<std::string>>{std::move(st)}) {
         auto found = by_id.find(message);
         if (found == by_id.end())
             continue;
 
         // Without a url, an incoming attachment is one its sender gave no way to fetch, which no
-        // attempt will change; an outgoing one has simply not been uploaded yet.
+        // attempt will change; an outgoing one has simply not been uploaded yet, and is here if it
+        // was taken, until its message turns unsendable.
+        // A stat per taken row still to upload, which are few, so that a lost one is not offered.
+        std::error_code ec;
+        bool taken = path && taken_name(*path) && !_cache_dir.empty() &&
+                     found->second->send_state != SendState::unsendable &&
+                     std::filesystem::exists(_attachment_file(*path), ec);
         auto status = url                     ? _attachment_availability(*url, cached, unavailable)
+                    : taken                   ? CacheStatus{AttachmentAvailability::cached}
                     : found->second->outgoing ? CacheStatus{}
                                               : CacheStatus{AttachmentAvailability::unreadable};
         found->second->attachments.push_back(Attachment{
@@ -5087,65 +5445,11 @@ void Client::_dispatch_sends(
 
 // -- Attachments ------------------------------------------------------------------------------
 
-// The content type to advertise for a file whose sender did not name one.
-//
-// Deliberately shallow: this is a display hint a recipient uses to pick a viewer, not something
-// any decision depends on, and a platform that has a real UTI database (as every GUI client does)
-// should pass `OutgoingAttachment::content_type` rather than rely on this.  Everything unrecognised
-// is application/octet-stream, which is what Session's other clients also fall back to.
-static std::string infer_content_type(const std::filesystem::path& path) {
-    static const std::unordered_map<std::string_view, std::string_view> types{
-            {"jpg", "image/jpeg"},
-            {"jpeg", "image/jpeg"},
-            {"png", "image/png"},
-            {"gif", "image/gif"},
-            {"webp", "image/webp"},
-            {"heic", "image/heic"},
-            {"bmp", "image/bmp"},
-            {"tiff", "image/tiff"},
-            {"svg", "image/svg+xml"},
-            {"mp4", "video/mp4"},
-            {"mov", "video/quicktime"},
-            {"webm", "video/webm"},
-            {"mkv", "video/x-matroska"},
-            {"avi", "video/x-msvideo"},
-            {"mp3", "audio/mpeg"},
-            {"m4a", "audio/mp4"},
-            {"aac", "audio/aac"},
-            {"ogg", "audio/ogg"},
-            {"opus", "audio/opus"},
-            {"flac", "audio/flac"},
-            {"wav", "audio/wav"},
-            {"pdf", "application/pdf"},
-            {"txt", "text/plain"},
-            {"md", "text/markdown"},
-            {"csv", "text/csv"},
-            {"html", "text/html"},
-            {"json", "application/json"},
-            {"xml", "application/xml"},
-            {"zip", "application/zip"},
-            {"gz", "application/gzip"},
-            {"bz2", "application/x-bzip2"},
-            {"xz", "application/x-xz"},
-            {"7z", "application/x-7z-compressed"},
-            {"tar", "application/x-tar"},
-    };
-
-    auto ext = path.extension().string();
-    if (ext.starts_with('.'))
-        ext.erase(0, 1);
-    for (auto& ch : ext)
-        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-
-    if (auto found = types.find(ext); found != types.end())
-        return std::string{found->second};
-    return "application/octet-stream";
-}
-
 int64_t Client::_send_message(
         const ConversationId& id,
         const OutgoingMessage& msg,
-        Conversation::upload_progress on_upload) {
+        Conversation::upload_progress on_upload,
+        std::shared_ptr<TakenFiles> taken) {
     const auto& attachments = msg.attachments;
     if (attachments.empty())
         return _send_message(id, msg);
@@ -5218,9 +5522,11 @@ int64_t Client::_send_message(
             )",
                     client_id,
                     static_cast<int64_t>(i),
-                    a.path.string(),
+                    // Absolute, so that a relative one cannot be mistaken for a taken file.
+                    a.take_file ? utf8_string(a.path)
+                                : utf8_string(std::filesystem::absolute(a.path)),
                     a.content_type ? *a.content_type : infer_content_type(a.path),
-                    a.filename ? a.filename : std::optional{a.path.filename().string()},
+                    a.filename ? a.filename : std::optional{utf8_string(a.path.filename())},
                     (a.voice_message ? ATTACHMENT_FLAG_VOICE_MESSAGE : 0) |
                             (a.original_file ? ATTACHMENT_FLAG_ORIGINAL_FILE : 0),
                     a.width ? std::optional<int64_t>{*a.width} : std::nullopt,
@@ -5232,6 +5538,8 @@ int64_t Client::_send_message(
         approved = approve_recipient(c, id, *this);
         tx.commit();
     }
+    if (taken)
+        taken->stored();
 
     if (approved) {
         _sync_contact(id);
@@ -5257,7 +5565,7 @@ int64_t Client::_send_message(
 void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress on_upload) {
     struct Wanted {
         int64_t idx;
-        std::string path;
+        std::filesystem::path path;
         bool needs_size, needs_placeholder;
     };
     std::vector<Wanted> wanted;
@@ -5274,7 +5582,7 @@ void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress o
         )"_format(DISPLAYABLE_IMAGE_SQL),
                      client_id))
             if (!(w && h) || !thumbhash)
-                wanted.push_back({idx, std::move(path), !(w && h), !thumbhash});
+                wanted.push_back({idx, _attachment_file(path), !(w && h), !thumbhash});
     }
     if (wanted.empty())
         return _upload_next(client_id, std::move(on_upload));
@@ -5294,7 +5602,7 @@ void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress o
         for (auto& want : wanted) {
             Derived d{want.idx};
             try {
-                image::Source source{std::filesystem::path{want.path}};
+                image::Source source{want.path};
                 // The picture's own size: what a placeholder needs is its shape, and a re-encode
                 // replaces it with the size sent.
                 if (want.needs_size)
@@ -5364,7 +5672,20 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
     if (!next)
         return _finish_attachment_send(client_id);
 
-    auto [idx, path, flags, content_type] = *next;
+    auto [idx, stored, flags, content_type] = *next;
+    if (taken_name(stored) && _cache_dir.empty()) {
+        // Not missing, only unreachable this run: a later one that sets the directory can retry.
+        if (on_upload)
+            on_upload(
+                    static_cast<size_t>(idx),
+                    0,
+                    0,
+                    unexpected{
+                            Error{err::attachment_unreadable,
+                                  "no cache directory holds {}"_format(stored)}});
+        return _fail_attachment_send(client_id);
+    }
+    auto path = utf8_string(_attachment_file(stored));
     const bool original = (flags & ATTACHMENT_FLAG_ORIGINAL_FILE) != 0;
     const bool declared_image = content_type && content_type->starts_with("image/");
 
@@ -5381,8 +5702,8 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
                 on_upload = std::move(on_upload)]() mutable {
         std::optional<int64_t> size;
         std::error_code ec;
-        auto found = std::filesystem::file_size(path, ec);
-        if (!ec && std::filesystem::is_regular_file(path, ec) && !ec)
+        auto found = std::filesystem::file_size(utf8_path(path), ec);
+        if (!ec && std::filesystem::is_regular_file(utf8_path(path), ec) && !ec)
             size = static_cast<int64_t>(found);
         call([this,
               client_id,
@@ -5404,25 +5725,6 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
 }
 
 namespace {
-
-    // Up to `size` bytes of `path`, or with `exact` exactly that many and then its end, so that a
-    // file changed while it is read is not taken for the one that was looked at.
-    std::shared_ptr<const std::vector<std::byte>> read_file(
-            const std::string& path, int64_t size, bool exact) {
-        std::vector<std::byte> bytes(static_cast<size_t>(size));
-        std::ifstream in;
-        in.exceptions(std::ios::badbit);
-        in.open(path, std::ios::binary);
-        if (!in.is_open())
-            throw std::runtime_error{"{} cannot be opened"_format(path)};
-        in.read(reinterpret_cast<char*>(bytes.data()), size);
-        // Taken before `peek`, which resets it.
-        const auto got = in.gcount();
-        if (exact && (got != size || in.peek() != std::ifstream::traits_type::eof()))
-            throw std::runtime_error{"{} changed while it was read"_format(path)};
-        bytes.resize(static_cast<size_t>(got));
-        return std::make_shared<const std::vector<std::byte>>(std::move(bytes));
-    }
 
     // An APNG: libvips reads only its first frame, so re-encoding it would send a still.  Its
     // animation chunk comes before the image data, so the head of the file is enough.
@@ -5483,7 +5785,7 @@ void Client::_convert_outgoing(
             if (fits)
                 out.body = read_file(path, file_size, true);
             auto source = out.body ? image::Source{std::span<const std::byte>{*out.body}}
-                                   : image::Source{std::filesystem::path{path}};
+                                   : image::Source{utf8_path(path)};
             auto refuse = [&] {
                 out = Converted{.outcome = Outcome::too_large};
                 return out;
@@ -5576,8 +5878,7 @@ void Client::_convert_outgoing(
                         "SELECT filename FROM message_attachments WHERE message = ?1 AND idx = ?2",
                         client_id,
                         static_cast<int64_t>(index));
-                std::filesystem::path renamed{
-                        name && *name ? **name : std::filesystem::path{path}.filename().string()};
+                auto renamed = name && *name ? utf8_path(**name) : utf8_path(path).filename();
                 renamed.replace_extension(c.content_type == "image/webp" ? ".webp" : ".jpg");
                 conn.prepared_exec(
                         R"(
@@ -5589,7 +5890,7 @@ void Client::_convert_outgoing(
                         client_id,
                         static_cast<int64_t>(index),
                         c.content_type,
-                        renamed.string(),
+                        utf8_string(renamed),
                         static_cast<int64_t>(c.width),
                         static_cast<int64_t>(c.height),
                         c.thumbhash);
@@ -5618,6 +5919,20 @@ void Client::_convert_outgoing(
                     unexpected{Error{err::upload_failed, "the client is shutting down"}});
         _fail_attachment_send(client_id);
     }
+}
+
+void Client::_drop_taken_file(int64_t client_id, size_t index) {
+    auto path = core.database().conn().prepared_maybe_get<std::string>(
+            "SELECT path FROM message_attachments WHERE message = ?1 AND idx = ?2",
+            client_id,
+            static_cast<int64_t>(index));
+    if (!path || !taken_name(*path) || _cache_dir.empty())
+        return;
+    // Posted after the cache copy, which may read the file: the disk loop runs them in order.
+    _post_disk([file = _attachment_file(*path)] {
+        std::error_code ec;
+        std::filesystem::remove(file, ec);
+    });
 }
 
 void Client::_upload_one(
@@ -5661,7 +5976,7 @@ void Client::_upload_one(
     }
 
     network::FileUploadRequest req;
-    req.file = path;
+    req.file = utf8_path(path);
     req.data = body;
     req.domain = attachment::Domain::ATTACHMENT;
     // The limit this guards is the one onion requests impose, and an attachment goes to the file
@@ -5739,6 +6054,7 @@ void Client::_upload_one(
                 // before the message is announced as sent, so a display reacting to that already
                 // sees the file as here rather than being told a moment later.
                 _cache_outgoing_attachment(client_id, index, url, body);
+                _drop_taken_file(client_id, index);
 
                 log::debug(
                         cat,
@@ -5873,14 +6189,15 @@ static std::filesystem::path open_partial(std::ofstream& out, const std::filesys
             return p;
         out.clear();
     }
-    throw std::runtime_error{"Cannot write a scratch file beside {}"_format(dest.string())};
+    throw std::runtime_error{"Cannot write a scratch file beside {}"_format(utf8_string(dest))};
 }
 
 // `name (1).pdf`, not `name.pdf (1)`: only the first still opens on a double-click, and it is what
 // browsers and both desktop file managers produce.
 static std::filesystem::path numbered(const std::filesystem::path& dest, int n) {
     auto out = dest;
-    out.replace_filename("{} ({}){}"_format(dest.stem().string(), n, dest.extension().string()));
+    out.replace_filename(utf8_path(
+            "{} ({}){}"_format(utf8_string(dest.stem()), n, utf8_string(dest.extension()))));
     return out;
 }
 
@@ -5904,7 +6221,7 @@ static std::filesystem::path final_path(const std::filesystem::path& dest, bool 
         if (!std::filesystem::exists(p, ec))
             return p;
     }
-    throw std::runtime_error{"Cannot find a free name beside {}"_format(dest.string())};
+    throw std::runtime_error{"Cannot find a free name beside {}"_format(utf8_string(dest))};
 }
 
 Client::transfer_progress Client::_attachment_progress(
@@ -6337,7 +6654,8 @@ void Client::_cache_outgoing_attachment(
                 url,
                 size,
                 body = std::move(body),
-                source = std::filesystem::path{*stored},
+                source = _attachment_file(*stored),
+                taken = taken_name(*stored).has_value(),
                 file = _cache_path(cache::ATTACHMENT_DIR, url),
                 key = _cache_encryption_key()] {
         // The length has to still match what was uploaded.  A url names one particular encrypted
@@ -6352,7 +6670,7 @@ void Client::_cache_outgoing_attachment(
                     "Not caching attachment of message {}: {} is no longer the file that was "
                     "uploaded",
                     client_id,
-                    source.string());
+                    utf8_string(source));
             return;
         }
 
@@ -6372,7 +6690,7 @@ void Client::_cache_outgoing_attachment(
                         static_cast<std::streamsize>(chunk.size()));
                 auto got = static_cast<size_t>(in.gcount());
                 if (got == 0)
-                    throw std::runtime_error{"{} ended early"_format(source.string())};
+                    throw std::runtime_error{"{} ended early"_format(utf8_string(source))};
                 w.write(std::span{chunk}.first(got));
                 copied += static_cast<int64_t>(got);
             }
@@ -6385,8 +6703,9 @@ void Client::_cache_outgoing_attachment(
             return;
         }
 
-        // The local file stands in for the cached copy only when it is what was uploaded.
-        auto plain = body ? std::nullopt : std::optional{source};
+        // The local file stands in for the cached copy only when it is what was uploaded, and is
+        // not a taken file, which is removed right behind this.
+        auto plain = body || taken ? std::nullopt : std::optional{source};
         call([this, url, file, on_disk, plain] { _record_cached(url, file, on_disk, plain); });
     });
 }
@@ -6882,9 +7201,14 @@ void Client::_save_attachment(
         bool notify_sender,
         bool replace) {
 
+    auto taken = [&] {
+        auto c = core.database().conn();
+        return _taken_unsent(c, message_id, index);
+    }();
     auto s = std::make_shared<Save>();
     s->token = token;
-    s->remote = _remote_file(message_id, index);
+    if (!taken)
+        s->remote = _remote_file(message_id, index);
     s->message_id = message_id;
     s->index = index;
     s->dest = std::move(dest);
@@ -6893,6 +7217,9 @@ void Client::_save_attachment(
     s->cb = std::move(cb);
     s->report = _attachment_progress(message_id, index, token, std::move(on_progress));
     _saves.emplace(token, s);
+
+    if (taken)
+        return _save_from_taken(std::move(s), std::move(*taken));
 
     // Served from the cache when it is there.  Indistinguishable to everyone else: the file lands
     // where it was asked to, and the sender is still told we saved it, because being able to skip
@@ -6977,6 +7304,36 @@ void Client::_save_from_cache(
     });
 }
 
+void Client::_save_from_taken(std::shared_ptr<Save> s, std::filesystem::path file) {
+    _post_disk([this, s = std::move(s), file = std::move(file)]() mutable {
+        if (s->settled)
+            return;
+        std::optional<Error> error;
+        try {
+            std::ifstream in;
+            in.exceptions(std::ios::badbit);
+            in.open(file, std::ios::binary);
+            if (!in.is_open())
+                throw std::runtime_error{"its file is gone"};
+            std::vector<char> chunk(attachment::ENCRYPT_CHUNK_SIZE);
+            while (in) {
+                in.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+                if (auto got = static_cast<size_t>(in.gcount()))
+                    _save_write(*s, std::as_bytes(std::span{chunk}.first(got)));
+            }
+        } catch (const std::exception& e) {
+            error =
+                    Error{err::download_failed,
+                          "Attachment {} of message {} has not been uploaded, and {}"_format(
+                                  s->index, s->message_id, e.what())};
+        }
+        auto result = _save_finish(*s, std::move(error));
+        call([this, s = std::move(s), result = std::move(result)]() mutable {
+            _saved(*s, std::move(result));
+        });
+    });
+}
+
 void Client::_save_bytes(std::shared_ptr<Save> s, std::vector<std::byte> bytes) {
     _post_disk([this, s = std::move(s), bytes = std::move(bytes)]() mutable {
         if (s->settled)
@@ -6999,7 +7356,7 @@ void Client::_save_write(Save& s, std::span<const std::byte> data) {
                 reinterpret_cast<const char*>(data.data()),
                 static_cast<std::streamsize>(data.size()));
         if (!s.out)
-            throw std::runtime_error{"writing {} failed"_format(s.partial.string())};
+            throw std::runtime_error{"writing {} failed"_format(utf8_string(s.partial))};
     } catch (const std::exception& e) {
         // Given up on here, not the transfer: whatever else wants these bytes still gets them.
         s.failed = Error{err::save_failed, e.what()};
@@ -7021,7 +7378,7 @@ Expected<std::filesystem::path> Client::_save_finish(Save& s, std::optional<Erro
             s.partial = open_partial(s.out, s.dest);
         s.out.close();
         if (!s.out)
-            throw std::runtime_error{"writing {} failed"_format(s.partial.string())};
+            throw std::runtime_error{"writing {} failed"_format(utf8_string(s.partial))};
 
         // Only now does it get a name a user would recognise -- and only now can it be known
         // whether the one they asked for is still free, which is why the choice is here rather
@@ -7411,6 +7768,9 @@ void Client::_fail_attachment_send(int64_t client_id, bool permanent) {
     }
 
     _emit_message(false, client_id);
+    // Nothing can retry an unsendable message, so a file it took is no longer needed.
+    if (permanent)
+        _sweep_outgoing();
 }
 
 // -- Core event handling ----------------------------------------------------------------------
