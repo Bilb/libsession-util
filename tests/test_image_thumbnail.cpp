@@ -11,6 +11,7 @@
 #include <functional>
 #include <session/attachments.hpp>
 #include <session/image/probe.hpp>
+#include <session/image/thumbhash.hpp>
 #include <session/image/thumbnail.hpp>
 #include <session/image/vips.hpp>
 #include <session/random.hpp>
@@ -348,4 +349,30 @@ TEST_CASE(
     REQUIRE(info);
     CHECK(info->bits_per_sample == 16);
     CHECK_FALSE(thumb(image_fixtures::avif10_3700x3700, 64));
+}
+
+TEST_CASE("thumbhash::of_picture hashes a scaled-down, upright picture", "[image][thumbhash]") {
+    auto photo = draw(640, 480, [](int x, int) { return x < 320 ? RED : BLUE; });
+    vips_image_set_int(photo.get(), "orientation", 6);
+    auto jpeg = save(photo.get(), ".jpg");
+    image::Source src{jpeg};
+
+    auto hash = image::thumbhash::of_picture(src);
+    REQUIRE(hash);
+    CHECK(hash->size() <= image::thumbhash::max_hash_size);
+    REQUIRE(image::thumbhash::valid(*hash));
+
+    // Upright: a quarter turn makes the picture taller than wide, and puts red on top.
+    CHECK(image::thumbhash::component_aspect_ratio(*hash) < 1.0);
+    auto img = image::thumbhash::decode(*hash, 24, 32);
+    auto px = [&](int x, int y) {
+        auto* p = reinterpret_cast<const uint8_t*>(img.rgba.data()) + (size_t(y) * 24 + x) * 4;
+        return rgba{p[0], p[1], p[2], 255};
+    };
+    CHECK(near(px(12, 4), RED, 80));
+    CHECK(near(px(12, 28), BLUE, 80));
+
+    std::vector<std::byte> pdf{std::byte{'%'}, std::byte{'P'}, std::byte{'D'}, std::byte{'F'}};
+    image::Source bad{pdf};
+    CHECK_FALSE(image::thumbhash::of_picture(bad));
 }

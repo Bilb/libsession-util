@@ -21,7 +21,9 @@
 #include <session/format.hpp>
 #include <session/hash.hpp>
 #include <session/image/content_types.hpp>
+#include <session/image/probe.hpp>
 #include <session/image/rendition.hpp>
+#include <session/image/thumbhash.hpp>
 #include <session/image/thumbnail.hpp>
 #include <session/network/backends/session_file_server.hpp>
 #include <session/network/session_network.hpp>
@@ -5205,8 +5207,99 @@ int64_t Client::_send_message(
             id.to_string(),
             attachments.size());
 
-    _upload_next(client_id, std::move(on_upload));
+    _derive_outgoing(client_id, std::move(on_upload));
     return client_id;
+}
+
+void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress on_upload) {
+    struct Wanted {
+        int64_t idx;
+        std::string path;
+        bool needs_size, needs_placeholder;
+    };
+    std::vector<Wanted> wanted;
+    {
+        auto c = core.database().conn();
+        for (auto&& [idx, path, w, h, thumbhash] :
+             c.prepared_results<int64_t, std::string, int, int, int>(
+                     R"(
+            SELECT idx, path, width IS NOT NULL, height IS NOT NULL, thumbhash IS NOT NULL
+            FROM message_attachments
+            WHERE message = ?1 AND url IS NULL AND path IS NOT NULL
+              AND content_type IS NOT NULL AND {}
+            ORDER BY idx
+        )"_format(DISPLAYABLE_IMAGE_SQL),
+                     client_id))
+            if (!(w && h) || !thumbhash)
+                wanted.push_back({idx, std::move(path), !(w && h), !thumbhash});
+    }
+    if (wanted.empty())
+        return _upload_next(client_id, std::move(on_upload));
+
+    struct Derived {
+        int64_t idx;
+        std::optional<std::pair<uint32_t, uint32_t>> size;
+        std::optional<std::vector<std::byte>> placeholder;
+    };
+    // Behind whatever the derive loop is making, as a thumbnail would be: a burst of sends cannot
+    // starve the tiles on screen.  A file that cannot be read or decoded is sent as it is.
+    bool posted = _post_derive([this,
+                                client_id,
+                                wanted = std::move(wanted),
+                                on_upload = std::move(on_upload)]() mutable {
+        std::vector<Derived> derived;
+        for (auto& want : wanted) {
+            Derived d{want.idx};
+            try {
+                image::Source source{std::filesystem::path{want.path}};
+                if (want.needs_size)
+                    if (auto info = image::probe(source); info && info->width && info->height)
+                        d.size = std::pair{info->width, info->height};
+                if (want.needs_placeholder)
+                    d.placeholder = image::thumbhash::of_picture(source);
+            } catch (const std::exception& e) {
+                log::debug(
+                        cat,
+                        "No placeholder for attachment {} of message {}: {}",
+                        want.idx,
+                        client_id,
+                        e.what());
+            }
+            derived.push_back(std::move(d));
+        }
+        call([this,
+              client_id,
+              derived = std::move(derived),
+              on_upload = std::move(on_upload)]() mutable {
+            bool changed = false;
+            {
+                auto c = core.database().conn();
+                for (const auto& d : derived) {
+                    if (!d.size && !d.placeholder)
+                        continue;
+                    // Only what the row still lacks: a value the caller gave stays theirs.
+                    changed |=
+                            c.prepared_exec(
+                                    R"(
+                    UPDATE message_attachments
+                    SET width = coalesce(width, ?3), height = coalesce(height, ?4),
+                        thumbhash = coalesce(thumbhash, ?5)
+                    WHERE message = ?1 AND idx = ?2 AND url IS NULL
+                )",
+                                    client_id,
+                                    d.idx,
+                                    d.size ? std::optional<int64_t>{d.size->first} : std::nullopt,
+                                    d.size ? std::optional<int64_t>{d.size->second} : std::nullopt,
+                                    d.placeholder) > 0;
+                }
+            }
+            if (changed)
+                _emit_message(false, client_id);
+            _upload_next(client_id, std::move(on_upload));
+        });
+    });
+    if (!posted)
+        _upload_next(client_id, std::move(on_upload));
 }
 
 void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_upload) {
@@ -5458,10 +5551,11 @@ bool Client::_retry_send(int64_t client_id, Conversation::upload_progress on_upl
             client_id,
             has_uploads_left ? " (attachments still to upload)" : "");
 
-    // Resumes wherever it was left: _upload_next takes the first attachment with no url, so the
-    // ones that already got up are not sent again, and a message needing none goes straight to
-    // being dispatched.
-    _upload_next(client_id, std::move(on_upload));
+    // Resumes wherever it was left, through the derive stage, which a run that ended before it
+    // could leave undone and which skips what is already there; then _upload_next takes the first
+    // attachment with no url, so the ones that already got up are not sent again, and a message
+    // needing none goes straight to being dispatched.
+    _derive_outgoing(client_id, std::move(on_upload));
     return true;
 }
 

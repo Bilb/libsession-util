@@ -36,22 +36,16 @@ struct OutgoingAttachment {
     bool voice_message = false;
 
     /// Pixel dimensions, for visual media.  Recipients use them to lay out a placeholder before
-    /// the file itself has been fetched, so supplying them avoids the layout jumping.
-    ///
-    /// TODO: these are the caller's to supply because libsession cannot read them -- deriving them
-    /// means either an image library or hand-written header parsing of untrusted files.  Worth
-    /// revisiting if libsession takes on an image dependency for other reasons (thumbnailing, say),
-    /// at which point every client stops needing its own.
+    /// the file itself has been fetched.  Supplied values are sent as given; for a picture Session
+    /// displays (`image::displayable_image_types`) that the caller left unset, libsession reads
+    /// them from the file before the upload.
     std::optional<uint32_t> width;
     std::optional<uint32_t> height;
 
     /// ThumbHash of the image, for a recipient to draw in the attachment's place until the file
     /// itself arrives.  Advisory and unvalidated: libsession carries the bytes and never looks
-    /// inside them.
-    ///
-    /// The caller's to supply for the same reason as `width`/`height` above: encoding one needs
-    /// the pixels, which means decoding and scaling the image, and that is the dependency the
-    /// comment beside those two declines to take on.
+    /// inside them.  Derived as `width`/`height` are when left unset
+    /// (`image::thumbhash::of_picture`).
     std::optional<std::vector<std::byte>> thumbhash;
 };
 
