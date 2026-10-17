@@ -497,7 +497,9 @@ class Client {
     ///
     /// Kept, evicted, counted and read as a thumbnail is: part of the file's cache entry, gone
     /// with it, and marking the file used when read.  A picture no rendition can be made of is
-    /// refused under `image::renderer_version` and not tried again until that rises.
+    /// refused under `image::renderer_version` and not tried again until that rises.  So is an
+    /// animated PNG labelled `image/png`: libvips decodes only its first frame, so the original is
+    /// what a viewer draws (`image::Info::first_frame_only`).
     ///
     /// For an attachment sent as its original file (`Attachment::original_file`) asking never
     /// queues one: it is a file to export, not a picture to open.
@@ -920,10 +922,24 @@ class Client {
     uint32_t _default_thumbnail_edge;
     uint32_t _default_rendition_edge;
 
-    // Core, built from the options that are Core's: everything but Client's own.
+    // The SQL functions Client's queries call, on every connection the database opens.
+    static void _register_sql_functions(sqlite::Connection& c);
+
+    // Core, built from the options that are Core's: everything but Client's own.  An application's
+    // own `sqlite::post_open` runs after Client's.
     template <ClientOption... Opts>
     static core::Core _make_core(
             std::filesystem::path db_path, core::callbacks cbs, Opts&&... opts) {
+        static_assert(
+                (int{std::same_as<std::remove_cvref_t<Opts>, sqlite::post_open>} + ... + 0) <= 1,
+                "At most one sqlite::post_open can be given.");
+        auto theirs = core::detail::maybe_instance<sqlite::post_open>(opts...);
+        sqlite::post_open ours{
+                [theirs = theirs ? std::move(theirs->post_open) : nullptr](sqlite::Connection& c) {
+                    _register_sql_functions(c);
+                    if (theirs)
+                        theirs(c);
+                }};
         return std::apply(
                 [&]<typename... CoreOpts>(CoreOpts&&... core_opts) {
                     return core::Core{
@@ -931,10 +947,13 @@ class Client {
                             std::move(cbs),
                             core::schema_extension{
                                     "client", schema::MIGRATIONS, schema::FULL_SCHEMA},
+                            std::move(ours),
                             std::forward<CoreOpts>(core_opts)...};
                 },
                 std::tuple_cat([]<typename T>(T&& o) {
-                    if constexpr (core::CoreOption<T>)
+                    if constexpr (
+                            core::CoreOption<T> &&
+                            !std::same_as<std::remove_cvref_t<T>, sqlite::post_open>)
                         return std::tuple<std::remove_cvref_t<T>>{std::forward<T>(o)};
                     else
                         return std::tuple<>{};

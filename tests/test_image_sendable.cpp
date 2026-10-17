@@ -194,6 +194,17 @@ TEST_CASE(
 }
 
 TEST_CASE(
+        "Sendable: an animated PNG is not re-encoded, which would send a still",
+        "[image][sendable]") {
+    auto apng = animated_png(save(draw(40, 30, [](int, int) { return RED; }).get(), ".png"));
+    image::Source source{std::span<const std::byte>{apng}};
+    auto info = image::probe(source);
+    REQUIRE(info);
+    CHECK(image::sendable_verdict(*info) == image::SendableVerdict::cannot_decode);
+    CHECK_THROWS_AS(image::sendable(source, 10'000'000), std::runtime_error);
+}
+
+TEST_CASE(
         "Sendable: a picture too large for the limit is shrunk until it fits",
         "[image][sendable]") {
     auto noise =

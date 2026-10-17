@@ -89,25 +89,6 @@ struct Sandbox {
     }
 };
 
-// A PNG made an APNG by an animation control chunk ahead of its image data.
-bytes animated_png(bytes png) {
-    bytes chunk{std::byte{0}, std::byte{0}, std::byte{0}, std::byte{8}};
-    for (char c : "acTL\0\0\0\x02\0\0\0\0"sv)
-        chunk.push_back(std::byte(c));
-    uint32_t crc = 0xFFFFFFFFu;
-    for (size_t i = 4; i < chunk.size(); i++) {
-        crc ^= uint8_t(chunk[i]);
-        for (int k = 0; k < 8; k++)
-            crc = (crc & 1) ? 0xEDB88320u ^ (crc >> 1) : crc >> 1;
-    }
-    crc ^= 0xFFFFFFFFu;
-    for (int shift : {24, 16, 8, 0})
-        chunk.push_back(std::byte(crc >> shift));
-    constexpr size_t after_ihdr = 8 + 25;
-    png.insert(png.begin() + after_ihdr, chunk.begin(), chunk.end());
-    return png;
-}
-
 // What a sent attachment should be: re-encoded, or the file as it is, flagged or not.
 enum class Sent { converted, as_is, original_file };
 
@@ -120,6 +101,7 @@ struct Case {
     Sent sent;
     uint32_t width = 0, height = 0;  // as sent, 0 for none
     bool thumbhash = false;
+    std::optional<std::string> declared = std::nullopt;  // the caller's content type, if any
 };
 
 }  // namespace
@@ -152,8 +134,13 @@ TEST_CASE(
         {"notes.pdf", bytes(300, std::byte{1}), false, "application/pdf", "notes.pdf", Sent::as_is},
         {"untouched.jpg", photo, true, "image/jpeg", "untouched.jpg", Sent::original_file, 640, 480, true},
         {"wave.png", animated_png(derived_test::picture(64, 48, ".png")), false, "image/png", "wave.png", Sent::original_file, 64, 48, true},
+        {"wave.apng", animated_png(derived_test::picture(64, 48, ".png")), false, "image/apng", "wave.apng", Sent::original_file, 0, 0, false, "image/apng"},
+        // A content type's parameters, case and spacing do not stop the placeholder being read.
+        {"kept.jpg", photo, true, " IMAGE/JPEG ; charset=binary", "kept.jpg", Sent::original_file, 640, 480, true, " IMAGE/JPEG ; charset=binary"},
         // A picture type libvips does not read: shown as a file, sent as it is.
         {"scan.tiff", bytes(64, std::byte{'I'}), false, "image/tiff", "scan.tiff", Sent::original_file},
+        // Its type inferred from the extension, so it says it is a picture, but does not read as one.
+        {"broken.avif", bytes(64, std::byte{'A'}), false, "image/avif", "broken.avif", Sent::original_file},
         {"shot.heic", bytes{heic.begin(), heic.end()}, false,
          heic_converts ? "image/jpeg" : "image/heic", heic_converts ? "shot.jpg" : "shot.heic",
          heic_converts ? Sent::converted : Sent::original_file,
@@ -164,7 +151,9 @@ TEST_CASE(
     OutgoingMessage out;
     for (auto& cs : cases)
         out.attachments.push_back(
-                {.path = s.write(cs.name, cs.file), .original_file = cs.original_file});
+                {.path = s.write(cs.name, cs.file),
+                 .content_type = cs.declared,
+                 .original_file = cs.original_file});
     auto id = s.c->send_message(ConversationId::dm(own_sid(*s.c)), std::move(out), await);
     until(s.c, [&] { return accept_stores(*s.net) == 1; });
     auto msg = s.c->message(id, await);

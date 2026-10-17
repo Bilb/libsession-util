@@ -11,9 +11,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <session/image/vips.hpp>
 #include <session/random.hpp>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "../src/image/vips_internal.hpp"
@@ -99,6 +101,40 @@ inline bool has_marker(const std::vector<std::byte>& jpeg, uint8_t marker) {
         i += 2 + ((size_t(jpeg[i + 2]) << 8) | size_t(jpeg[i + 3]));
     }
     return false;
+}
+
+// `png` with a chunk of `type` and `data` inserted at byte `at`, by default straight after IHDR.
+inline std::vector<std::byte> with_png_chunk(
+        std::vector<std::byte> png,
+        std::string_view type,
+        const std::vector<uint8_t>& data,
+        std::optional<size_t> at = std::nullopt) {
+    std::vector<std::byte> chunk;
+    auto put32 = [&](uint32_t v) {
+        for (int shift : {24, 16, 8, 0})
+            chunk.push_back(std::byte(v >> shift));
+    };
+    put32(static_cast<uint32_t>(data.size()));
+    for (char c : type)
+        chunk.push_back(std::byte(c));
+    for (auto b : data)
+        chunk.push_back(std::byte{b});
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 4; i < chunk.size(); i++) {
+        crc ^= uint8_t(chunk[i]);
+        for (int k = 0; k < 8; k++)
+            crc = (crc & 1) ? 0xEDB88320u ^ (crc >> 1) : crc >> 1;
+    }
+    put32(crc ^ 0xFFFFFFFFu);
+    constexpr size_t after_ihdr = 8 + 25;
+    png.insert(png.begin() + at.value_or(after_ihdr), chunk.begin(), chunk.end());
+    return png;
+}
+
+// `png` made an APNG of `frames` frames by an animation control chunk ahead of its image data.
+// Only the default image is really there, which is all libvips reads of an APNG anyway.
+inline std::vector<std::byte> animated_png(std::vector<std::byte> png, uint8_t frames = 2) {
+    return with_png_chunk(std::move(png), "acTL", {0, 0, 0, frames, 0, 0, 0, 0});
 }
 
 struct temp_file {

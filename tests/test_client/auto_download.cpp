@@ -189,6 +189,15 @@ TEST_CASE(
         CHECK(chat.fetching() == files{"c", "a"});
     }
 
+    SECTION("images only goes by the content type's essence") {
+        chat.arrive("e", "IMAGE/JPEG ; charset=binary");
+        chat.arrive("f", "image/apng");
+        chat.arrive("g", "image/jpeg2000");
+        CHECK(chat.counts().image_attachments.count == 3);
+        chat.fetch(AutoDownload::image_attachments);
+        CHECK(chat.fetching() == files{"e", "c", "a"});
+    }
+
     SECTION("asking later, with the setting already on, still fetches") {
         chat.set(AutoDownload::all);
         chat.fetch_existing();

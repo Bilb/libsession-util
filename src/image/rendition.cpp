@@ -18,7 +18,8 @@ bool rendition_is_original(const Info& info, uint32_t edge) {
 
 std::optional<std::vector<std::byte>> rendition(Source& source, uint32_t edge) {
     auto info = probe(source);
-    if (!info || !detail::acceptable(*info) || !info->within_pixel_limits(true))
+    if (!info || info->first_frame_only() || !detail::acceptable(*info) ||
+        !info->within_pixel_limits(true))
         return std::nullopt;
 
     edge = std::clamp(edge, min_rendition_edge, max_rendition_edge);

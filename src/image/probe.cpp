@@ -5,6 +5,7 @@
 #include <libheif/heif_tiling.h>
 #include <vips/vips.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -110,6 +111,55 @@ namespace {
         return type;
     }
 
+    // Reads exactly `size` bytes, or fails.
+    bool read_exact(VipsSource* source, void* data, size_t size) {
+        auto* out = static_cast<char*>(data);
+        while (size > 0) {
+            gint64 n = vips_source_read(source, out, size);
+            if (n <= 0)
+                return false;
+            out += n;
+            size -= static_cast<size_t>(n);
+        }
+        return true;
+    }
+
+    // The most frames an APNG is reported as having: acTL's count is unchecked, and is only ever
+    // used to say whether it is animated.
+    constexpr uint32_t MAX_APNG_FRAMES = 65'535;
+
+    // The frame count an animated PNG's acTL chunk declares, at most MAX_APNG_FRAMES, or 0 for a
+    // still PNG.  libvips ignores the chunk, which the APNG spec requires to come before the first
+    // IDAT.
+    uint32_t apng_frames(Source& src) {
+        VipsSource* vsrc = detail::source_access::vips(src);
+        if (vips_source_rewind(vsrc))
+            return 0;
+        uint32_t frames = 0;
+        unsigned char head[12];
+        // 64-bit, so a crafted length cannot wrap the position back on a 32-bit build.
+        int64_t at = 8;
+        if (read_exact(vsrc, head, 8))
+            while (read_exact(vsrc, head, 8)) {
+                uint64_t len = uint64_t(head[0]) << 24 | uint64_t(head[1]) << 16 |
+                               uint64_t(head[2]) << 8 | uint64_t(head[3]);
+                std::string_view type{reinterpret_cast<const char*>(head) + 4, 4};
+                if (type == "acTL") {
+                    if (len >= 4 && read_exact(vsrc, head, 4))
+                        frames = uint32_t(head[0]) << 24 | uint32_t(head[1]) << 16 |
+                                 uint32_t(head[2]) << 8 | uint32_t(head[3]);
+                    break;
+                }
+                if (type == "IDAT" || len > 0x7FFF'FFFF)
+                    break;
+                at += 12 + static_cast<int64_t>(len);
+                if (vips_source_seek(vsrc, at, SEEK_SET) != at)
+                    break;
+            }
+        vips_source_rewind(vsrc);
+        return std::min(frames, MAX_APNG_FRAMES);
+    }
+
 }  // namespace
 
 bool recognized(Source& source) {
@@ -165,6 +215,9 @@ std::optional<Info> probe(Source& source) {
     } else
         return std::nullopt;
 
+    uint32_t png_frames = info.format == Format::png ? apng_frames(source) : 0;
+    detail::source_access::rethrow_error(source);
+
     VipsImage* raw =
             vips_image_new_from_source(vsrc, "", "access", VIPS_ACCESS_SEQUENTIAL, nullptr);
     detail::source_access::rethrow_error(source);
@@ -177,6 +230,7 @@ std::optional<Info> probe(Source& source) {
     info.width = static_cast<uint32_t>(img->Xsize);
     info.height = static_cast<uint32_t>(vips_image_get_page_height(img.get()));
     info.frames = heif ? 1 : static_cast<uint32_t>(vips_image_get_n_pages(img.get()));
+    info.frames = std::max(info.frames, png_frames);
     info.orientation = static_cast<uint8_t>(vips_image_get_orientation(img.get()));
     if (info.orientation >= 5)
         std::swap(info.width, info.height);

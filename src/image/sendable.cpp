@@ -65,7 +65,7 @@ Reencoded detail::reencode(Source& source, const Info& info, uint32_t box, int q
 }
 
 SendableVerdict sendable_verdict(const Info& info) {
-    if (!info.decodable)
+    if (!info.decodable || info.first_frame_only())
         return SendableVerdict::cannot_decode;
     if (!detail::acceptable(info) || !info.within_pixel_limits(true))
         return SendableVerdict::too_large;

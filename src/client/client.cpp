@@ -39,6 +39,7 @@
 #include <stdexcept>
 #include <tuple>
 
+#include "content_type_sql.hpp"
 #include "download_cache.hpp"
 
 namespace session::client {
@@ -737,12 +738,14 @@ std::filesystem::path Client::_outgoing_dir() const {
 // should pass `OutgoingAttachment::content_type` rather than rely on this.  Everything unrecognised
 // is application/octet-stream, which is what Session's other clients also fall back to.
 static std::string infer_content_type(const std::filesystem::path& path) {
+    // clang-format off
     static const std::unordered_map<std::string_view, std::string_view> types{
             {"jpg", "image/jpeg"},
             {"jpeg", "image/jpeg"},
             {"png", "image/png"},
             {"gif", "image/gif"},
             {"webp", "image/webp"},
+            {"avif", "image/avif"},
             {"heic", "image/heic"},
             {"bmp", "image/bmp"},
             {"tiff", "image/tiff"},
@@ -773,6 +776,7 @@ static std::string infer_content_type(const std::filesystem::path& path) {
             {"7z", "application/x-7z-compressed"},
             {"tar", "application/x-tar"},
     };
+    // clang-format on
 
     auto ext = utf8_string(path.extension());
     if (ext.starts_with('.'))
@@ -1283,15 +1287,11 @@ namespace {
     constexpr int DEFAULT_AUTO_DL_CONCURRENCY = 4;
 }  // namespace
 
-// The SQL counterpart of image::is_displayable_image(), built from the same list so the two cannot
-// drift apart.  SQLite's lower() folds only ASCII, which is also all the C++ side folds.
-static const std::string DISPLAYABLE_IMAGE_SQL = [] {
-    std::string sql = "lower(content_type) IN (";
-    for (auto type : image::displayable_image_types)
-        sql += "'{}',"_format(type);
-    sql.back() = ')';
-    return sql;
-}();
+static const std::string DISPLAYABLE_IMAGE_SQL = displayable_image_sql("content_type");
+
+void Client::_register_sql_functions(sqlite::Connection& c) {
+    register_content_type_functions(c);
+}
 
 // A message starts out shown as a gallery when every attachment is a picture Session displays;
 // set_gallery is a reader's later word on it.
@@ -1738,10 +1738,9 @@ void Client::_read_cache_file(
 
 namespace {
 
-    // Up to `size` bytes of `path`, or with `exact` exactly that many and then its end, so that a
-    // file changed while it is read is not taken for the one that was looked at.
-    std::shared_ptr<const std::vector<std::byte>> read_file(
-            const std::string& path, int64_t size, bool exact) {
+    // Exactly `size` bytes of `path` and then its end, so that a file changed while it is read is
+    // not taken for the one that was looked at.
+    std::shared_ptr<const std::vector<std::byte>> read_file(const std::string& path, int64_t size) {
         std::vector<std::byte> bytes(static_cast<size_t>(size));
         std::ifstream in;
         in.exceptions(std::ios::badbit);
@@ -1751,9 +1750,8 @@ namespace {
         in.read(reinterpret_cast<char*>(bytes.data()), size);
         // Taken before `peek`, which resets it.
         const auto got = in.gcount();
-        if (exact && (got != size || in.peek() != std::ifstream::traits_type::eof()))
+        if (got != size || in.peek() != std::ifstream::traits_type::eof())
             throw std::runtime_error{"{} changed while it was read"_format(path)};
-        bytes.resize(static_cast<size_t>(got));
         return std::make_shared<const std::vector<std::byte>>(std::move(bytes));
     }
 
@@ -1787,7 +1785,7 @@ void Client::_read_taken_file(
         if (ec)
             return std::nullopt;
         try {
-            return *read_file(utf8_string(file), static_cast<int64_t>(size), true);
+            return *read_file(utf8_string(file), static_cast<int64_t>(size));
         } catch (const std::exception&) {
             return std::nullopt;
         }
@@ -5687,7 +5685,9 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
     }
     auto path = utf8_string(_attachment_file(stored));
     const bool original = (flags & ATTACHMENT_FLAG_ORIGINAL_FILE) != 0;
-    const bool declared_image = content_type && content_type->starts_with("image/");
+    const bool declared_image =
+            content_type &&
+            string_iequal(image::mime_essence(*content_type).substr(0, 6), "image/");
 
     // Checked here rather than only at send_message, because that check is on the other side of
     // however long the message sat waiting: a file present when it was attached can be gone by the
@@ -5724,34 +5724,6 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
     });
 }
 
-namespace {
-
-    // An APNG: libvips reads only its first frame, so re-encoding it would send a still.  Its
-    // animation chunk comes before the image data, so the head of the file is enough.
-    bool animated_png(std::span<const std::byte> b) {
-        constexpr std::string_view signature = "\x89PNG\r\n\x1a\n";
-        if (b.size() < signature.size() ||
-            std::memcmp(b.data(), signature.data(), signature.size()) != 0)
-            return false;
-        // 64-bit, so a crafted length cannot wrap the position back on a 32-bit build.
-        for (uint64_t at = signature.size(); at + 8 <= b.size();) {
-            uint64_t len = (uint64_t(b[at]) << 24) | (uint64_t(b[at + 1]) << 16) |
-                           (uint64_t(b[at + 2]) << 8) | uint64_t(b[at + 3]);
-            std::string_view type{reinterpret_cast<const char*>(b.data()) + at + 4, 4};
-            if (type == "acTL")
-                return true;
-            if (type == "IDAT" || len > 0x7FFF'FFFF)
-                return false;
-            at += 12 + len;
-        }
-        return false;
-    }
-
-    // Enough of a PNG's start to hold every chunk before its image data.
-    constexpr int64_t PNG_HEAD = 64 * 1024;
-
-}  // namespace
-
 void Client::_convert_outgoing(
         int64_t client_id,
         size_t index,
@@ -5783,7 +5755,7 @@ void Client::_convert_outgoing(
             // at; a larger one can only go out re-encoded, read from its path.
             const bool fits = static_cast<uint64_t>(file_size) <= max_size;
             if (fits)
-                out.body = read_file(path, file_size, true);
+                out.body = read_file(path, file_size);
             auto source = out.body ? image::Source{std::span<const std::byte>{*out.body}}
                                    : image::Source{utf8_path(path)};
             auto refuse = [&] {
@@ -5801,13 +5773,7 @@ void Client::_convert_outgoing(
                 out.outcome = declared_image ? Outcome::original : Outcome::as_is;
                 return out;
             }
-            auto apng = out.body ? animated_png(*out.body)
-                      : info->format == image::Format::png
-                              ? animated_png(*read_file(path, PNG_HEAD, false))
-                              : false;
-            auto verdict =
-                    apng ? image::SendableVerdict::cannot_decode : image::sendable_verdict(*info);
-            switch (verdict) {
+            switch (image::sendable_verdict(*info)) {
                 case image::SendableVerdict::cannot_decode:
                     if (!fits)
                         return refuse();

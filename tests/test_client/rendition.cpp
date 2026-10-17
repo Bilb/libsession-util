@@ -276,6 +276,26 @@ TEST_CASE("Client: which pictures get which rendition", "[client][rendition]") {
               0);
     }
 
+    SECTION("a content type's parameters, case and spacing change nothing") {
+        auto photo = picture(400, 300, ".jpg");
+        auto [jpeg, jpeg_url] = f.arrive(photo, "IMAGE/JPEG; charset=binary");
+        auto [png, png_url] = f.arrive(picture(400, 300), " image/png ; foo=bar");
+        settle(*f.c);
+        for (auto id : {jpeg, png}) {
+            CHECK(f.attachment(id).has_thumbnail);
+            CHECK(f.attachment(id).has_rendition);
+        }
+        CHECK(f.c->attachment_rendition(jpeg, 0, await) == photo);
+        CHECK(jpeg_size(f.c->attachment_rendition(png, 0, await)) == std::pair{400, 300});
+    }
+
+    SECTION("a type that only starts like one Session displays gets neither") {
+        auto [id, url] = f.arrive(picture(400, 300, ".jpg"), "image/jpeg2000");
+        settle(*f.c);
+        CHECK_FALSE(f.attachment(id).has_thumbnail);
+        CHECK_FALSE(f.attachment(id).has_rendition);
+    }
+
     SECTION("an original that cannot be read takes its entry with it") {
         auto [id, url] = f.arrive(picture(400, 300, ".jpg"), "image/jpeg");
         settle(*f.c);
