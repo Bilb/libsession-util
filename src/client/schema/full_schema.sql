@@ -188,10 +188,10 @@ CREATE TABLE messages (
 
     -- Whether this message is *shown* as a gallery rather than as a list of attachments.
     --
-    -- A decision, which is why it is stored: it is made when the message is processed -- on if the
-    -- conversation was auto-downloading then -- and the conversation's setting may have changed
-    -- since, so it cannot be recomputed later and mean the same thing.  A client may set or clear
-    -- it afterwards.
+    -- A decision, which is why it is stored: on from the start for every message stored under this
+    -- rule that can be shown that way, whatever the conversation auto-downloads, and a client may
+    -- set or clear it afterwards, which recomputing it would discard.  A message stored before the
+    -- rule keeps the decision it was stored with.
     --
     -- Whether a message *can* be shown that way is a separate question, derived and not stored:
     -- today it is "has attachments, and every one of them is an image", but that is our rule to
