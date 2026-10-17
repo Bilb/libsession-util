@@ -1184,6 +1184,118 @@ void Client::_attachment_data(
              std::move(ended)});
 }
 
+// What a request for an attachment that is not there is owed: whether it was the message or only
+// the attachment that was missing.
+[[noreturn]] static void throw_missing_attachment(
+        sqlite::Connection& c, int64_t message_id, size_t index) {
+    if (!c.prepared_get<int64_t>("SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?)", message_id))
+        throw session::error{err::message_not_found, "There is no message {}"_format(message_id)};
+    throw session::error{
+            err::attachment_not_found, "Message {} has no attachment {}"_format(message_id, index)};
+}
+
+void Client::_answer_bytes(bytes_read start, result_function<std::vector<std::byte>> cb) {
+    call([this, start = std::move(start), cb = std::move(cb)]() mutable {
+        try {
+            start([this, cb](auto answer) mutable { _report(cb, std::move(answer)); }, false);
+        } catch (const std::exception& e) {
+            _fail<std::vector<std::byte>>(cb, error_from(e));
+        }
+    });
+}
+
+std::vector<std::byte> Client::_await_bytes(bytes_read start) {
+    // Answered straight from Core's loop rather than through the dispatcher, which may be the
+    // very thread blocked here.
+    auto answer = std::make_shared<std::promise<Expected<std::vector<std::byte>>>>();
+    auto future = answer->get_future();
+    bool on_loop = _jq.inside();
+    call([start = std::move(start), answer, on_loop] {
+        try {
+            start([answer](auto r) { answer->set_value(std::move(r)); }, on_loop);
+        } catch (const std::exception& e) {
+            answer->set_value(unexpected{error_from(e)});
+        }
+    });
+    auto r = future.get();
+    if (!r)
+        throw session::error{std::move(r).error()};
+    return *std::move(r);
+}
+
+void Client::attachment_data_cached(
+        int64_t message_id, size_t index, result_function<std::vector<std::byte>> cb) {
+    _answer_bytes(
+            [this, message_id, index](bytes_answer done, bool wait) {
+                _attachment_data_cached(message_id, index, std::move(done), wait);
+            },
+            std::move(cb));
+}
+std::vector<std::byte> Client::attachment_data_cached(int64_t message_id, size_t index, await_t) {
+    return _await_bytes([this, message_id, index](bytes_answer done, bool wait) {
+        _attachment_data_cached(message_id, index, std::move(done), wait);
+    });
+}
+
+static session::error not_cached(int64_t message_id, size_t index) {
+    return session::error{
+            err::not_cached,
+            "Attachment {} of message {} is not in the cache"_format(index, message_id)};
+}
+
+void Client::_read_cache_file(
+        std::filesystem::path file,
+        bool wait,
+        std::function<void(std::optional<std::vector<std::byte>>)> then) {
+    auto read = [file = std::move(file), key = _cache_encryption_key()] {
+        return cache::read(file, key);
+    };
+    // Nothing for the disk loop to order: the caller checked the row on this loop, which is where
+    // every row is dropped, and a cache file is only ever replaced by an atomic rename.
+    if (wait)
+        return then(read());
+    _post_disk([this, read = std::move(read), then = std::move(then)]() mutable {
+        call([then = std::move(then), bytes = read()]() mutable { then(std::move(bytes)); });
+    });
+}
+
+void Client::_attachment_data_cached(
+        int64_t message_id, size_t index, bytes_answer done, bool wait) {
+    auto c = core.database().conn();
+    auto url = c.prepared_maybe_get<std::optional<std::string>>(
+            "SELECT url FROM message_attachments WHERE message = ? AND idx = ?",
+            message_id,
+            static_cast<int64_t>(index));
+    if (!url)
+        throw_missing_attachment(c, message_id, index);
+    auto entry = *url && !_cache_dir.empty() ? _cached_entry(c, **url) : std::nullopt;
+    if (!entry)
+        throw not_cached(message_id, index);
+
+    // Before the call, whose capture moves `entry` in an unspecified order with its arguments.
+    auto file = _cache_dir / cache::ATTACHMENT_DIR / entry->second;
+    _read_cache_file(
+            std::move(file),
+            wait,
+            [this, entry = std::move(*entry), message_id, index, done = std::move(done)](
+                    auto bytes) {
+                if (bytes) {
+                    _touch_cached(entry.first);
+                    return done(std::move(*bytes));
+                }
+                _drop_unreadable(entry.first, entry.second);
+                done(unexpected{not_cached(message_id, index).err()});
+            });
+}
+
+void Client::_drop_unreadable(int64_t id, const std::string& name) {
+    // Only while the entry is still there: evicted and fetched again meanwhile, the name holds a
+    // good file under a new id.
+    auto c = core.database().conn();
+    if (c.prepared_get<int64_t>("SELECT EXISTS(SELECT 1 FROM attachment_cache WHERE id = ?)", id))
+        _emit_messages_showing(c, _drop_cached(c, id, name));
+}
+
 void Client::cancel_attachment_transfer(uint64_t token) {
     call([this, token] { _cancel(token); });
 }
@@ -1280,44 +1392,39 @@ void Client::_fetch_cached(FetchTarget target, bool caching, Waiter w) {
         // entry was written with; a picture has no row, so the only way to it is to work the name
         // out again.
         std::filesystem::path file;
-        std::optional<int64_t> entry_id;
+        std::optional<std::pair<int64_t, std::string>> entry;
         if (target.dir == cache::ATTACHMENT_DIR) {
             auto c = core.database().conn();
-            if (auto entry = _cached_entry(c, target.remote.url)) {
-                entry_id = entry->first;
+            entry = _cached_entry(c, target.remote.url);
+            if (entry)
                 file = _cache_dir / target.dir / entry->second;
-            }
         } else
             file = _cache_path(target.dir, target.remote.url);
 
         // Read on the disk loop and decided back here, since what a miss goes on to do -- join a
         // transfer or start one -- is this loop's registry to touch.
         if (!file.empty()) {
-            _post_disk([this,
-                        file = std::move(file),
-                        key = _cache_encryption_key(),
-                        entry_id,
-                        target = std::move(target),
-                        caching,
-                        w = std::move(w)]() mutable {
-                auto cached = cache::read(file, key);
-                call([this,
-                      cached = std::move(cached),
-                      entry_id,
-                      target = std::move(target),
-                      caching,
-                      w = std::move(w)]() mutable {
-                    if (!cached)
-                        return _fetch_uncached(std::move(target), caching, std::move(w));
-                    // Nothing to report: there is no transfer, and a progress bar for a local read
-                    // is a flicker that means nothing.  The caller gets the bytes.
-                    if (entry_id)
-                        _touch_cached(*entry_id);
-                    _report(w.cb, Expected<std::vector<std::byte>>{std::move(*cached)});
-                    if (w.ended)
-                        w.ended();
-                });
-            });
+            _read_cache_file(
+                    std::move(file),
+                    false,
+                    [this,
+                     entry = std::move(entry),
+                     target = std::move(target),
+                     caching,
+                     w = std::move(w)](auto cached) mutable {
+                        if (!cached) {
+                            if (entry)
+                                _drop_unreadable(entry->first, entry->second);
+                            return _fetch_uncached(std::move(target), caching, std::move(w));
+                        }
+                        // Nothing to report: there is no transfer, and a progress bar for a local
+                        // read is a flicker that means nothing.  The caller gets the bytes.
+                        if (entry)
+                            _touch_cached(entry->first);
+                        _report(w.cb, Expected<std::vector<std::byte>>{std::move(*cached)});
+                        if (w.ended)
+                            w.ended();
+                    });
             return;
         }
     }
@@ -5506,10 +5613,14 @@ std::vector<int64_t> Client::_messages_cached_as(sqlite::Connection& c, int64_t 
 }
 
 void Client::_touch_cached(int64_t id) {
+    // Thumbnails are read on every scroll and share their original's entry; a touch within the
+    // interval would change nothing eviction can see, and costs a write on Core's loop per tile.
+    auto now = clock_now_ms();
     core.database().conn().prepared_exec(
-            "UPDATE attachment_cache SET last_used = ?2 WHERE id = ?1",
+            "UPDATE attachment_cache SET last_used = ?2 WHERE id = ?1 AND last_used < ?3",
             id,
-            epoch_ms(clock_now_ms()));
+            epoch_ms(now),
+            epoch_ms(now - CACHE_TOUCH_INTERVAL));
 }
 
 void Client::_save_attachment(
@@ -5594,8 +5705,16 @@ void Client::_save_from_cache(
             // Gone, or unreadable: back to where the save started, to be fetched instead.
             _save_discard(*s);
 
-        call([this, s = std::move(s), entry_id, result = std::move(result)]() mutable {
+        call([this,
+              s = std::move(s),
+              entry_id,
+              name = file.filename().string(),
+              result = std::move(result)]() mutable {
             if (!result) {
+                // Gone, or unreadable and so removed by the read: the entry indexes nothing now,
+                // whatever becomes of the save.
+                if (entry_id)
+                    _drop_unreadable(*entry_id, name);
                 // Unless it was withdrawn meanwhile, in which case the cancel on its way to the
                 // disk loop is its ending.
                 if (!s->cancelled)
