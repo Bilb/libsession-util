@@ -160,6 +160,65 @@ namespace {
         return std::min(frames, MAX_APNG_FRAMES);
     }
 
+    // What libjpeg allocates for a progressive JPEG's coefficients, from its frame header's own
+    // sampling factors: per component, its blocks padded to whole MCUs, at 128 bytes a block.
+    // nullopt if the header cannot be found or makes no sense.
+    std::optional<uint64_t> jpeg_coefficient_bytes(Source& src) {
+        VipsSource* vsrc = detail::source_access::vips(src);
+        if (vips_source_rewind(vsrc))
+            return std::nullopt;
+        std::optional<uint64_t> bytes;
+        unsigned char m[4];
+        int64_t at = 2;
+        if (read_exact(vsrc, m, 2) && m[0] == 0xFF && m[1] == 0xD8)
+            while (read_exact(vsrc, m, 4) && m[0] == 0xFF) {
+                uint8_t marker = m[1];
+                int64_t len = int64_t{m[2]} << 8 | m[3];
+                // Fill bytes before a marker.
+                if (marker == 0xFF) {
+                    at += 1;
+                    if (vips_source_seek(vsrc, at, SEEK_SET) != at)
+                        break;
+                    continue;
+                }
+                bool sof = marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 &&
+                           marker != 0xCC;
+                if (sof) {
+                    unsigned char hdr[6 + 3 * 4];
+                    if (len < 8 || !read_exact(vsrc, hdr, 6))
+                        break;
+                    uint32_t height = uint32_t{hdr[1]} << 8 | hdr[2],
+                             width = uint32_t{hdr[3]} << 8 | hdr[4], n = hdr[5];
+                    if (!width || !height || n < 1 || n > 4 || len != 8 + 3 * int64_t{n} ||
+                        !read_exact(vsrc, hdr + 6, 3 * n))
+                        break;
+                    uint32_t hmax = 1, vmax = 1;
+                    for (uint32_t i = 0; i < n; i++) {
+                        hmax = std::max<uint32_t>(hmax, hdr[6 + 3 * i + 1] >> 4);
+                        vmax = std::max<uint32_t>(vmax, hdr[6 + 3 * i + 1] & 0xF);
+                    }
+                    uint64_t total = 0;
+                    for (uint32_t i = 0; i < n; i++) {
+                        uint32_t h = hdr[6 + 3 * i + 1] >> 4, v = hdr[6 + 3 * i + 1] & 0xF;
+                        if (h < 1 || h > 4 || v < 1 || v > 4)
+                            return std::nullopt;
+                        uint64_t across = (uint64_t{width} * h + 8 * hmax - 1) / (8 * hmax),
+                                 down = (uint64_t{height} * v + 8 * vmax - 1) / (8 * vmax);
+                        total += (across + h - 1) / h * h * ((down + v - 1) / v * v) * 128;
+                    }
+                    bytes = total;
+                    break;
+                }
+                if (marker == 0xDA || marker == 0xD9 || len < 2)
+                    break;
+                at += 2 + len;
+                if (vips_source_seek(vsrc, at, SEEK_SET) != at)
+                    break;
+            }
+        vips_source_rewind(vsrc);
+        return bytes;
+    }
+
 }  // namespace
 
 bool recognized(Source& source) {
@@ -216,6 +275,7 @@ std::optional<Info> probe(Source& source) {
         return std::nullopt;
 
     uint32_t png_frames = info.format == Format::png ? apng_frames(source) : 0;
+    auto coefficients = info.format == Format::jpeg ? jpeg_coefficient_bytes(source) : std::nullopt;
     detail::source_access::rethrow_error(source);
 
     VipsImage* raw =
@@ -235,6 +295,7 @@ std::optional<Info> probe(Source& source) {
     if (info.orientation >= 5)
         std::swap(info.width, info.height);
     info.has_alpha = vips_image_hasalpha(img.get());
+    info.bands = static_cast<uint8_t>(img->Bands);
     info.bits_per_sample = static_cast<uint8_t>(8 * vips_format_sizeof_unsafe(img->BandFmt));
     int interlaced = 0;
     if (vips_image_get_typeof(img.get(), "interlaced"))
@@ -246,6 +307,13 @@ std::optional<Info> probe(Source& source) {
         case Format::heic: info.decoded_whole = !detail::platform_decodes(Format::heic); break;
         case Format::gif:
         case Format::avif: info.decoded_whole = true; break;
+    }
+    if (info.format == Format::jpeg && interlaced) {
+        // Without the frame header's factors: a JPEG's most components, all at full size, in MCUs
+        // of up to 32 pixels.
+        uint64_t padded =
+                uint64_t{(img->Xsize + 31u) / 32u * 32u} * ((img->Ysize + 31u) / 32u * 32u);
+        info.coefficient_bytes = coefficients.value_or(2 * padded * 4);
     }
     info.decodable = can_decode(info.format);
     info.size = source.size();
