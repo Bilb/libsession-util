@@ -30,17 +30,13 @@ std::vector<std::byte> ask_until_made(Fixture& f, int64_t id) {
 
 }  // namespace
 
-TEST_CASE("Client: a rendition is made when first asked for, and kept", "[client][rendition]") {
+TEST_CASE("Client: a rendition is made once a picture is cached, and kept", "[client][rendition]") {
     Fixture f;
-    auto [id, url] = f.arrive(picture(1600, 1200, ".jpg"));
-    REQUIRE(f.attachment(id).has_thumbnail);
-    CHECK_FALSE(f.attachment(id).has_rendition);
-    CHECK_FALSE(std::filesystem::exists(view_file(f, url)));
-
-    // The first ask queues it and says so; nobody waits on the decode.
     f.rec.msg_updated.clear();
-    CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
+    // A PNG, so the rendition is a copy of its own rather than the original itself.
+    auto [id, url] = f.arrive(picture(1600, 1200));
     settle(*f.c);
+    REQUIRE(f.attachment(id).has_thumbnail);
     CHECK(f.attachment(id).has_rendition);
     bool told = false;
     for (const auto& m : Recorder::messages(f.rec.msg_updated))
@@ -145,7 +141,9 @@ TEST_CASE(
     CHECK_FALSE(f.attachment(id).has_rendition);
     CHECK_FALSE(std::filesystem::exists(view_file(f, url)));
     CHECK_FALSE(std::filesystem::exists(f.thumb_file(url)));
-    CHECK(f.db_get("SELECT count(*) FROM attachment_derived WHERE kind = ?", rendition_kind) == 0);
+    // The later picture's own is all that is left.
+    settle(*f.c);
+    CHECK(f.db_get("SELECT count(*) FROM attachment_derived WHERE kind = ?", rendition_kind) == 1);
 }
 
 TEST_CASE("Client: a picture no rendition can be made of is refused once", "[client][rendition]") {
@@ -162,6 +160,9 @@ TEST_CASE("Client: a picture no rendition can be made of is refused once", "[cli
             rendition_kind,
             f.file(url).filename().string());
     CHECK(refused == image::renderer_version);
+    REQUIRE(f.attachment(bad).picture);
+    CHECK_FALSE(f.attachment(bad).picture->readable());
+    CHECK(f.attachment(bad).picture->rendition_refused);
 
     // Not tried again when asked again...
     CHECK(error_code([&] { f.c->attachment_rendition(bad, 0, await); }) == err::no_rendition);
@@ -178,9 +179,25 @@ TEST_CASE("Client: a picture no rendition can be made of is refused once", "[cli
           image::renderer_version);
 }
 
+namespace {
+
+// Removes a made rendition, rows and file, as a picture cached before renditions were made on
+// arrival would be: only an ask makes one then.
+void forget_rendition(Fixture& f, const std::string& url) {
+    settle(*f.c);
+    std::filesystem::remove(view_file(f, url));
+    TestHelper::on_loop(f.c->core, [&] {
+        f.c->core.database().conn().prepared_exec(
+                "DELETE FROM attachment_derived WHERE kind = ?", rendition_kind);
+    });
+}
+
+}  // namespace
+
 TEST_CASE("Client: asking twice for one rendition queues it once", "[client][rendition]") {
     Fixture f;
     auto [id, url] = f.arrive(picture(400, 300));
+    forget_rendition(f, url);
     TestHelper::stall_thumbnails(*f.c);
     CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
     CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
@@ -194,6 +211,7 @@ TEST_CASE("Client: asking twice for one rendition queues it once", "[client][ren
 TEST_CASE("Client: a rendition whose decode fails gets one more try", "[client][rendition]") {
     Fixture f;
     auto [id, url] = f.arrive(picture(400, 300));
+    forget_rendition(f, url);
     auto refused = [&] {
         return f.db_get(
                 "SELECT coalesce((SELECT failed FROM attachment_derived d WHERE d.entry = c.id"
@@ -218,4 +236,55 @@ TEST_CASE("Client: a rendition whose decode fails gets one more try", "[client][
     CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
     settle(*f.c);
     CHECK(refused() == image::renderer_version);
+}
+
+TEST_CASE("Client: which pictures get which rendition", "[client][rendition]") {
+    Fixture f;
+
+    SECTION("one already as a viewer draws it is its own, with no copy") {
+        auto photo = picture(400, 300, ".jpg");
+        auto [id, url] = f.arrive(photo, "image/jpeg");
+        settle(*f.c);
+        CHECK(f.attachment(id).has_rendition);
+        CHECK(f.c->attachment_rendition(id, 0, await) == photo);
+        CHECK_FALSE(std::filesystem::exists(view_file(f, url)));
+        CHECK(f.db_get("SELECT size FROM attachment_derived WHERE kind = ?", rendition_kind) == 0);
+        // Kept across a restart: the sweep looks for no file behind it.
+        f.reopen();
+        CHECK(f.attachment(id).has_rendition);
+        CHECK(f.c->attachment_rendition(id, 0, await) == photo);
+    }
+
+    SECTION("a large one is drawn at the default edge") {
+        auto [id, url] = f.arrive(picture(4000, 3000));
+        settle(*f.c);
+        CHECK(jpeg_size(f.c->attachment_rendition(id, 0, await)) == std::pair{2048, 1536});
+    }
+
+    SECTION("one sent as its original file gets a thumbnail and no rendition") {
+        auto [id, url] = f.arrive(
+                picture(400, 300),
+                "image/png",
+                true,
+                SessionProtos::AttachmentPointer::ORIGINAL_FILE);
+        settle(*f.c);
+        CHECK(f.attachment(id).has_thumbnail);
+        CHECK_FALSE(f.attachment(id).has_rendition);
+        CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
+        settle(*f.c);
+        CHECK(f.db_get("SELECT count(*) FROM attachment_derived WHERE kind = ?", rendition_kind) ==
+              0);
+    }
+
+    SECTION("an original that cannot be read takes its entry with it") {
+        auto [id, url] = f.arrive(picture(400, 300, ".jpg"), "image/jpeg");
+        settle(*f.c);
+        REQUIRE(f.attachment(id).has_rendition);
+        std::vector<std::byte> junk(3000);
+        random::fill(junk);
+        overwrite(f.file(url), junk);
+        CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
+        CHECK(f.db_get("SELECT count(*) FROM attachment_cache") == 0);
+        CHECK_FALSE(f.attachment(id).has_rendition);
+    }
 }

@@ -828,7 +828,7 @@ void Client::_reconcile_cache(
                                      R"(
             SELECT EXISTS(SELECT 1 FROM attachment_cache c
                 JOIN attachment_derived d ON d.entry = c.id
-                WHERE c.name = ? AND d.kind = ? AND d.size IS NOT NULL)
+                WHERE c.name = ? AND d.kind = ? AND d.size > 0)
         )",
                                      entry,
                                      static_cast<int>(*derived))
@@ -855,7 +855,7 @@ void Client::_reconcile_cache(
     for (auto&& [id, name, kind] : c.prepared_results<int64_t, std::string, std::optional<int>>(
                  R"(
         SELECT c.id, c.name, d.kind FROM attachment_cache c
-        LEFT JOIN attachment_derived d ON d.entry = c.id AND d.size IS NOT NULL
+        LEFT JOIN attachment_derived d ON d.entry = c.id AND d.size > 0
         ORDER BY c.id
     )")) {
         if (!listed.contains(name)) {
@@ -1236,6 +1236,8 @@ uint32_t Client::thumbnail_edge(await_t) {
     return call_get([this] { return _thumbnail_edge(); });
 }
 
+static_assert(DEFAULT_RENDITION_EDGE == image::sendable_edge);
+
 static uint32_t clamped_rendition_edge(int64_t px) {
     return static_cast<uint32_t>(
             std::clamp<int64_t>(px, image::min_rendition_edge, image::max_rendition_edge));
@@ -1572,10 +1574,10 @@ void Client::_attachment_rendition(int64_t message_id, size_t index, bytes_answe
             R"(
         SELECT c.id, c.name,
                (SELECT d.size FROM attachment_derived d WHERE d.entry = c.id AND d.kind = ?3),
-               a.content_type IS NOT NULL AND {}
+               a.content_type IS NOT NULL AND {} AND a.flags & {} = 0
         FROM message_attachments a LEFT JOIN attachment_cache c ON c.id = a.cached
         WHERE a.message = ?1 AND a.idx = ?2
-    )"_format(DISPLAYABLE_IMAGE_SQL),
+    )"_format(DISPLAYABLE_IMAGE_SQL, ATTACHMENT_FLAG_ORIGINAL_FILE),
             message_id,
             static_cast<int64_t>(index),
             static_cast<int>(kind));
@@ -1585,9 +1587,9 @@ void Client::_attachment_rendition(int64_t message_id, size_t index, bytes_answe
     if (_cache_dir.empty())
         throw no_rendition(message_id, index);
     if (!rendition) {
-        // Made only on demand, so this ask is what queues it: at the front, since somebody is
-        // looking.  Not for a file that is not here or not a picture, nor one already refused,
-        // which the pump turns away.
+        // None yet, made unasked only after a thumbnail: queued here at the front, since somebody
+        // is looking.  Not for a file that is not here or not a picture to open, nor one already
+        // refused, which the pump turns away.
         if (entry && picture) {
             _queue_derived(*entry, kind);
             _hurry_derived(*entry, kind);
@@ -1595,13 +1597,27 @@ void Client::_attachment_rendition(int64_t message_id, size_t index, bytes_answe
         throw no_rendition(message_id, index);
     }
 
+    // Size 0: the original is already what a viewer draws.
+    const bool original = *rendition == 0;
     _read_cache_file(
-            _cache_dir / cache::ATTACHMENT_DIR / cache::derived_name(*name, kind),
+            _cache_dir / cache::ATTACHMENT_DIR /
+                    (original ? *name : cache::derived_name(*name, kind)),
             wait,
-            [this, entry = *entry, message_id, index, done = std::move(done)](auto bytes) {
+            [this,
+             entry = *entry,
+             name = *name,
+             original,
+             message_id,
+             index,
+             done = std::move(done)](auto bytes) {
                 if (bytes) {
                     _touch_cached(entry);
                     return done(std::move(*bytes));
+                }
+                // The original itself is what failed to read, and the read has removed it.
+                if (original) {
+                    _drop_unreadable(entry, name);
+                    return done(unexpected{no_rendition(message_id, index).err()});
                 }
                 // Gone from under us, or unreadable and so removed by the read: made again, since
                 // the file it came from may well be fine.
@@ -4421,11 +4437,16 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
                EXISTS(SELECT 1 FROM attachment_derived d
                       WHERE d.entry = c.id AND d.kind = {} AND d.size IS NOT NULL),
                EXISTS(SELECT 1 FROM attachment_derived d
-                      WHERE d.entry = c.id AND d.kind = {} AND d.size IS NOT NULL)
+                      WHERE d.entry = c.id AND d.kind = {} AND d.size IS NOT NULL),
+               c.width, c.height, c.frames,
+               coalesce((SELECT d.failed FROM attachment_derived d
+                         WHERE d.entry = c.id AND d.kind = {}), 0) = {}
         FROM message_attachments a LEFT JOIN attachment_cache c ON c.id = a.cached
         WHERE a.message IN ({}) ORDER BY a.message, a.idx
     )"_format(static_cast<int>(cache::Derived::thumbnail),
               static_cast<int>(cache::Derived::rendition),
+              static_cast<int>(cache::Derived::rendition),
+              image::renderer_version,
               sqlite::placeholders(msgs.size())));
 
     int n = 1;
@@ -4446,7 +4467,11 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
                  cached,
                  saved_at,
                  thumbnail,
-                 rendition] :
+                 rendition,
+                 picture_width,
+                 picture_height,
+                 frames,
+                 rendition_refused] :
          sqlite::IterableStatementWrapper<
                  int64_t,
                  int64_t,
@@ -4464,6 +4489,10 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
                  std::optional<int64_t>,
                  std::optional<int64_t>,
                  int,
+                 int,
+                 std::optional<int64_t>,
+                 std::optional<int64_t>,
+                 std::optional<int64_t>,
                  int>{std::move(st)}) {
         auto found = by_id.find(message);
         if (found == by_id.end())
@@ -4494,6 +4523,14 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
                 .fetch_total = status.total,
                 .has_thumbnail = thumbnail != 0,
                 .has_rendition = rendition != 0,
+                .picture =
+                        frames ? std::optional{PictureInfo{
+                                         .width = static_cast<uint32_t>(picture_width.value_or(0)),
+                                         .height =
+                                                 static_cast<uint32_t>(picture_height.value_or(0)),
+                                         .frames = static_cast<uint32_t>(*frames),
+                                         .rendition_refused = rendition_refused != 0}}
+                               : std::nullopt,
                 .saved_at = saved_at ? std::optional{from_epoch_ms(*saved_at)} : std::nullopt});
     }
 }
@@ -6541,7 +6578,16 @@ void Client::_queue_derived(
             return p.entry == entry && p.kind == kind;
         }))
         return;
-    _derived_pending.push_back({entry, kind, std::move(plain)});
+    // A thumbnail goes ahead of every rendition waiting: a tile on screen matters more than a
+    // picture a viewer may open, and a rendition can take seconds.
+    auto at = kind == cache::Derived::thumbnail
+                    ? std::ranges::find_if(
+                              _derived_pending,
+                              [](const PendingDerived& p) {
+                                  return p.kind == cache::Derived::rendition && !p.hurried;
+                              })
+                    : _derived_pending.end();
+    _derived_pending.insert(at, {entry, kind, std::move(plain)});
     _pump_derived();
 }
 
@@ -6552,6 +6598,7 @@ void Client::_hurry_derived(int64_t entry, cache::Derived kind) {
     if (it == _derived_pending.end())
         return;
     auto pending = std::move(*it);
+    pending.hurried = true;
     _derived_pending.erase(it);
     _derived_pending.push_front(std::move(pending));
 }
@@ -6610,7 +6657,8 @@ void Client::_pump_derived() {
                                     plain = std::move(next.plain),
                                     key = _cache_encryption_key(),
                                     edge = _derived_edge(next.kind)]() mutable {
-            std::optional<std::vector<std::byte>> jpeg;
+            std::optional<std::vector<std::byte>> made;
+            std::optional<PictureFacts> facts;
             bool failed = false;
             try {
                 image::Source cached{file, key};
@@ -6620,7 +6668,17 @@ void Client::_pump_derived() {
                 std::error_code ec;
                 if (plain && std::filesystem::file_size(*plain, ec) == cached.size() && !ec)
                     local.emplace(*plain);
-                jpeg = make_derived(kind, local ? *local : cached, edge);
+                auto& source = local ? *local : cached;
+                facts.emplace();
+                auto info = image::probe(source);
+                if (info)
+                    facts = PictureFacts{info->width, info->height, info->frames};
+                // Empty: the original is already what a viewer draws, and is served instead.
+                if (kind == cache::Derived::rendition && info &&
+                    image::rendition_is_original(*info, edge))
+                    made.emplace();
+                else
+                    made = make_derived(kind, source, edge);
             } catch (const std::exception& e) {
                 failed = true;
                 log::warning(
@@ -6634,9 +6692,10 @@ void Client::_pump_derived() {
                   entry,
                   kind,
                   name = std::move(name),
-                  jpeg = std::move(jpeg),
-                  failed]() mutable {
-                _derived_made(entry, kind, std::move(name), std::move(jpeg), failed);
+                  made = std::move(made),
+                  failed,
+                  facts]() mutable {
+                _derived_made(entry, kind, std::move(name), std::move(made), failed, facts);
             });
         });
         if (!posted) {
@@ -6652,15 +6711,53 @@ void Client::_derived_made(
         int64_t entry,
         cache::Derived kind,
         std::string name,
-        std::optional<std::vector<std::byte>> jpeg,
-        bool failed) {
+        std::optional<std::vector<std::byte>> made,
+        bool failed,
+        std::optional<PictureFacts> facts) {
     _derived_attempt.reset();
     auto c = core.database().conn();
     const int k = static_cast<int>(kind);
+    if (facts) {
+        std::optional<int64_t> width, height;
+        if (facts->frames) {
+            width = facts->width;
+            height = facts->height;
+        }
+        // Every kind made from the file reads the same header, so only the first write is news.
+        if (c.prepared_exec(
+                    R"(
+            UPDATE attachment_cache SET width = ?3, height = ?4, frames = ?5
+            WHERE id = ?1 AND name = ?2
+              AND (width IS NOT ?3 OR height IS NOT ?4 OR frames IS NOT ?5)
+        )",
+                    entry,
+                    name,
+                    width,
+                    height,
+                    static_cast<int64_t>(facts->frames)) > 0) {
+            std::vector<int64_t> showing;
+            for (auto message : c.prepared_results<int64_t>(
+                         "SELECT DISTINCT message FROM message_attachments WHERE cached = ?",
+                         entry))
+                showing.push_back(message);
+            _emit_messages_showing(c, showing);
+        }
+    }
+    // A picture's rendition is queued once its thumbnail is made, behind every thumbnail waiting;
+    // not for a picture only ever sent as its original file, which nobody opens, nor one whose
+    // thumbnail was refused.
+    if (made && kind == cache::Derived::thumbnail &&
+        c.prepared_get<int64_t>(
+                "SELECT EXISTS(SELECT 1 FROM message_attachments"
+                " WHERE cached = ? AND {} AND flags & {} = 0)"_format(
+                        DISPLAYABLE_IMAGE_SQL, ATTACHMENT_FLAG_ORIGINAL_FILE),
+                entry))
+        _queue_derived(entry, cache::Derived::rendition);
+
     // An exception may not happen again.  A thumbnail is unmarked and tried again at the next
-    // start, by the pass; a rendition, which only an ask queues, keeps its strike, so the next ask
-    // is its last try rather than every open decoding it again.
-    if (jpeg || (failed && kind == cache::Derived::thumbnail))
+    // start, by the pass; a rendition keeps its strike, so the next ask is its last try rather
+    // than every open decoding it again.
+    if (made || (failed && kind == cache::Derived::thumbnail))
         _unmark_derived_attempt(entry, kind);
     else if (!failed)
         c.prepared_exec(
@@ -6670,7 +6767,7 @@ void Client::_derived_made(
                 k);
 
     // Checked here and again once it is written: an eviction can land on either side of the write.
-    bool wanted = jpeg && c.prepared_get<int64_t>(
+    bool wanted = made && c.prepared_get<int64_t>(
                                   R"(
         SELECT EXISTS(SELECT 1 FROM attachment_cache c WHERE c.id = ?1 AND c.name = ?2
             AND NOT EXISTS(SELECT 1 FROM attachment_derived d
@@ -6683,6 +6780,12 @@ void Client::_derived_made(
         _derived_running = false;
         return _pump_derived();
     }
+    // Recorded with no file of its own: size 0 says the original is the rendition.
+    if (made->empty()) {
+        _record_derived(entry, kind, name, 0);
+        _derived_running = false;
+        return _pump_derived();
+    }
 
     auto file = _cache_dir / cache::ATTACHMENT_DIR / cache::derived_name(name, kind);
     _post_disk([this,
@@ -6691,10 +6794,10 @@ void Client::_derived_made(
                 name = std::move(name),
                 file = std::move(file),
                 key = _cache_encryption_key(),
-                jpeg = std::move(*jpeg)] {
+                made = std::move(*made)] {
         std::optional<int64_t> on_disk;
         try {
-            cache::write(file, key, jpeg);
+            cache::write(file, key, made);
             on_disk = static_cast<int64_t>(std::filesystem::file_size(file));
         } catch (const std::exception& e) {
             log::warning(

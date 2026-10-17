@@ -180,6 +180,26 @@ enum class AttachmentAvailability {
     unreadable,
 };
 
+/// What a cached picture's header says, read when libsession first makes something from it.
+struct PictureInfo {
+    /// One frame's size as displayed, with the file's EXIF orientation applied: what decoding it
+    /// yields, as opposed to the sender's claim in `Attachment::width` and `height`.  Both 0 when
+    /// the file could not be read as a picture.
+    uint32_t width = 0;
+    uint32_t height = 0;
+
+    /// 1 for a still picture, more for an animation, 0 when the file could not be read as a
+    /// picture at all.
+    uint32_t frames = 0;
+
+    /// Whether `Client::attachment_rendition` has refused this picture under the current
+    /// `image::renderer_version`: no rendition will come, and the original is what there is.
+    bool rendition_refused = false;
+
+    bool readable() const { return frames > 0; }
+    bool animated() const { return frames > 1; }
+};
+
 struct Attachment {
     /// Position within the message's attachment list.  This is the index `send_message`'s upload
     /// handler reports progress against, and what `save_attachment` takes.
@@ -257,9 +277,18 @@ struct Attachment {
     bool has_thumbnail = false;
 
     /// Whether `Client::attachment_rendition` has a rendition to serve: the whole picture as a
-    /// JPEG at the rendition edge, for a viewer to draw in place of the original.  Made only when
-    /// first asked for, and otherwise kept, evicted and reported exactly as `has_thumbnail` is.
+    /// JPEG or WebP (the bytes say which) at the rendition edge, for a viewer to draw in place of
+    /// the original.  Made once the picture's thumbnail is, and otherwise kept, evicted and
+    /// reported exactly as `has_thumbnail` is.
     bool has_rendition = false;
+
+    /// What the cached file's header says, once libsession has read it, which it does when it
+    /// first makes a thumbnail or rendition from it: a little after the file arrives, reported
+    /// through `messages_updated` as `has_thumbnail` is.  Unset until then, and again once the
+    /// file leaves the cache.  What a viewer decides from: a picture is drawn from its rendition,
+    /// an animation played from it; until that is made, the original if the platform decodes it,
+    /// else the thumbnail; and one that could not be read is the platform's to decode or not.
+    std::optional<PictureInfo> picture;
 
     /// When the *recipient* of this message last saved this attachment -- us, on an incoming one,
     /// and the other party on one we sent.  The same fact from either end, so it does not have to

@@ -2539,8 +2539,13 @@ TEST_CASE(
     REQUIRE(serve_downloads(*net) == 1);
     sync(*c);
 
-    // The transfer starting and the transfer finishing, each of them once.
-    REQUIRE(r.msg_updated.size() == 2);
+    // The transfer starting, the transfer finishing, and the file's header read once it is here,
+    // each of them once.  The last comes off the derive thread, so it is waited for.
+    for (auto until = std::chrono::steady_clock::now() + 20s;
+         !TestHelper::thumbnails_idle(*c) && std::chrono::steady_clock::now() < until;)
+        std::this_thread::sleep_for(5ms);
+    sync(*c);
+    REQUIRE(r.msg_updated.size() == 3);
     for (const auto& batch : r.msg_updated) {
         // All three, across two conversations, in one call.
         REQUIRE(batch.size() == 3);

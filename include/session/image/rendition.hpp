@@ -5,6 +5,7 @@
 #include <optional>
 #include <vector>
 
+#include "probe.hpp"
 #include "source.hpp"
 
 namespace session::image {
@@ -16,25 +17,34 @@ inline constexpr uint32_t max_rendition_edge = 4096;
 
 /// Raised with any change to `rendition`, or to the decoders it uses, that could make a rendition
 /// of an image it refused before.  A caller that remembers refusals retries them once it changes.
-inline constexpr int renderer_version = 1;
+inline constexpr int renderer_version = 2;
 
 /// API: image/rendition
 ///
-/// A JPEG of the whole picture in `source`, for showing it on a screen: scaled to fit inside an
-/// `edge` x `edge` box, where `edge` is clamped to [`min_rendition_edge`, `max_rendition_edge`],
-/// and never enlarged -- a picture smaller than the box gives itself at its own size.  What a
-/// viewer draws in place of the original, whatever format that was.
+/// The whole picture in `source` re-encoded for showing it on a screen, as `sendable` makes a
+/// picture for sending: scaled to fit inside an `edge` x `edge` box, where `edge` is clamped to
+/// [`min_rendition_edge`, `max_rendition_edge`], and never enlarged.  What a viewer draws in place
+/// of the original, whatever format that was; the original stays for export.
 ///
 /// - EXIF orientation is applied, so the rendition is upright however the original was stored.
-/// - An animation gives its first frame.
-/// - Transparency is drawn over the checkerboard `thumbnail` uses, since JPEG has no alpha.
-/// - The result is 8-bit sRGB at `thumbnail_quality`, encoded with jpegli, and carries no metadata
-///   at all.
+/// - A still picture without transparency is a jpegli JPEG; one with transparency, or an animation
+///   with every frame and its delays, is a WebP.  The bytes say which.
+/// - 8-bit sRGB at `thumbnail_quality`, with no metadata at all.
 ///
 /// Returns nullopt for anything that is not an image we accept, under the same rules as
-/// `thumbnail`.  The same image always gets the same answer from the same `renderer_version`.
+/// `thumbnail`, and for an animation whose frames together exceed `max_total_pixels`.  The same
+/// image always gets the same answer from the same `renderer_version`.
 ///
 /// Throws std::runtime_error as `thumbnail` does.
 std::optional<std::vector<std::byte>> rendition(Source& source, uint32_t edge);
+
+/// API: image/rendition_is_original
+///
+/// Whether the picture `probe` described as `info` is already what `rendition` would make for
+/// `edge` in format and size: a JPEG or WebP `rendition` would accept, upright, 8 bits a sample,
+/// no larger than the clamped edge.  What a picture sent by a client that re-encodes (`sendable`)
+/// is, so a viewer can draw the original rather than a second copy of it.  Not checked: its colour
+/// profile or metadata, which a viewer draws or ignores as it would the original's.
+bool rendition_is_original(const Info& info, uint32_t edge);
 
 }  // namespace session::image
