@@ -43,6 +43,7 @@ TEST_CASE("Client: an arriving message records the files it names", "[client][at
                     a->set_filename("kitten.png");
                     a->set_width(640);
                     a->set_height(480);
+                    a->set_flags(2);
                 });
                 // Legacy, which is what every current client actually sends: 64-byte key and a
                 // digest, and no fragment on the url.
@@ -73,10 +74,12 @@ TEST_CASE("Client: an arriving message records the files it names", "[client][at
     CHECK(m.attachments[0].width == 640);
     CHECK(m.attachments[0].height == 480);
     CHECK_FALSE(m.attachments[0].voice_message);
+    CHECK(m.attachments[0].original_file);
     // Always true on an incoming attachment: the file server is where it came from.
     CHECK(m.attachments[0].uploaded);
 
     CHECK(m.attachments[1].voice_message);
+    CHECK_FALSE(m.attachments[1].original_file);
     CHECK(m.attachments[1].uploaded);
 
     // The unusable one still occupies its position, so the indices keep meaning what the sender
@@ -2244,25 +2247,17 @@ TEST_CASE(
         return c->message(id, await)->attachments[index].availability;
     };
 
-    // A gallery, which is drawn as the picture itself and so needs it whatever the setting says --
-    // that setting rations bandwidth, and there is none to ration for a file already on this disk.
+    // Whatever it is, and whatever the download rules: the copy is the only one of what went out
+    // once the file server's expires, and the user's file may be deleted.
+    c->open_dm(ConversationId::dm(me), await);
+    c->conversation(ConversationId::dm(me), await)->set_auto_download(AutoDownload::none, await);
+    c->set_auto_download_max_size(contents.size() - 1, await);
     auto gallery_id = send({as_image});
     CHECK(availability(gallery_id, 0) == AttachmentAvailability::cached);
-
-    // Not a gallery, so it follows the rule the same file would have met arriving, and nobody has
-    // been asked yet.
-    CHECK(availability(send({as_document}), 0) == AttachmentAvailability::absent);
-
-    // Nor is a message mixing the two, however much of it is pictures: it draws as a list of
-    // attachments like any other, so the exception does not reach the image in it either.
-    auto mixed_id = send({as_image, as_document});
-    CHECK(availability(mixed_id, 0) == AttachmentAvailability::absent);
-    CHECK(availability(mixed_id, 1) == AttachmentAvailability::absent);
-
-    // And anything is kept once that rule says it would have been fetched, so what a conversation
-    // holds does not depend on which end of it a file came from.
-    c->conversation(ConversationId::dm(me), await)->set_auto_download(AutoDownload::all, await);
     CHECK(availability(send({as_document}), 0) == AttachmentAvailability::cached);
+    auto mixed_id = send({as_image, as_document});
+    CHECK(availability(mixed_id, 0) == AttachmentAvailability::cached);
+    CHECK(availability(mixed_id, 1) == AttachmentAvailability::cached);
 
     // The copy is that file and not merely a file of the right length: saving it back is served
     // from the cache with no request at all, and what lands is what was sent.
@@ -2284,11 +2279,14 @@ TEST_CASE(
     in.read(reinterpret_cast<char*>(got.data()), got.size());
     CHECK(!!(got == contents));
 
-    // And nothing a requested file could not be: this copy stands in for fetching it back.
+    // Nor held to the limits a fetched file is: those ration what is downloaded.
     c->set_requested_cache_max_size(contents.size() - 1, await);
-    CHECK(availability(send({as_image}), 0) == AttachmentAvailability::absent);
-    c->set_requested_cache_max_size(contents.size(), await);
     CHECK(availability(send({as_image}), 0) == AttachmentAvailability::cached);
+
+    // But not one larger than the whole cache, which would evict everything else to make room.
+    c->set_attachment_cache_limit(contents.size() - 1, await);
+    CHECK(availability(send({as_document}), 0) != AttachmentAvailability::cached);
+    CHECK(availability(gallery_id, 0) == AttachmentAvailability::cached);
 
     std::filesystem::remove_all(dir);
 }

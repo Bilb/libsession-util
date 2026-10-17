@@ -692,6 +692,8 @@ class Client {
     /// and padded, which makes the total larger than the same attachments would be as plain files.
     /// That is the right way round for a disk limit — 5GB means 5GB of disk.
     ///
+    /// A file we send that is larger than the limit is not kept at all.
+    ///
     /// Display pictures are not counted and are never evicted for this.  They are one small file
     /// per contact, replaced rather than accumulated, and a contact you have not spoken to in years
     /// should not lose the last picture you had of them; freeing them is the reference sweep's job.
@@ -770,8 +772,7 @@ class Client {
     /// The largest file that `attachment_data` or `save_attachment` will keep in the cache, or
     /// nullopt for no limit, which is the default.  0 keeps nothing they fetch.
     ///
-    /// Also bounds the copy kept of a file we send, which costs the cache what a download of it
-    /// would.
+    /// A file we send is kept whatever this says.
     ///
     /// A file over it is still fetched -- this never refuses anything -- and is simply not kept, so
     /// asking for it again fetches it again.  One already in the cache is still served from there,
@@ -1191,17 +1192,19 @@ class Client {
             int64_t on_disk,
             std::optional<std::filesystem::path> plain = std::nullopt);
 
-    /// Keeps a copy of a file we just uploaded, so that a message we sent can be drawn without
-    /// fetching back a file that came off this disk in the first place.
+    /// Keeps a copy of a file we just uploaded, whatever it is, so that a message we sent can be
+    /// drawn and saved without fetching back a file that came off this disk in the first place.
     ///
-    /// Under the rule that would have applied had the same file arrived, plus anything on a
-    /// gallery-viewable message whatever that rule says -- see the definition.  Best effort: the
-    /// source is re-read, since the upload streamed it rather than holding it, and a file that has
-    /// since moved or changed is simply not cached.
+    /// Best effort: `body` is what the upload sent when it sent bytes rather than the file, else
+    /// the source is re-read, and a file that has since moved or changed is simply not cached.
     ///
     /// Call once the row carries the url, which is both where the copy belongs and what says the
     /// upload is done.
-    void _cache_outgoing_attachment(int64_t client_id, size_t index, const std::string& url);
+    void _cache_outgoing_attachment(
+            int64_t client_id,
+            size_t index,
+            const std::string& url,
+            std::shared_ptr<const std::vector<std::byte>> body);
 
     // The cache entry holding `url`, as (id, file name), found through the attachment rows that
     // reference it rather than by hashing the url.
@@ -1493,13 +1496,27 @@ class Client {
     // them into the row, so the pointer carries a placeholder.  Then `_upload_next`.
     void _derive_outgoing(int64_t client_id, Conversation::upload_progress on_upload);
 
-    // The rest of `_upload_next`, once the disk loop has looked at the file: uploads attachment
-    // `index` from `path`, or fails the message for good if `file_size` says the file is gone.
+    // Between the disk loop's look at the file and its upload: a picture this build decodes is
+    // re-encoded on the derive loop (`image::sendable`) and its row rewritten to describe what is
+    // sent; a picture it cannot decode is flagged as the original file; anything else goes as it
+    // is, from the very bytes that were looked at.
+    void _convert_outgoing(
+            int64_t client_id,
+            size_t index,
+            std::string path,
+            int64_t file_size,
+            bool declared_image,
+            Conversation::upload_progress on_upload);
+
+    // The rest of `_upload_next`, once the file is known: uploads attachment `index` from `path`,
+    // or from `body` when that is set, or fails the message for good if `file_size` says the file
+    // is gone.
     void _upload_one(
             int64_t client_id,
             size_t index,
             std::string path,
             std::optional<int64_t> file_size,
+            std::shared_ptr<const std::vector<std::byte>> body,
             Conversation::upload_progress on_upload);
 
     // Rebuilds the message's content with its now-uploaded attachments named in it, replaces what

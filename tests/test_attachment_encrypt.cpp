@@ -799,6 +799,32 @@ TEST_CASE("Streaming Encryptor", "[attachments][encryptor]") {
         REQUIRE(decrypted.size() == data.size());
         CHECK(!!(decrypted == data));
     }
+
+    SECTION("bytes in memory encrypt exactly as the same bytes in a file") {
+        if (DATA_SIZE == 0)
+            return;
+
+        temp_data_file tmp;
+        {
+            std::ofstream f{tmp.path, std::ios::binary};
+            f.write(reinterpret_cast<const char*>(data.data()), data.size());
+        }
+        auto drain = [](attachment::Encryptor& enc) {
+            std::vector<std::byte> out;
+            for (auto chunk = enc.next(); !chunk.empty(); chunk = enc.next())
+                out.insert(out.end(), chunk.begin(), chunk.end());
+            return out;
+        };
+
+        attachment::Encryptor from_file{seed, attachment::Domain::ATTACHMENT};
+        auto file_key = from_file.load_key_from_file(tmp.path, true);
+        attachment::Encryptor from_data{seed, attachment::Domain::ATTACHMENT};
+        auto data_key = from_data.load_key_from_data(
+                std::make_shared<const std::vector<std::byte>>(data), true);
+
+        CHECK(file_key == data_key);
+        CHECK(!!(drain(from_file) == drain(from_data)));
+    }
 }
 
 // -- Legacy (AES-CBC + HMAC) attachments ---------------------------------------------------------

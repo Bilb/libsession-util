@@ -129,12 +129,22 @@ class MockNetwork : public network::Network {
     // what upload_file returned finds its way back to the right bytes.
     std::map<std::string, std::vector<std::byte>> served;
     int next_file_id = 1000;
+    // How many uploads to come fail, as a file server answering 500 would.
+    int failing_uploads = 0;
 
     void upload_file(network::FileUploadRequest request, std::span<const std::byte> seed) override {
+        if (failing_uploads > 0) {
+            failing_uploads--;
+            if (request.on_complete)
+                request.on_complete(int16_t{500}, false);
+            return;
+        }
         // Encrypted the same way the routers do it, so what a save reads back is what a real
         // upload would have left on the server: same scheme, same padding, same key derivation.
         std::vector<std::byte> plain;
-        {
+        if (request.data)
+            plain = *request.data;
+        else {
             std::ifstream in{request.file, std::ios::binary};
             std::string bytes{std::istreambuf_iterator<char>{in}, {}};
             plain = to_vector<std::byte>(bytes);

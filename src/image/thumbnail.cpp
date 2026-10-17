@@ -107,12 +107,18 @@ namespace detail {
                          max_whole_decode_bytes);
     }
 
-    // vips_thumbnail applies EXIF orientation, loads only the first frame of an animation, and
-    // shrinks on load where the format allows (JPEG, WebP, HEIF), so a 12 MP photo is never
-    // decoded at full size.  It converts from an embedded ICC profile only when given an output
-    // profile.  Never enlarging is what the fit needs; a cover is given a box no larger than the
-    // picture, so it is never asked to.
-    image_ptr scaled(Source& source, const Info& info, uint32_t width, uint32_t height, bool crop) {
+    // vips_thumbnail applies EXIF orientation, loads the first frame of an animation unless told
+    // to load them all, and shrinks on load where the format allows (JPEG, WebP, HEIF), so a 12 MP
+    // photo is never decoded at full size.  It converts from an embedded ICC profile only when
+    // given an output profile.  Never enlarging is what the fit needs; a cover is given a box no
+    // larger than the picture, so it is never asked to.
+    image_ptr scaled(
+            Source& source,
+            const Info& info,
+            uint32_t width,
+            uint32_t height,
+            bool crop,
+            bool all_frames) {
         VipsImage* out = nullptr;
         int rc;
         auto w = static_cast<int>(width), h = static_cast<int>(height);
@@ -158,6 +164,8 @@ namespace detail {
                     crop ? VIPS_INTERESTING_CENTRE : VIPS_INTERESTING_NONE,
                     "output_profile",
                     "srgb",
+                    "option_string",
+                    all_frames ? "n=-1" : "",
                     nullptr);
             source_access::rethrow_error(source);
         }
