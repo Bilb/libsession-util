@@ -188,10 +188,10 @@ CREATE TABLE messages (
 
     -- Whether this message is *shown* as a gallery rather than as a list of attachments.
     --
-    -- A decision, which is why it is stored: it is made when the message is processed -- on if the
-    -- conversation was auto-downloading then -- and the conversation's setting may have changed
-    -- since, so it cannot be recomputed later and mean the same thing.  A client may set or clear
-    -- it afterwards.
+    -- A decision, which is why it is stored: on from the start for every message stored under this
+    -- rule that can be shown that way, whatever the conversation auto-downloads, and a client may
+    -- set or clear it afterwards, which recomputing it would discard.  A message stored before the
+    -- rule keeps the decision it was stored with.
     --
     -- Whether a message *can* be shown that way is a separate question, derived and not stored:
     -- today it is "has attachments, and every one of them is an image", but that is our rule to
@@ -284,9 +284,9 @@ END;
 -- look it up.
 --
 -- `size` is bytes on disk, encrypted and padded, because that is what the cache limit is a limit
--- on.  `last_used` is touched on a cache hit as well as on write, which is what makes eviction
--- least-recently-*used* rather than oldest-first: something opened weekly should not lose to
--- something downloaded once and never looked at again.
+-- on.  `last_used` is touched on a cache hit (at most once per `Client::CACHE_TOUCH_INTERVAL`) as
+-- well as on write, which is what makes eviction least-recently-*used* rather than oldest-first:
+-- something opened weekly should not lose to something downloaded once and never looked at again.
 --
 -- Display pictures are not in here at all.  They are never evicted -- a contact you have not spoken
 -- to in years should not lose the last picture you had of them -- and are freed only when superseded,
@@ -303,11 +303,37 @@ CREATE TABLE attachment_cache (
     -- Keyed (`cache::name_for`) so that someone reading the cache directory cannot tell which
     -- files this account has fetched.
     name TEXT NOT NULL UNIQUE,
+    -- The file alone; what was made from it is in attachment_derived.  Eviction and the limit
+    -- count both.
     size INTEGER NOT NULL,
-    last_used INTEGER NOT NULL      -- ms since epoch
+    last_used INTEGER NOT NULL,     -- ms since epoch
+    -- What the file's header says, read when a derived image is first attempted and reported as
+    -- `Attachment::picture`: one frame's upright size and the frame count, 0 frames for a file
+    -- that could not be read as a picture.  NULL until read.
+    width INTEGER,
+    height INTEGER,
+    frames INTEGER
 ) STRICT;
 
 CREATE INDEX attachment_cache_lru ON attachment_cache(last_used);
+
+-- The images made from a cached attachment, one row per kind (`cache::DERIVED_KINDS`): a thumbnail
+-- for a tile, a rendition for the viewer.  Each is part of its entry rather than an entry of its
+-- own: made from the file, kept beside it as `name` + the kind's suffix, counted with it, and
+-- evicted or deleted with it.
+CREATE TABLE attachment_derived (
+    entry INTEGER NOT NULL REFERENCES attachment_cache(id) ON DELETE CASCADE,
+    kind INTEGER NOT NULL,
+    -- The bytes on disk, or NULL while there is no file: one found missing is taken out here and
+    -- made again.
+    size INTEGER,
+    -- The version of the code that makes this kind (`image::thumbnailer_version`,
+    -- `image::renderer_version`) under which the file was refused, or NULL.  Minus it after an attempt that has not settled, whether still
+    -- running or ended with the process; a second such attempt sets the version itself, refusing
+    -- the file.  A refusal is not tried again until the version changes.
+    failed INTEGER,
+    PRIMARY KEY (entry, kind)
+) STRICT;
 
 -- The full decrypted Content protobuf, kept out of the messages table so that the history scan --
 -- the hot query -- does not drag it through overflow pages.  Retained so fields this schema does
@@ -347,27 +373,17 @@ CREATE TABLE message_attachments (
     -- protobuf and how a progress report names one of them.
     idx INTEGER NOT NULL,
 
-    -- Where the file is, or came from: for an outgoing attachment the one we uploaded, for an
+    -- Where the file is, or came from: for an outgoing attachment the one we upload, for an
     -- incoming one where the user asked us to save the download (NULL until they do).
     --
-    -- Informational rather than owning -- closer to a symlink than a handle.  The file at the far
-    -- end belongs to the user in both directions: they chose it to attach, or they chose where to
-    -- put it.  So it may be moved or deleted behind our back (only fatal while this row still needs
-    -- uploading), and nothing here ever unlinks it.
+    -- An absolute path names the user's file, in either direction, and nothing here unlinks it.
+    -- It may be moved or deleted behind our back, which is only fatal while the row still needs
+    -- uploading.
     --
-    -- A cache of our own -- attachments kept encrypted so they outlive the file server -- would be a
-    -- third thing, at a path we picked, and wants its own column: that is what a
-    -- delete-attachments-before instruction is entitled to remove, and sharing this column would
-    -- leave it unable to tell our copy from the user's.
-    --
-    -- Such a cache cannot be freed by deleting files alongside the rows that name them, because the
-    -- rows go by cascade when a conversation is deleted and no code of ours runs.  It wants the same
-    -- treatment as everything else here: compare and converge.  List the cached paths still
-    -- referenced, list the cache directory, unlink the difference.  That survives a cascade, and
-    -- also collects what a crash mid-download left behind -- which collecting paths before a delete
-    -- never would.  It needs a directory we own outright, since "anything not in the list" is only
-    -- safe there, and it must not eat a download in flight: either the row exists before the
-    -- transfer starts, or the sweep skips the in-progress suffix.
+    -- `outgoing/<name>` names a file a send took over (`OutgoingAttachment::take_file`), relative
+    -- to the cache directory because that directory's absolute path can change between runs.  It
+    -- is ours: removed once uploaded or once its message is unsendable, and otherwise collected by
+    -- listing the directory against these rows, which also covers rows that went by cascade.
     path TEXT,
 
     -- Descriptive fields, carried straight through the protobuf pointer in both directions.
@@ -462,6 +478,10 @@ CREATE TABLE message_attachments (
     -- and this file has to describe the same column order a migrated database ends up with.
     thumbhash BLOB,
 
+    -- 1 while an auto-download still owes this file.  Cleared once it is cached or found unavailable,
+    -- so eviction never makes it owed again, or once the conversation's setting stops taking it.
+    auto_pending INTEGER,
+
     PRIMARY KEY (message, idx)
 ) STRICT;
 
@@ -477,6 +497,10 @@ CREATE TABLE message_attachments (
 -- share of the table.
 CREATE INDEX message_attachments_url ON message_attachments(url) WHERE url IS NOT NULL;
 
+-- Whether a file in the outgoing directory is still owed an upload, asked by name for each file
+-- there.  Partial because only rows still to upload are ever asked about.
+CREATE INDEX message_attachments_pending ON message_attachments(path) WHERE url IS NULL;
+
 -- Which messages show a file that is being evicted, which is the question a keyed hash cannot
 -- answer: it does not run backwards, so without this the only route from a cached file to the
 -- messages drawing it is to hash every url in the table.
@@ -484,3 +508,7 @@ CREATE INDEX message_attachments_url ON message_attachments(url) WHERE url IS NO
 -- Partial for the same reason as above: most rows are not cached at any given moment, and those
 -- are never the subject of this question.
 CREATE INDEX message_attachments_cached ON message_attachments(cached) WHERE cached IS NOT NULL;
+
+-- What a restart queues again, and what a setting change checks: the few rows still owed.
+CREATE INDEX message_attachments_auto_pending ON message_attachments(message)
+    WHERE auto_pending IS NOT NULL;

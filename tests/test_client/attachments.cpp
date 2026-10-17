@@ -43,6 +43,7 @@ TEST_CASE("Client: an arriving message records the files it names", "[client][at
                     a->set_filename("kitten.png");
                     a->set_width(640);
                     a->set_height(480);
+                    a->set_flags(2);
                 });
                 // Legacy, which is what every current client actually sends: 64-byte key and a
                 // digest, and no fragment on the url.
@@ -73,10 +74,12 @@ TEST_CASE("Client: an arriving message records the files it names", "[client][at
     CHECK(m.attachments[0].width == 640);
     CHECK(m.attachments[0].height == 480);
     CHECK_FALSE(m.attachments[0].voice_message);
+    CHECK(m.attachments[0].original_file);
     // Always true on an incoming attachment: the file server is where it came from.
     CHECK(m.attachments[0].uploaded);
 
     CHECK(m.attachments[1].voice_message);
+    CHECK_FALSE(m.attachments[1].original_file);
     CHECK(m.attachments[1].uploaded);
 
     // The unusable one still occupies its position, so the indices keep meaning what the sender
@@ -1608,7 +1611,8 @@ TEST_CASE("Client: a conversation set to auto-download fetches on arrival", "[cl
         arrive("h1", false);
         CHECK(net->downloads.empty());
         CHECK(progress.empty());
-        CHECK_FALSE(c->conversation(convo, await)->messages(await)[0].gallery);
+        // A gallery all the same: what is shown as one and what is fetched are different questions.
+        CHECK(c->conversation(convo, await)->messages(await)[0].gallery);
     }
 
     SECTION("images only fetches the image and leaves the document") {
@@ -1628,6 +1632,15 @@ TEST_CASE("Client: a conversation set to auto-download fetches on arrival", "[cl
         arrive("h6", false, "image/svg+xml");
         CHECK(net->downloads.empty());
         CHECK_FALSE(c->conversation(convo, await)->messages(await)[0].gallery_viewable);
+        arrive("h7", false, "image/jpeg2000");
+        CHECK(net->downloads.empty());
+    }
+
+    SECTION("images only fetches an image whose content type has parameters") {
+        c->conversation(convo, await)->set_auto_download(AutoDownload::image_attachments, await);
+        arrive("h8", false, "Image/PNG ; charset=binary");
+        CHECK(net->downloads.size() == 1);
+        CHECK(c->conversation(convo, await)->messages(await)[0].gallery);
     }
 
     SECTION("all fetches both, and an all-image message opens as a gallery") {
@@ -1712,7 +1725,9 @@ TEST_CASE("Client: the cache evicts least recently used", "[client][auto][evict]
     // one of them, leaving every row tied and the eviction order arbitrary.  Real uses are spread
     // out; these have to be spread out by hand.
     ScopedClockOffset clock{0s};
-    auto later = [t = 0s]() mutable { AdjustedClock::set_offset(t += 1s); };
+    auto later = [t = 0s](std::chrono::seconds by = 1s) mutable {
+        AdjustedClock::set_offset(t += by);
+    };
 
     auto seed = random::random(32);
     // Three files, fetched in order, each about the same size on disk.
@@ -1756,8 +1771,9 @@ TEST_CASE("Client: the cache evicts least recently used", "[client][auto][evict]
         REQUIRE(cached(u));
 
     // Reach for the *oldest* one, which makes it the most recently used.  Under oldest-first
-    // eviction it would still be first to go; under least-recently-used it is last.
-    later();
+    // eviction it would still be first to go; under least-recently-used it is last.  Late enough
+    // that the read counts as a use.
+    later(Client::CACHE_TOUCH_INTERVAL);
     c->attachment_data(ids[0], 0, nullptr, [](auto) {});
     sync(*c);
 
@@ -1957,6 +1973,80 @@ TEST_CASE("Client: the sweep reconciles the cache with what the database says", 
     CHECK(kept == 1);
 }
 
+TEST_CASE(
+        "Client: a cached file found unreadable is dropped before it is fetched again",
+        "[client][attachments][cache]") {
+    TempCacheDir dir;
+    Recorder r;
+    TempClient c{r.handlers()};
+    SenderKeys peer;
+    auto convo = ConversationId::dm(peer.session_id);
+    auto* net = attach_mock_network(c->core);
+    c->set_cache_dir(dir.path);
+
+    c->open_dm(convo, await);
+    c->conversation(convo, await)->set_auto_download(AutoDownload::all, await);
+
+    std::vector<std::byte> data(2000);
+    random::fill(data);
+    auto [ct, key] = attachment::encrypt(random::random(32), data, attachment::Domain::ATTACHMENT);
+    auto url = network::file_server::generate_download_url("doc", {}, true);
+    deliver(*c,
+            peer,
+            "",
+            from_epoch_ms(1000),
+            "hh",
+            "",
+            std::nullopt,
+            [&](SessionProtos::DataMessage& d) {
+                auto* a = d.add_attachments();
+                a->set_id(1);
+                a->set_url(url);
+                a->set_key(std::string{reinterpret_cast<const char*>(key.data()), key.size()});
+                a->set_size(data.size());
+                a->set_contenttype("application/pdf");
+            });
+    sync(*c);
+    REQUIRE(serve_downloads(*net, ct) == 1);
+    sync(*c);
+    auto id = c->conversation(convo, await)->messages(await)[0].id;
+    REQUIRE(c->message(id, await)->attachments[0].availability == AttachmentAvailability::cached);
+
+    // Damaged from outside libsession, so that it no longer decrypts.
+    std::vector<std::byte> junk(3000);
+    random::fill(junk);
+    {
+        auto name = TestHelper::cache_path(*c, cache::ATTACHMENT_DIR, url).filename();
+        std::ofstream out{dir.path / cache::ATTACHMENT_DIR / name, std::ios::binary};
+        out.write(reinterpret_cast<const char*>(junk.data()), junk.size());
+    }
+    r.msg_updated.clear();
+
+    std::optional<Expected<std::vector<std::byte>>> got;
+    c->attachment_data(id, 0, nullptr, [&](auto res) { got = std::move(res); });
+    sync(*c);
+
+    // The entry is gone before the download is served, and the message is told.
+    REQUIRE(net->downloads.size() == 1);
+    auto rows = c->core.loop().call_get([&] {
+        return c->core.database().conn().prepared_get<int64_t>(
+                "SELECT count(*) FROM attachment_cache");
+    });
+    CHECK(rows == 0);
+    bool told = false;
+    for (const auto& m : Recorder::messages(r.msg_updated))
+        if (m.id == id && m.attachments[0].availability != AttachmentAvailability::cached)
+            told = true;
+    CHECK(told);
+
+    REQUIRE(serve_downloads(*net, ct) == 1);
+    sync(*c);
+    REQUIRE(got);
+    REQUIRE(got->has_value());
+    CHECK(**got == data);
+    CHECK(c->message(id, await)->attachments[0].availability == AttachmentAvailability::cached);
+}
+
 TEST_CASE("Client: the list preview describes a message's attachments", "[client][attachments]") {
     TempClient c;
     SenderKeys gallery, mixed, voice, wordy;
@@ -2058,9 +2148,15 @@ TEST_CASE("Client: only image types we display count as images", "[client][attac
             {"image/webp", true},
             {"image/gif", true},
             {"image/avif", true},
-            // MIME types are case-insensitive.
+            // MIME types are case-insensitive, and parameters do not change what the file is.
             {"IMAGE/PNG", true},
             {"Image/WebP", true},
+            {"image/jpeg; charset=binary", true},
+            {" IMAGE/PNG ; foo=bar", true},
+            {"image/jpegx", false},
+            {"image/jpeg2000", false},
+            // Shown as a file: libvips would decode only its first frame.
+            {"image/apng", false},
             // Image types we will not decode, so not images as far as presentation goes.
             {"image/svg+xml", false},
             {"image/tiff", false},
@@ -2166,25 +2262,17 @@ TEST_CASE(
         return c->message(id, await)->attachments[index].availability;
     };
 
-    // A gallery, which is drawn as the picture itself and so needs it whatever the setting says --
-    // that setting rations bandwidth, and there is none to ration for a file already on this disk.
+    // Whatever it is, and whatever the download rules: the copy is the only one of what went out
+    // once the file server's expires, and the user's file may be deleted.
+    c->open_dm(ConversationId::dm(me), await);
+    c->conversation(ConversationId::dm(me), await)->set_auto_download(AutoDownload::none, await);
+    c->set_auto_download_max_size(contents.size() - 1, await);
     auto gallery_id = send({as_image});
     CHECK(availability(gallery_id, 0) == AttachmentAvailability::cached);
-
-    // Not a gallery, so it follows the rule the same file would have met arriving, and nobody has
-    // been asked yet.
-    CHECK(availability(send({as_document}), 0) == AttachmentAvailability::absent);
-
-    // Nor is a message mixing the two, however much of it is pictures: it draws as a list of
-    // attachments like any other, so the exception does not reach the image in it either.
-    auto mixed_id = send({as_image, as_document});
-    CHECK(availability(mixed_id, 0) == AttachmentAvailability::absent);
-    CHECK(availability(mixed_id, 1) == AttachmentAvailability::absent);
-
-    // And anything is kept once that rule says it would have been fetched, so what a conversation
-    // holds does not depend on which end of it a file came from.
-    c->conversation(ConversationId::dm(me), await)->set_auto_download(AutoDownload::all, await);
     CHECK(availability(send({as_document}), 0) == AttachmentAvailability::cached);
+    auto mixed_id = send({as_image, as_document});
+    CHECK(availability(mixed_id, 0) == AttachmentAvailability::cached);
+    CHECK(availability(mixed_id, 1) == AttachmentAvailability::cached);
 
     // The copy is that file and not merely a file of the right length: saving it back is served
     // from the cache with no request at all, and what lands is what was sent.
@@ -2206,11 +2294,14 @@ TEST_CASE(
     in.read(reinterpret_cast<char*>(got.data()), got.size());
     CHECK(!!(got == contents));
 
-    // And nothing a requested file could not be: this copy stands in for fetching it back.
+    // Nor held to the limits a fetched file is: those ration what is downloaded.
     c->set_requested_cache_max_size(contents.size() - 1, await);
-    CHECK(availability(send({as_image}), 0) == AttachmentAvailability::absent);
-    c->set_requested_cache_max_size(contents.size(), await);
     CHECK(availability(send({as_image}), 0) == AttachmentAvailability::cached);
+
+    // But not one larger than the whole cache, which would evict everything else to make room.
+    c->set_attachment_cache_limit(contents.size() - 1, await);
+    CHECK(availability(send({as_document}), 0) != AttachmentAvailability::cached);
+    CHECK(availability(gallery_id, 0) == AttachmentAvailability::cached);
 
     std::filesystem::remove_all(dir);
 }
@@ -2463,8 +2554,13 @@ TEST_CASE(
     REQUIRE(serve_downloads(*net) == 1);
     sync(*c);
 
-    // The transfer starting and the transfer finishing, each of them once.
-    REQUIRE(r.msg_updated.size() == 2);
+    // The transfer starting, the transfer finishing, and the file's header read once it is here,
+    // each of them once.  The last comes off the derive thread, so it is waited for.
+    for (auto until = std::chrono::steady_clock::now() + 20s;
+         !TestHelper::thumbnails_idle(*c) && std::chrono::steady_clock::now() < until;)
+        std::this_thread::sleep_for(5ms);
+    sync(*c);
+    REQUIRE(r.msg_updated.size() == 3);
     for (const auto& batch : r.msg_updated) {
         // All three, across two conversations, in one call.
         REQUIRE(batch.size() == 3);
@@ -3845,4 +3941,324 @@ TEST_CASE(
     CHECK(*request.cancelled);
     CHECK(std::filesystem::is_empty(out.path));
     CHECK(partial_cache_files(dir.path).empty());
+}
+
+TEST_CASE("Client: a cache-only read never fetches", "[client][attachments][cache]") {
+    ScopedClockOffset clock{0s};
+    TempCacheDir dir;
+    TempClient c;
+    SenderKeys peer;
+    auto* net = attach_mock_network(c->core);
+    c->set_cache_dir(dir.path);
+    auto convo = ConversationId::dm(peer.session_id);
+    c->open_dm(convo, await);
+
+    auto seed = random::random(32);
+    std::vector<std::byte> data(3000);
+    random::fill(data);
+    auto [ct, key] = attachment::encrypt(seed, data, attachment::Domain::ATTACHMENT);
+    net->served["f"] = ct;
+    auto url = network::file_server::generate_download_url("f", {}, true);
+    auto arrive = [&](std::string hash) {
+        deliver(*c,
+                peer,
+                "",
+                from_epoch_ms(1000),
+                std::move(hash),
+                "",
+                std::nullopt,
+                [&](SessionProtos::DataMessage& d) {
+                    auto* a = d.add_attachments();
+                    a->set_id(1);
+                    a->set_url(url);
+                    a->set_key(std::string{reinterpret_cast<const char*>(key.data()), key.size()});
+                    a->set_size(data.size());
+                    a->set_contenttype("application/pdf");
+                });
+        sync(*c);
+        return c->conversation(convo, await)->messages(await)[0].id;
+    };
+    auto code = [&](int64_t id, size_t index) -> std::optional<std::string_view> {
+        try {
+            c->attachment_data_cached(id, index, await);
+        } catch (const session::error& e) {
+            return e.err().code;
+        }
+        return std::nullopt;
+    };
+    auto rows = [&] {
+        return c->core.loop().call_get([&] {
+            return c->core.database().conn().prepared_get<int64_t>(
+                    "SELECT count(*) FROM attachment_cache");
+        });
+    };
+
+    // Not cached, with nothing set to fetch it: refused, and nothing is asked of the network.
+    auto id = arrive("h1");
+    CHECK(code(id, 0) == err::not_cached);
+    CHECK(code(id, 1) == err::attachment_not_found);
+    CHECK(code(id + 100, 0) == err::message_not_found);
+    sync(*c);
+    CHECK(net->downloads.empty());
+
+    // Cached: the bytes, from disk, and the entry marked used once its last use is
+    // CACHE_TOUCH_INTERVAL old.
+    REQUIRE(c->save_attachment(id, 0, dir.path / "copy", nullptr, nullptr));
+    sync(*c);
+    REQUIRE(serve_downloads(*net) == 1);
+    sync(*c);
+    REQUIRE(c->message(id, await)->attachments[0].availability == AttachmentAvailability::cached);
+    auto used = [&] {
+        return c->core.loop().call_get([&] {
+            return c->core.database().conn().prepared_get<int64_t>(
+                    "SELECT last_used FROM attachment_cache");
+        });
+    };
+    auto before = used();
+    AdjustedClock::set_offset(10s);
+    CHECK(!!(c->attachment_data_cached(id, 0, await) == data));
+    CHECK(used() == before);
+    AdjustedClock::set_offset(Client::CACHE_TOUCH_INTERVAL + 1s);
+    CHECK(!!(c->attachment_data_cached(id, 0, await) == data));
+    CHECK(used() > before);
+
+    // The handler form answers the same.
+    std::promise<Expected<std::vector<std::byte>>> got;
+    c->attachment_data_cached(id, 0, [&](auto r) { got.set_value(std::move(r)); });
+    auto r = got.get_future().get();
+    REQUIRE(r);
+    CHECK(!!(*r == data));
+    CHECK(net->downloads.empty());
+
+    // Unreadable: removed, row and file, and refused as not cached rather than fetched.
+    auto file = TestHelper::cache_path(*c, cache::ATTACHMENT_DIR, url);
+    std::ofstream{file, std::ios::binary | std::ios::trunc} << "not what was cached";
+    CHECK(code(id, 0) == err::not_cached);
+    sync(*c);
+    CHECK(rows() == 0);
+    CHECK_FALSE(std::filesystem::exists(file));
+    CHECK(c->message(id, await)->attachments[0].availability == AttachmentAvailability::absent);
+    CHECK(net->downloads.empty());
+}
+
+namespace {
+
+// A TestHelper hold, let go at the latest when this goes out of scope: declared after the Client
+// it holds, so that a failing test does not leave the Client's teardown waiting on it.
+struct Hold {
+    std::shared_ptr<std::promise<void>> promise;
+    bool released = false;
+    void release() {
+        if (!std::exchange(released, true))
+            promise->set_value();
+    }
+    ~Hold() { release(); }
+};
+
+}  // namespace
+
+TEST_CASE("Client: a waiting cache read answers on Core's loop", "[client][attachments][cache]") {
+    // Leaked if a read never answers: Core's loop is then blocked for good, and tearing the Client
+    // down would wait on it, so the test would hang rather than fail.
+    TempCacheDir dir;
+    auto c = std::make_unique<TempClient>();
+    SenderKeys peer;
+    auto* net = attach_mock_network((*c)->core);
+    (*c)->set_cache_dir(dir.path);
+    auto convo = ConversationId::dm(peer.session_id);
+    (*c)->open_dm(convo, await);
+    (*c)->conversation(convo, await)->set_auto_download(AutoDownload::all, await);
+
+    std::vector<std::byte> data(3000);
+    random::fill(data);
+    auto [ct, key] = attachment::encrypt(random::random(32), data, attachment::Domain::ATTACHMENT);
+    auto url = network::file_server::generate_download_url("f", {}, true);
+    deliver(**c,
+            peer,
+            "",
+            from_epoch_ms(1000),
+            "h1",
+            "",
+            std::nullopt,
+            [&](SessionProtos::DataMessage& d) {
+                auto* a = d.add_attachments();
+                a->set_id(1);
+                a->set_url(url);
+                a->set_key(std::string{reinterpret_cast<const char*>(key.data()), key.size()});
+                a->set_size(data.size());
+                a->set_contenttype("application/pdf");
+            });
+    sync(**c);
+    REQUIRE(serve_downloads(*net, ct) == 1);
+    sync(**c);
+    auto id = (*c)->conversation(convo, await)->messages(await)[0].id;
+    REQUIRE((*c)->message(id, await)->attachments[0].availability ==
+            AttachmentAvailability::cached);
+
+    // The read, and then the read again with its file gone, which answers by writing.
+    using answers = std::pair<std::vector<std::byte>, std::optional<std::string_view>>;
+    auto answered = std::make_shared<std::promise<answers>>();
+    auto file = TestHelper::cache_path(**c, cache::ATTACHMENT_DIR, url);
+    std::thread{[client = &**c, id, file, answered] {
+        try {
+            answered->set_value(TestHelper::on_loop(client->core, [&] {
+                auto d = client->attachment_data_cached(id, 0, await);
+                std::filesystem::remove(file);
+                std::optional<std::string_view> code;
+                try {
+                    client->attachment_data_cached(id, 0, await);
+                } catch (const session::error& e) {
+                    code = e.err().code;
+                }
+                return answers{std::move(d), code};
+            }));
+        } catch (...) {
+            answered->set_exception(std::current_exception());
+        }
+    }}.detach();
+
+    auto got = answered->get_future();
+    if (got.wait_for(10s) != std::future_status::ready) {
+        (void)c.release();
+        FAIL("a waiting read on Core's loop never answered");
+    }
+    auto [d, missing] = got.get();
+    CHECK(d == data);
+    CHECK(missing == err::not_cached);
+    sync(**c);
+    CHECK((*c)->message(id, await)->attachments[0].availability == AttachmentAvailability::absent);
+}
+
+TEST_CASE(
+        "Client: a waiting cache read on Core's loop does not wait for the disk loop",
+        "[client][attachments][cache]") {
+    TempCacheDir dir;
+    TempClient c;
+    SenderKeys peer;
+    auto* net = attach_mock_network(c->core);
+    c->set_cache_dir(dir.path);
+    auto convo = ConversationId::dm(peer.session_id);
+    c->open_dm(convo, await);
+    c->conversation(convo, await)->set_auto_download(AutoDownload::all, await);
+
+    std::vector<std::byte> data(3000);
+    random::fill(data);
+    auto [ct, key] = attachment::encrypt(random::random(32), data, attachment::Domain::ATTACHMENT);
+    auto url = network::file_server::generate_download_url("f", {}, true);
+    deliver(*c,
+            peer,
+            "",
+            from_epoch_ms(1000),
+            "h1",
+            "",
+            std::nullopt,
+            [&](SessionProtos::DataMessage& d) {
+                auto* a = d.add_attachments();
+                a->set_id(1);
+                a->set_url(url);
+                a->set_key(std::string{reinterpret_cast<const char*>(key.data()), key.size()});
+                a->set_size(data.size());
+                a->set_contenttype("application/pdf");
+            });
+    sync(*c);
+    REQUIRE(serve_downloads(*net, ct) == 1);
+    sync(*c);
+    auto id = c->conversation(convo, await)->messages(await)[0].id;
+    REQUIRE(c->message(id, await)->attachments[0].availability == AttachmentAvailability::cached);
+
+    Hold hold{TestHelper::hold_disk_loop(*c)};
+    auto answered = std::make_shared<std::promise<std::vector<std::byte>>>();
+    std::thread reader{[client = &*c, id, answered] {
+        try {
+            answered->set_value(TestHelper::on_loop(
+                    client->core, [&] { return client->attachment_data_cached(id, 0, await); }));
+        } catch (...) {
+            answered->set_exception(std::current_exception());
+        }
+    }};
+    auto got = answered->get_future();
+    bool in_time = got.wait_for(5s) == std::future_status::ready;
+    hold.release();
+    reader.join();
+    REQUIRE(in_time);
+    CHECK(got.get() == data);
+}
+
+TEST_CASE(
+        "Client: a save from a cache file found unreadable drops the entry and fetches",
+        "[client][attachments][cache]") {
+    TempCacheDir dir;
+    Recorder r;
+    TempClient c{r.handlers()};
+    SenderKeys peer;
+    auto convo = ConversationId::dm(peer.session_id);
+    auto* net = attach_mock_network(c->core);
+    c->set_cache_dir(dir.path);
+
+    c->open_dm(convo, await);
+    c->conversation(convo, await)->set_auto_download(AutoDownload::all, await);
+
+    std::vector<std::byte> data(2000);
+    random::fill(data);
+    auto [ct, key] = attachment::encrypt(random::random(32), data, attachment::Domain::ATTACHMENT);
+    auto url = network::file_server::generate_download_url("doc", {}, true);
+    deliver(*c,
+            peer,
+            "",
+            from_epoch_ms(1000),
+            "hh",
+            "",
+            std::nullopt,
+            [&](SessionProtos::DataMessage& d) {
+                auto* a = d.add_attachments();
+                a->set_id(1);
+                a->set_url(url);
+                a->set_key(std::string{reinterpret_cast<const char*>(key.data()), key.size()});
+                a->set_size(data.size());
+                a->set_contenttype("application/pdf");
+            });
+    sync(*c);
+    REQUIRE(serve_downloads(*net, ct) == 1);
+    sync(*c);
+    auto id = c->conversation(convo, await)->messages(await)[0].id;
+    REQUIRE(c->message(id, await)->attachments[0].availability == AttachmentAvailability::cached);
+
+    std::vector<std::byte> junk(3000);
+    random::fill(junk);
+    {
+        auto name = TestHelper::cache_path(*c, cache::ATTACHMENT_DIR, url).filename();
+        std::ofstream out{dir.path / cache::ATTACHMENT_DIR / name, std::ios::binary};
+        out.write(reinterpret_cast<const char*>(junk.data()), junk.size());
+    }
+    r.msg_updated.clear();
+
+    auto dest = dir.path / "copy";
+    std::optional<Expected<std::filesystem::path>> got;
+    c->save_attachment(id, 0, dest, nullptr, [&](auto res) { got = std::move(res); });
+    sync(*c);
+
+    // The entry is gone before the download is served, and the message is told.
+    REQUIRE(net->downloads.size() == 1);
+    auto rows = c->core.loop().call_get([&] {
+        return c->core.database().conn().prepared_get<int64_t>(
+                "SELECT count(*) FROM attachment_cache");
+    });
+    CHECK(rows == 0);
+    bool told = false;
+    for (const auto& m : Recorder::messages(r.msg_updated))
+        if (m.id == id && m.attachments[0].availability != AttachmentAvailability::cached)
+            told = true;
+    CHECK(told);
+
+    REQUIRE(serve_downloads(*net, ct) == 1);
+    sync(*c);
+    REQUIRE(got);
+    REQUIRE(got->has_value());
+    CHECK(**got == dest);
+    REQUIRE(std::filesystem::file_size(dest) == data.size());
+    std::ifstream in{dest, std::ios::binary};
+    std::vector<std::byte> saved(data.size());
+    in.read(reinterpret_cast<char*>(saved.data()), saved.size());
+    CHECK(!!(saved == data));
+    CHECK(c->message(id, await)->attachments[0].availability == AttachmentAvailability::cached);
 }

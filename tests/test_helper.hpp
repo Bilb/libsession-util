@@ -3,8 +3,10 @@
 #include <fmt/format.h>
 #include <oxenc/base64.h>
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <map>
 #include <nlohmann/json.hpp>
 #include <session/attachments.hpp>
@@ -21,6 +23,8 @@
 #include <session/sqlite.hpp>
 #include <session/util.hpp>
 #include <span>
+
+#include "../src/client/download_cache.hpp"
 
 namespace session {
 
@@ -125,12 +129,22 @@ class MockNetwork : public network::Network {
     // what upload_file returned finds its way back to the right bytes.
     std::map<std::string, std::vector<std::byte>> served;
     int next_file_id = 1000;
+    // How many uploads to come fail, as a file server answering 500 would.
+    int failing_uploads = 0;
 
     void upload_file(network::FileUploadRequest request, std::span<const std::byte> seed) override {
+        if (failing_uploads > 0) {
+            failing_uploads--;
+            if (request.on_complete)
+                request.on_complete(int16_t{500}, false);
+            return;
+        }
         // Encrypted the same way the routers do it, so what a save reads back is what a real
         // upload would have left on the server: same scheme, same padding, same key derivation.
         std::vector<std::byte> plain;
-        {
+        if (request.data)
+            plain = *request.data;
+        else {
             std::ifstream in{request.file, std::ios::binary};
             std::string bytes{std::istreambuf_iterator<char>{in}, {}};
             plain = to_vector<std::byte>(bytes);
@@ -464,6 +478,103 @@ class TestHelper {
     static std::filesystem::path cache_path(
             Client& c, std::string_view kind, std::string_view url) {
         return c._cache_path(kind, url);
+    }
+
+    /// Takes a message's `take_file` attachments as `send_message` does, without sending: the
+    /// window between a file being taken and its message being stored, held open.
+    template <typename Client, typename Message>
+    static auto take_files(Client& c, Message& msg) {
+        return c._take_files(msg);
+    }
+
+    template <typename Client>
+    static void sweep_outgoing(Client& c) {
+        c._sweep_outgoing();
+    }
+
+    /// Whether a Client has no thumbnail queued or being made.  Made on a thread of their own and
+    /// then written and recorded, so this is the only way a test can know that nothing more is
+    /// coming, rather than that nothing has come yet.
+    template <typename Client>
+    static bool thumbnails_idle(Client& c) {
+        return c.core.call_get([&c] { return !c._derived_running && c._derived_pending.empty(); });
+    }
+
+    /// Makes a Client act as though a thumbnail were being made, so that whatever is queued from
+    /// now on stays queued: what the process ending with thumbnails still to make leaves behind.
+    template <typename Client>
+    static void stall_thumbnails(Client& c) {
+        c.core.call_get([&c] { c._derived_running = true; });
+    }
+
+    /// Waits for whatever the derive loop is running or has queued, unless a test is holding the
+    /// thread (`hold_thumbnail_thread`), when waiting would be waiting on the test itself.
+    template <typename Client>
+    static void drain_derive_loop(Client& c) {
+        if (derive_holds > 0)
+            return;
+        // Through the queue rather than the loop, so this runs behind whatever is already queued.
+        c._derive_jq->call_get([] { return 0; });
+    }
+
+    inline static std::atomic<int> derive_holds{0};
+
+    /// Undoes `stall_thumbnails`: whatever queued meanwhile is made now.
+    template <typename Client>
+    static void resume_thumbnails(Client& c) {
+        c.core.call_get([&c] {
+            c._derived_running = false;
+            c._pump_derived();
+        });
+    }
+
+    /// Queues what a Client queues at open.
+    template <typename Client>
+    static void thumbnail_pass(Client& c) {
+        c.core.call_get([&c] { c._thumbnail_pass(); });
+    }
+
+    /// Makes a Client act as though it were decoding `entry`'s thumbnail, with no answer to come.
+    template <typename Client>
+    static void pretend_thumbnail_attempt(Client& c, int64_t entry) {
+        c.core.call_get([&c, entry] {
+            c._derived_running = true;
+            c._derived_attempt.emplace(entry, client::cache::Derived::thumbnail);
+        });
+    }
+
+    template <typename Client>
+    static size_t thumbnails_queued(Client& c) {
+        return c.core.call_get([&c] { return c._derived_pending.size(); });
+    }
+
+    template <typename Client>
+    static std::vector<int64_t> thumbnails_pending(Client& c) {
+        return c.core.call_get([&c] {
+            std::vector<int64_t> entries;
+            for (const auto& p : c._derived_pending)
+                entries.push_back(p.entry);
+            return entries;
+        });
+    }
+
+    /// Occupies a Client's thumbnail thread, or its disk loop, until the returned promise is set:
+    /// whatever is posted there meanwhile waits behind it.
+    template <typename Client>
+    static std::shared_ptr<std::promise<void>> hold_thumbnail_thread(Client& c) {
+        auto release = std::make_shared<std::promise<void>>();
+        // Let go when the job is destroyed, run or dropped by a queue that stopped first: the
+        // count must not outlive the Client it was taken on.
+        ++derive_holds;
+        std::shared_ptr<void> held{nullptr, [](void*) { --derive_holds; }};
+        c._post_derive([f = release->get_future().share(), held] { f.wait(); });
+        return release;
+    }
+    template <typename Client>
+    static std::shared_ptr<std::promise<void>> hold_disk_loop(Client& c) {
+        auto release = std::make_shared<std::promise<void>>();
+        c._post_disk([f = release->get_future().share()] { f.wait(); });
+        return release;
     }
 
     /// Drives the database-to-config direction directly, which is what makes the round-trip

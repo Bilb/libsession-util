@@ -49,22 +49,25 @@ struct SenderKeys {
 /// RAII Client over a unique temporary database, mirroring TempCore.  Unlike TempCore this can
 /// close and reopen the same file, which is how the restart behaviour is exercised.
 struct TempClient {
-    std::filesystem::path path;
+    std::filesystem::path path{
+            std::filesystem::temp_directory_path() /
+            fmt::format("{}.db", random::unique_id("test_client", 7))};
     std::unique_ptr<Client> client;
 
-    template <core::CoreOption... Opts>
+    template <ClientOption... Opts>
     explicit TempClient(Opts&&... opts) :
-            path{std::filesystem::temp_directory_path() /
-                 fmt::format("{}.db", random::unique_id("test_client", 7))},
             client{std::make_unique<Client>(path, std::forward<Opts>(opts)...)} {}
 
-    template <core::CoreOption... Opts>
+    template <ClientOption... Opts>
     explicit TempClient(callbacks cbs, Opts&&... opts) :
-            path{std::filesystem::temp_directory_path() /
-                 fmt::format("{}.db", random::unique_id("test_client", 7))},
             client{std::make_unique<Client>(path, std::move(cbs), std::forward<Opts>(opts)...)} {}
 
-    template <core::CoreOption... Opts>
+    /// Leaves the file for the test to create; the first reopen() opens it.
+    struct unopened_t {};
+    static constexpr unopened_t unopened{};
+    explicit TempClient(unopened_t) {}
+
+    template <ClientOption... Opts>
     void reopen(Opts&&... opts) {
         client.reset();
         client = std::make_unique<Client>(path, std::forward<Opts>(opts)...);
@@ -79,6 +82,28 @@ struct TempClient {
     Client* operator->() { return client.get(); }
     Client& operator*() { return *client; }
 };
+
+/// Opens `path` as a release from before client migration `first_missing` would have created it:
+/// the client schema built from `old_full_schema`, that release's client full_schema.sql, and only
+/// the migrations ahead of `first_missing` recorded.  A Client opened on it afterwards upgrades it.
+///
+/// The old schema has to be supplied: a database without a client schema is built from today's
+/// full_schema.sql, never by replaying migrations, so no stopping point alone yields an older one.
+inline core::Core open_client_schema_before(
+        const std::filesystem::path& path,
+        std::string_view first_missing,
+        std::string_view old_full_schema) {
+    auto stop = std::ranges::find(
+            client::schema::MIGRATIONS, first_missing, &core::schema::Migration::name);
+    if (stop == client::schema::MIGRATIONS.end())
+        throw std::invalid_argument{fmt::format("no client migration named {}", first_missing)};
+    return core::Core{
+            path,
+            core::schema_extension{
+                    "client",
+                    client::schema::MIGRATIONS.first(stop - client::schema::MIGRATIONS.begin()),
+                    old_full_schema}};
+}
 
 /// A cache directory that removes itself, so a failing assertion cannot leave one behind.
 struct TempCacheDir {
@@ -238,11 +263,13 @@ struct Recorder {
 /// connection can see the row as it was, or not at all.  A test that waits on state written that
 /// way is testing the scheduler.  Wait on the observable outcome instead.
 inline void sync(Client& c) {
-    // Work goes back and forth between the two: a download's bytes are handled on the disk loop,
-    // which reports its end onto Core's, which may send it back to read the file.  A few rounds
+    // Work goes back and forth between the loops: a download's bytes are handled on the disk loop,
+    // which reports its end onto Core's, which may send it back to read the file; a send with a
+    // picture derives on its own loop first, then uploads through the disk loop.  A few rounds
     // covers the longest such exchange.
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 5; i++) {
         c.core.disk_loop()->call_get([] { return 0; });
+        TestHelper::drain_derive_loop(c);
         c.core.loop().call_get([] { return 0; });
     }
 }
