@@ -5797,8 +5797,9 @@ void Client::_convert_outgoing(
             } catch (const std::exception&) {
             }
         } catch (const std::exception& e) {
-            // Never sent as it is: a picture that failed to re-encode would carry everything.
-            log::warning(
+            // Never sent as it is: a picture that failed to re-encode would carry everything.  The
+            // detail at debug only, since it can name the user's file.
+            log::debug(
                     cat,
                     "Attachment {} of message {} could not be read for sending: {}",
                     index,
@@ -5810,28 +5811,33 @@ void Client::_convert_outgoing(
     };
 
     auto finish = [this, client_id, index, path, file_size, on_upload](Converted c) mutable {
-        auto fail = [&](std::string_view code, std::string message, bool permanent) {
+        // `reason` is what is logged, and never names the file; `message` is the caller's.
+        auto fail = [&](std::string_view code,
+                        std::string_view reason,
+                        std::string message,
+                        bool permanent) {
             log::warning(
                     cat,
                     "Attachment {} of message {} is not sent ({}): {}",
                     index,
                     client_id,
                     code,
-                    message);
+                    reason);
             if (on_upload)
                 on_upload(index, 0, 0, unexpected{Error{code, std::move(message)}});
             _fail_attachment_send(client_id, permanent);
         };
         switch (c.outcome) {
-            case Outcome::too_large:
-                return fail(
-                        err::attachment_too_large,
-                        c.undecodable ? "the picture is too large to decode"
-                                      : "the file does not fit the file server's limit",
-                        /*permanent=*/true);
+            case Outcome::too_large: {
+                std::string_view reason = c.undecodable
+                                                ? "the picture is too large to decode"
+                                                : "the file does not fit the file server's limit";
+                return fail(err::attachment_too_large, reason, std::string{reason}, true);
+            }
             case Outcome::unreadable:
                 return fail(
                         err::attachment_unreadable,
+                        "it could not be read",
                         "{} could not be read for sending"_format(path),
                         /*permanent=*/false);
             case Outcome::original:
@@ -5972,10 +5978,10 @@ void Client::_upload_one(
     if (!file_size) {
         log::warning(
                 cat,
-                "Attachment {} of message {} is gone ({}); the message cannot be sent",
+                "Attachment {} of message {} is gone; the message cannot be sent",
                 index,
-                client_id,
-                path);
+                client_id);
+        log::debug(cat, "Attachment {} of message {} was {}", index, client_id, path);
         if (on_upload)
             on_upload(
                     index,

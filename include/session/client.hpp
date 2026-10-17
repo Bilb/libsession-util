@@ -326,6 +326,10 @@ class Client {
     /// from the extension when unset as `send_message` infers it.  Says nothing about an attachment
     /// marked `OutgoingAttachment::original_file`, which is sent as it is whatever it holds.
     ///
+    /// The file server's limit is the one known when asked: before the network has the server's
+    /// configuration it is the 10 MB default, and the send is held to whatever it is by then.  A
+    /// symbolic link is followed, although `OutgoingAttachment::take_file` refuses one.
+    ///
     /// The await form reads the file on the calling thread; the callback form on the disk thread.
     void attachment_send_plan(
             std::filesystem::path path,
@@ -948,6 +952,9 @@ class Client {
     template <ClientOption... Opts>
     static core::Core _make_core(
             std::filesystem::path db_path, core::callbacks cbs, Opts&&... opts) {
+        static_assert(
+                (int{std::same_as<std::remove_cvref_t<Opts>, sqlite::post_open>} + ... + 0) <= 1,
+                "At most one sqlite::post_open can be given.");
         auto theirs = core::detail::maybe_instance<sqlite::post_open>(opts...);
         sqlite::post_open ours{
                 [theirs = theirs ? std::move(theirs->post_open) : nullptr](sqlite::Connection& c) {
