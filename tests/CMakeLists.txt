@@ -100,9 +100,6 @@ target_link_libraries(test_libs INTERFACE
     # The image tests inspect libvips and libheif directly to confirm what libsession::image did.
     sessiondep::vips
     sessiondep::libheif)
-if(SESSION_ENABLE_JPEGLI)
-    target_compile_definitions(test_libs INTERFACE SESSION_ENABLE_JPEGLI)
-endif()
 
 add_executable(testAll main.cpp ${LIB_SESSION_UTESTS_SOURCES})
 target_include_directories(testAll PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -160,6 +157,14 @@ if(BUILD_LIVE_TESTS)
     target_link_libraries(quic-files PRIVATE test_libs)
     target_include_directories(quic-files PRIVATE
         ${CMAKE_SOURCE_DIR}/external/session-router/external/CLI11/include)
+endif()
+
+add_library(shared-link-check MODULE shared_link_check.cpp)
+target_link_libraries(shared-link-check PRIVATE libsession::client libsession::image)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # So that what an application calls is shown to be linked in, not only that what is linked is
+    # position-independent.
+    target_link_options(shared-link-check PRIVATE "LINKER:--no-undefined")
 endif()
 
 add_executable(swarm-auth-test EXCLUDE_FROM_ALL swarm-auth-test.cpp)
