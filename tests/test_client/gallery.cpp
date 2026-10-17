@@ -53,6 +53,13 @@ TEST_CASE("Client: a message that can be a gallery starts as one", "[client][gal
         CHECK(m->gallery_viewable);
         CHECK(m->gallery);
 
+        auto labelled = arrive(
+                *c, peer, convo, hash + "l", {"image/jpeg; charset=binary", "IMAGE/PNG ; foo=bar"});
+        m = c->message(labelled, await);
+        REQUIRE(m);
+        CHECK(m->gallery_viewable);
+        CHECK(m->gallery);
+
         auto mixed = arrive(*c, peer, convo, hash + "m", {"image/jpeg", "application/pdf"});
         m = c->message(mixed, await);
         REQUIRE(m);
@@ -60,7 +67,10 @@ TEST_CASE("Client: a message that can be a gallery starts as one", "[client][gal
         CHECK_FALSE(m->gallery);
 
         for (auto [suffix, type] :
-             {std::pair{"d", "application/pdf"}, std::pair{"s", "image/svg+xml"}}) {
+             {std::pair{"d", "application/pdf"},
+              std::pair{"s", "image/svg+xml"},
+              std::pair{"j", "image/jpeg2000"},
+              std::pair{"a", "image/apng"}}) {
             auto one = arrive(*c, peer, convo, hash + suffix, {type});
             m = c->message(one, await);
             REQUIRE(m);

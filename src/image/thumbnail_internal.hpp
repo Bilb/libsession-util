@@ -20,8 +20,8 @@ std::optional<std::vector<std::byte>> thumbnail(Source& source, uint32_t edge, B
 // Shared by `thumbnail`, `rendition` and `sendable`.
 
 // Whether a probed image is one we decode at all: decodable, within the pixel limits, and within
-// `max_whole_decode_bytes` if its format decodes whole.
-bool acceptable(const Info& info);
+// `max_whole_decode_bytes` if its format decodes whole, when `scaled` makes it `box` x `box`.
+bool acceptable(const Info& info, uint32_t box, bool crop);
 
 // The picture scaled to `width` x `height`: covering it and cropped to the centre when `crop`,
 // else fitted inside it and never enlarged.  Orientation applied, converted to sRGB from any

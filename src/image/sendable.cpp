@@ -10,6 +10,7 @@
 
 #include "jpeg_encode.hpp"
 #include "session/attachments.hpp"
+#include "session/image/content_types.hpp"
 #include "session/image/probe.hpp"
 #include "source_internal.hpp"
 #include "thumbnail_internal.hpp"
@@ -65,11 +66,40 @@ Reencoded detail::reencode(Source& source, const Info& info, uint32_t box, int q
 }
 
 SendableVerdict sendable_verdict(const Info& info) {
-    if (!info.decodable)
+    if (!info.decodable || info.first_frame_only())
         return SendableVerdict::cannot_decode;
-    if (!detail::acceptable(info) || !info.within_pixel_limits(true))
+    if (!detail::acceptable(
+                info, std::min(sendable_edge, std::max(info.width, info.height)), false) ||
+        !info.within_pixel_limits(true))
         return SendableVerdict::too_large;
     return SendableVerdict::encode;
+}
+
+SendPlan send_plan(
+        Source& source, std::optional<std::string_view> content_type, uint64_t max_encrypted_size) {
+    // The plaintext first, which encryption only grows, so that the cast cannot truncate.
+    const bool fits =
+            source.size() <= max_encrypted_size &&
+            attachment::encrypted_size(static_cast<size_t>(source.size())) <= max_encrypted_size;
+    auto info = probe(source);
+    if (!info) {
+        if (recognized(source))
+            return SendPlan::unreadable;
+        if (!fits)
+            return SendPlan::too_large_for_server;
+        return content_type && declares_image(*content_type) ? SendPlan::original_cannot_decode
+                                                             : SendPlan::as_is;
+    }
+    switch (sendable_verdict(*info)) {
+        case SendableVerdict::cannot_decode:
+            if (!fits)
+                return SendPlan::too_large_for_server;
+            return info->first_frame_only() ? SendPlan::original_animated_png
+                                            : SendPlan::original_cannot_decode;
+        case SendableVerdict::too_large: return SendPlan::too_large_to_decode;
+        case SendableVerdict::encode: break;
+    }
+    return SendPlan::reencoded;
 }
 
 std::optional<Sendable> sendable(Source& source, size_t max_encrypted_size) {

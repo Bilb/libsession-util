@@ -5,6 +5,7 @@
 #include <libheif/heif_tiling.h>
 #include <vips/vips.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -110,6 +111,114 @@ namespace {
         return type;
     }
 
+    // Reads exactly `size` bytes, or fails.
+    bool read_exact(VipsSource* source, void* data, size_t size) {
+        auto* out = static_cast<char*>(data);
+        while (size > 0) {
+            gint64 n = vips_source_read(source, out, size);
+            if (n <= 0)
+                return false;
+            out += n;
+            size -= static_cast<size_t>(n);
+        }
+        return true;
+    }
+
+    // The most frames an APNG is reported as having: acTL's count is unchecked, and is only ever
+    // used to say whether it is animated.
+    constexpr uint32_t MAX_APNG_FRAMES = 65'535;
+
+    // The frame count an animated PNG's acTL chunk declares, at most MAX_APNG_FRAMES, or 0 for a
+    // still PNG.  libvips ignores the chunk, which the APNG spec requires to come before the first
+    // IDAT.
+    uint32_t apng_frames(Source& src) {
+        VipsSource* vsrc = detail::source_access::vips(src);
+        if (vips_source_rewind(vsrc))
+            return 0;
+        uint32_t frames = 0;
+        unsigned char head[12];
+        // 64-bit, so a crafted length cannot wrap the position back on a 32-bit build.
+        int64_t at = 8;
+        if (read_exact(vsrc, head, 8))
+            while (read_exact(vsrc, head, 8)) {
+                uint64_t len = uint64_t(head[0]) << 24 | uint64_t(head[1]) << 16 |
+                               uint64_t(head[2]) << 8 | uint64_t(head[3]);
+                std::string_view type{reinterpret_cast<const char*>(head) + 4, 4};
+                if (type == "acTL") {
+                    if (len >= 4 && read_exact(vsrc, head, 4))
+                        frames = uint32_t(head[0]) << 24 | uint32_t(head[1]) << 16 |
+                                 uint32_t(head[2]) << 8 | uint32_t(head[3]);
+                    break;
+                }
+                if (type == "IDAT" || len > 0x7FFF'FFFF)
+                    break;
+                at += 12 + static_cast<int64_t>(len);
+                if (vips_source_seek(vsrc, at, SEEK_SET) != at)
+                    break;
+            }
+        vips_source_rewind(vsrc);
+        return std::min(frames, MAX_APNG_FRAMES);
+    }
+
+    // What libjpeg allocates for a progressive JPEG's coefficients, from its frame header's own
+    // sampling factors: per component, its blocks padded to whole MCUs, at 128 bytes a block.
+    // nullopt if the header cannot be found or makes no sense.
+    std::optional<uint64_t> jpeg_coefficient_bytes(Source& src) {
+        VipsSource* vsrc = detail::source_access::vips(src);
+        if (vips_source_rewind(vsrc))
+            return std::nullopt;
+        std::optional<uint64_t> bytes;
+        unsigned char m[4];
+        int64_t at = 2;
+        if (read_exact(vsrc, m, 2) && m[0] == 0xFF && m[1] == 0xD8)
+            while (read_exact(vsrc, m, 4) && m[0] == 0xFF) {
+                uint8_t marker = m[1];
+                int64_t len = int64_t{m[2]} << 8 | m[3];
+                // Fill bytes before a marker.
+                if (marker == 0xFF) {
+                    at += 1;
+                    if (vips_source_seek(vsrc, at, SEEK_SET) != at)
+                        break;
+                    continue;
+                }
+                bool sof = marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 &&
+                           marker != 0xCC;
+                if (sof) {
+                    unsigned char hdr[6 + 3 * 4];
+                    if (len < 8 || !read_exact(vsrc, hdr, 6))
+                        break;
+                    uint32_t height = uint32_t{hdr[1]} << 8 | hdr[2],
+                             width = uint32_t{hdr[3]} << 8 | hdr[4], n = hdr[5];
+                    if (!width || !height || n < 1 || n > 4 || len != 8 + 3 * int64_t{n} ||
+                        !read_exact(vsrc, hdr + 6, 3 * n))
+                        break;
+                    uint32_t hmax = 1, vmax = 1;
+                    for (uint32_t i = 0; i < n; i++) {
+                        hmax = std::max<uint32_t>(hmax, hdr[6 + 3 * i + 1] >> 4);
+                        vmax = std::max<uint32_t>(vmax, hdr[6 + 3 * i + 1] & 0xF);
+                    }
+                    uint64_t total = 0;
+                    for (uint32_t i = 0; i < n; i++) {
+                        uint32_t h = hdr[6 + 3 * i + 1] >> 4, v = hdr[6 + 3 * i + 1] & 0xF;
+                        if (h < 1 || h > 4 || v < 1 || v > 4)
+                            return std::nullopt;
+                        uint64_t across = (uint64_t{width} * h + 8 * hmax - 1) / (8 * hmax),
+                                 down = (uint64_t{height} * v + 8 * vmax - 1) / (8 * vmax);
+                        total += (across + h - 1) / h * h * ((down + v - 1) / v * v) * 128;
+                    }
+                    bytes = total;
+                    break;
+                }
+                if (marker == 0xDA || marker == 0xD9 || len < 2)
+                    break;
+                at += 2 + len;
+                if (vips_source_seek(vsrc, at, SEEK_SET) != at)
+                    break;
+            }
+        vips_source_rewind(vsrc);
+        return bytes;
+    }
+
 }  // namespace
 
 bool recognized(Source& source) {
@@ -165,6 +274,10 @@ std::optional<Info> probe(Source& source) {
     } else
         return std::nullopt;
 
+    uint32_t png_frames = info.format == Format::png ? apng_frames(source) : 0;
+    auto coefficients = info.format == Format::jpeg ? jpeg_coefficient_bytes(source) : std::nullopt;
+    detail::source_access::rethrow_error(source);
+
     VipsImage* raw =
             vips_image_new_from_source(vsrc, "", "access", VIPS_ACCESS_SEQUENTIAL, nullptr);
     detail::source_access::rethrow_error(source);
@@ -177,10 +290,12 @@ std::optional<Info> probe(Source& source) {
     info.width = static_cast<uint32_t>(img->Xsize);
     info.height = static_cast<uint32_t>(vips_image_get_page_height(img.get()));
     info.frames = heif ? 1 : static_cast<uint32_t>(vips_image_get_n_pages(img.get()));
+    info.frames = std::max(info.frames, png_frames);
     info.orientation = static_cast<uint8_t>(vips_image_get_orientation(img.get()));
     if (info.orientation >= 5)
         std::swap(info.width, info.height);
     info.has_alpha = vips_image_hasalpha(img.get());
+    info.bands = static_cast<uint8_t>(img->Bands);
     info.bits_per_sample = static_cast<uint8_t>(8 * vips_format_sizeof_unsafe(img->BandFmt));
     int interlaced = 0;
     if (vips_image_get_typeof(img.get(), "interlaced"))
@@ -192,6 +307,13 @@ std::optional<Info> probe(Source& source) {
         case Format::heic: info.decoded_whole = !detail::platform_decodes(Format::heic); break;
         case Format::gif:
         case Format::avif: info.decoded_whole = true; break;
+    }
+    if (info.format == Format::jpeg && interlaced) {
+        // Without the frame header's factors: a JPEG's most components, all at full size, in MCUs
+        // of up to 32 pixels.
+        uint64_t padded =
+                uint64_t{(img->Xsize + 31u) / 32u * 32u} * ((img->Ysize + 31u) / 32u * 32u);
+        info.coefficient_bytes = coefficients.value_or(2 * padded * 4);
     }
     info.decodable = can_decode(info.format);
     info.size = source.size();

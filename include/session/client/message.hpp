@@ -186,7 +186,7 @@ struct Message {
     /// Whether this message *can* be shown as a gallery rather than as a list of attachments.
     ///
     /// Derived, never stored, and the rule is ours: today it is "has attachments, and every one of
-    /// them has a content type Session displays as an image" (image::displayable_image_types, which
+    /// them has a content type Session displays as an image" (image::is_displayable_image, which
     /// matches what libsession will decode), but it may gain a size ceiling.  Deriving it means a
     /// change to that rule takes effect on old messages too, rather than leaving stored answers
     /// from whatever the rule used to be.

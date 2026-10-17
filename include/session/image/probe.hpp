@@ -37,6 +37,7 @@ struct Info {
 
     /// 1 for a still image.  Always 1 for HEIC and AVIF: a HEIF file's other images are bursts,
     /// depth maps and the like rather than animation frames, and only its primary image is used.
+    /// An animated PNG's is what its acTL chunk declares, capped at 65535; see `first_frame_only`.
     uint32_t frames;
 
     /// EXIF orientation, 1 to 8 (1 being upright).
@@ -58,7 +59,20 @@ struct Info {
     /// The encoded size in bytes: Source::size().
     uint64_t size;
 
+    /// Bands a decoded pixel has: 1 for grey, 3 for colour, 4 for CMYK or with alpha.
+    uint8_t bands;
+
+    /// What a progressive JPEG's decoder holds whatever size it decodes to: 128 bytes for every 8x8
+    /// block of every component, at the resolution its frame header's sampling factors give it and
+    /// padded to whole MCUs, as libjpeg allocates them.  0 for anything else.
+    uint64_t coefficient_bytes;
+
     bool animated() const { return frames > 1; }
+
+    /// An animation libvips decodes only the first frame of: an animated PNG (APNG), whatever its
+    /// content type says.  That frame makes its thumbnail, but it is neither re-encoded to send nor
+    /// given a rendition, which would turn the animation into a still.
+    bool first_frame_only() const { return format == Format::png && animated(); }
 
     /// Whether decoding is within our pixel limits: `max_frame_pixels` for one frame, and also
     /// `max_total_pixels` across them when `all_frames` are to be decoded.

@@ -17,7 +17,7 @@ inline constexpr uint32_t max_rendition_edge = 4096;
 
 /// Raised with any change to `rendition`, or to the decoders it uses, that could make a rendition
 /// of an image it refused before.  A caller that remembers refusals retries them once it changes.
-inline constexpr int renderer_version = 2;
+inline constexpr int renderer_version = 3;
 
 /// API: image/rendition
 ///
@@ -32,8 +32,9 @@ inline constexpr int renderer_version = 2;
 /// - 8-bit sRGB at `thumbnail_quality`, with no metadata at all.
 ///
 /// Returns nullopt for anything that is not an image we accept, under the same rules as
-/// `thumbnail`, and for an animation whose frames together exceed `max_total_pixels`.  The same
-/// image always gets the same answer from the same `renderer_version`.
+/// `thumbnail`, for an animation whose frames together exceed `max_total_pixels`, and for one
+/// libvips decodes only the first frame of (`Info::first_frame_only`): a viewer draws the original.
+/// The same image always gets the same answer from the same `renderer_version`.
 ///
 /// Throws std::runtime_error as `thumbnail` does.
 std::optional<std::vector<std::byte>> rendition(Source& source, uint32_t edge);

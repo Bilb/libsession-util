@@ -15,6 +15,7 @@
 #include <session/client/message.hpp>
 #include <session/clock.hpp>
 #include <session/core.hpp>
+#include <session/image/sendable.hpp>
 #include <session/util.hpp>
 #include <string>
 #include <string_view>
@@ -318,6 +319,27 @@ class Client {
             await_t);
     int64_t send_message(const ConversationId& id, OutgoingMessage msg, await_t);
 
+    /// What sending the file at `path` as an attachment would do with it, decided from its header
+    /// alone exactly as the send will decide it (`image::send_plan`), under the file server's
+    /// limit: for a staging screen to say before sending that a file will be refused, or will go
+    /// as the original rather than re-encoded.  `content_type` is the attachment's label, inferred
+    /// from the extension when unset as `send_message` infers it.  Says nothing about an attachment
+    /// marked `OutgoingAttachment::original_file`, which is sent as it is whatever it holds.
+    ///
+    /// The file server's limit is the one known when asked: before the network has the server's
+    /// configuration it is the 10 MB default, and the send is held to whatever it is by then.  A
+    /// symbolic link is followed, although `OutgoingAttachment::take_file` refuses one.
+    ///
+    /// The await form reads the file on the calling thread; the callback form on the disk thread.
+    void attachment_send_plan(
+            std::filesystem::path path,
+            std::optional<std::string> content_type,
+            result_function<image::SendPlan> cb);
+    image::SendPlan attachment_send_plan(
+            const std::filesystem::path& path,
+            const std::optional<std::string>& content_type,
+            await_t);
+
     /// Sends a failed message again, resuming rather than restarting: attachments that already
     /// reached the file server are left alone and only the ones that did not are uploaded, because
     /// what each upload achieved is recorded against the message.  A message whose files all got
@@ -497,7 +519,9 @@ class Client {
     ///
     /// Kept, evicted, counted and read as a thumbnail is: part of the file's cache entry, gone
     /// with it, and marking the file used when read.  A picture no rendition can be made of is
-    /// refused under `image::renderer_version` and not tried again until that rises.
+    /// refused under `image::renderer_version` and not tried again until that rises.  So is an
+    /// animated PNG labelled `image/png`: libvips decodes only its first frame, so the original is
+    /// what a viewer draws (`image::Info::first_frame_only`).
     ///
     /// For an attachment sent as its original file (`Attachment::original_file`) asking never
     /// queues one: it is a file to export, not a picture to open.
@@ -920,10 +944,24 @@ class Client {
     uint32_t _default_thumbnail_edge;
     uint32_t _default_rendition_edge;
 
-    // Core, built from the options that are Core's: everything but Client's own.
+    // The SQL functions Client's queries call, on every connection the database opens.
+    static void _register_sql_functions(sqlite::Connection& c);
+
+    // Core, built from the options that are Core's: everything but Client's own.  An application's
+    // own `sqlite::post_open` runs after Client's.
     template <ClientOption... Opts>
     static core::Core _make_core(
             std::filesystem::path db_path, core::callbacks cbs, Opts&&... opts) {
+        static_assert(
+                (int{std::same_as<std::remove_cvref_t<Opts>, sqlite::post_open>} + ... + 0) <= 1,
+                "At most one sqlite::post_open can be given.");
+        auto theirs = core::detail::maybe_instance<sqlite::post_open>(opts...);
+        sqlite::post_open ours{
+                [theirs = theirs ? std::move(theirs->post_open) : nullptr](sqlite::Connection& c) {
+                    _register_sql_functions(c);
+                    if (theirs)
+                        theirs(c);
+                }};
         return std::apply(
                 [&]<typename... CoreOpts>(CoreOpts&&... core_opts) {
                     return core::Core{
@@ -931,10 +969,13 @@ class Client {
                             std::move(cbs),
                             core::schema_extension{
                                     "client", schema::MIGRATIONS, schema::FULL_SCHEMA},
+                            std::move(ours),
                             std::forward<CoreOpts>(core_opts)...};
                 },
                 std::tuple_cat([]<typename T>(T&& o) {
-                    if constexpr (core::CoreOption<T>)
+                    if constexpr (
+                            core::CoreOption<T> &&
+                            !std::same_as<std::remove_cvref_t<T>, sqlite::post_open>)
                         return std::tuple<std::remove_cvref_t<T>>{std::forward<T>(o)};
                     else
                         return std::tuple<>{};
@@ -1568,8 +1609,11 @@ class Client {
             size_t index,
             std::string path,
             int64_t file_size,
-            bool declared_image,
+            std::optional<std::string> content_type,
             Conversation::upload_progress on_upload);
+
+    // The file server's limit on one file, which applies to it encrypted.
+    uint64_t _attachment_max_encrypted_size();
 
     // The rest of `_upload_next`, once the file is known: uploads attachment `index` from `path`,
     // or from `body` when that is set, or fails the message for good if `file_size` says the file

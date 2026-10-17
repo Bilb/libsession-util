@@ -100,11 +100,31 @@ namespace detail {
 
     }  // namespace
 
-    bool acceptable(const Info& info) {
+    uint32_t jpeg_shrink(const Info& info, uint32_t box, bool crop) {
+        // As vips_thumbnail chooses it: to the box's side by the picture's shorter side for a
+        // cover, its longer for a fit, leaving at least a factor of two to the resize after.
+        double shrink = double(crop ? std::min(info.width, info.height)
+                                    : std::max(info.width, info.height)) /
+                        std::max(box, 1u);
+        return shrink >= 16 ? 8 : shrink >= 8 ? 4 : shrink >= 4 ? 2 : 1;
+    }
+
+    uint64_t whole_decode_bytes(const Info& info, uint32_t box, bool crop) {
+        if (info.coefficient_bytes) {
+            // What a progressive decode takes beyond a baseline one.  Measured at 45 MP: within 1%
+            // under and 3% over for a thumbnail; for a full-size send the output term is all
+            // margin, the extra being the coefficients alone.
+            uint64_t s = jpeg_shrink(info, box, crop);
+            return info.coefficient_bytes +
+                   (info.width + s - 1) / s * ((info.height + s - 1) / s) * info.bands;
+        }
+        return uint64_t{info.width} * info.height * whole_decode_bytes_per_pixel(info);
+    }
+
+    bool acceptable(const Info& info, uint32_t box, bool crop) {
         return info.decodable && info.within_pixel_limits(false) && info.width && info.height &&
                !(info.decoded_whole &&
-                 uint64_t{info.width} * info.height * whole_decode_bytes_per_pixel(info) >
-                         max_whole_decode_bytes);
+                 whole_decode_bytes(info, box, crop) > max_whole_decode_bytes);
     }
 
     // vips_thumbnail applies EXIF orientation, loads the first frame of an animation unless told
@@ -184,11 +204,12 @@ namespace detail {
     std::optional<std::vector<std::byte>> thumbnail(
             Source& source, uint32_t edge, Backdrop backdrop) {
         auto info = probe(source);
-        if (!info || !acceptable(*info))
+        if (!info)
             return std::nullopt;
-
         edge = std::clamp(edge, min_thumbnail_edge, max_thumbnail_edge);
         uint32_t side = std::min({edge, info->width, info->height});
+        if (!acceptable(*info, side, true))
+            return std::nullopt;
 
         // libvips evaluates lazily, so a read of an encrypted source can fail anywhere from here
         // to the end of encoding; its own exception, rather than libvips' generic read error, is
@@ -209,9 +230,11 @@ std::optional<std::vector<std::byte>> thumbnail(Source& source, uint32_t edge) {
 
 std::optional<std::vector<std::byte>> thumbhash::of_picture(Source& source) {
     auto info = probe(source);
-    if (!info || !detail::acceptable(*info))
+    if (!info)
         return std::nullopt;
     auto box = std::min(thumbhash::max_input_dimension, std::max(info->width, info->height));
+    if (!detail::acceptable(*info, box, false))
+        return std::nullopt;
 
     try {
         auto img = detail::to_srgb8(detail::scaled(source, *info, box, box, false).get());

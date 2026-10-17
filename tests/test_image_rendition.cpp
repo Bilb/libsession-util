@@ -126,6 +126,16 @@ TEST_CASE("rendition refuses what thumbnail refuses", "[image][rendition]") {
     CHECK_FALSE(render(image_fixtures::avif8_4900x4900, 1000));
 }
 
+TEST_CASE("an animated PNG has a thumbnail but no rendition", "[image][rendition]") {
+    // A rendition would be its first frame only, drawn in place of the animation.
+    auto still = save(draw(600, 400, [](int, int) { return BLUE; }).get(), ".png");
+    auto apng = animated_png(still);
+    CHECK(render(still, 1000));
+    CHECK_FALSE(render(apng, 1000));
+    image::Source src{std::span<const std::byte>{apng}};
+    CHECK(image::thumbnail(src, 200));
+}
+
 TEST_CASE(
         "rendition_is_original says yes only to what rendition would make the same",
         "[image][rendition]") {

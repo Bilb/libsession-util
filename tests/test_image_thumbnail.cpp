@@ -323,13 +323,13 @@ TEST_CASE(
         REQUIRE(vips_copy(black, &srgb, "interpretation", VIPS_INTERPRETATION_sRGB, nullptr) == 0);
         return image_ptr{srgb};
     };
-    // A progressive JPEG is budgeted at 10 bytes a pixel, about 35 MP.
-    auto under = solid(4097, 4096), over = solid(6400, 6400);
-
-    CHECK(thumb(save(under.get(), ".jpg[interlace]"), 64));
-    CHECK_FALSE(thumb(save(over.get(), ".jpg[interlace]"), 64));
+    // A progressive JPEG costs 2 bytes a coefficient, shrunk by 8 to a thumbnail: at 4:4:4 that is
+    // 6 bytes a pixel, about 58 MP.
+    auto under = solid(6400, 6400), over = solid(7800, 7800);
+    CHECK(thumb(save(under.get(), ".jpg[interlace,subsample_mode=off]"), 64));
+    CHECK_FALSE(thumb(save(over.get(), ".jpg[interlace,subsample_mode=off]"), 64));
     // A baseline JPEG shrinks as it decodes, so its size is no reason to refuse it.
-    CHECK(thumb(save(over.get(), ".jpg"), 64));
+    CHECK(thumb(save(over.get(), ".jpg[subsample_mode=off]"), 64));
 
     // 16 bits a sample cost 10 bytes a pixel against 8 bits' 6: 36 MP is over one, not the other.
     VipsImage *black, *deep, *grey;
@@ -349,6 +349,26 @@ TEST_CASE(
     REQUIRE(info);
     CHECK(info->bits_per_sample == 16);
     CHECK_FALSE(thumb(image_fixtures::avif10_3700x3700, 64));
+}
+
+TEST_CASE(
+        "a progressive JPEG's output is costed at the shrink a cover or a fit would load it at",
+        "[image][thumbnail]") {
+    // Tall: a cover to 256 is bound by the 2000 side, shrinking by 2; a fit by 16000, by 8.
+    image::Info info{};
+    info.format = image::Format::jpeg;
+    info.width = 2000;
+    info.height = 16000;
+    info.frames = 1;
+    info.orientation = 1;
+    info.decoded_whole = true;
+    info.bits_per_sample = 8;
+    info.decodable = true;
+    info.bands = 3;
+    // Room for the output at 1/8 (1.5 MB) and not at 1/2 (24 MB).
+    info.coefficient_bytes = image::max_whole_decode_bytes - (10 << 20);
+    CHECK(image::detail::acceptable(info, 256, false));
+    CHECK_FALSE(image::detail::acceptable(info, 256, true));
 }
 
 TEST_CASE("thumbhash::of_picture hashes a scaled-down, upright picture", "[image][thumbhash]") {
