@@ -58,7 +58,8 @@ enum class SendPlan {
     original_animated_png,
     /// Refused: a picture past the decode limits.
     too_large_to_decode,
-    /// Refused: larger than the size limit, and not a picture that re-encoding could shrink.
+    /// Refused: larger than the size limit once encrypted, and not a picture that re-encoding could
+    /// shrink.
     too_large_for_server,
     /// Refused for now: a picture whose header is damaged, which is never sent as it is.
     unreadable,
@@ -74,10 +75,12 @@ enum class SendPlan {
 ///
 /// - `content_type`: what the file is labelled (`declares_image`); a file with none counts as not
 ///   labelled a picture.
-/// - `max_size`: the file server's limit on a file, which a file sent as it is must be within.
+/// - `max_encrypted_size`: the file server's limit on a file, which applies to what is uploaded: a
+///   file sent as it is must be within it once encrypted (`attachment::encrypted_size`).
 ///
 /// Throws std::runtime_error if reading the source fails, as `probe` does.
-SendPlan send_plan(Source& source, std::optional<std::string_view> content_type, uint64_t max_size);
+SendPlan send_plan(
+        Source& source, std::optional<std::string_view> content_type, uint64_t max_encrypted_size);
 
 /// A picture re-encoded for sending.
 struct Sendable {

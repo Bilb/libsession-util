@@ -76,8 +76,11 @@ SendableVerdict sendable_verdict(const Info& info) {
 }
 
 SendPlan send_plan(
-        Source& source, std::optional<std::string_view> content_type, uint64_t max_size) {
-    const bool fits = source.size() <= max_size;
+        Source& source, std::optional<std::string_view> content_type, uint64_t max_encrypted_size) {
+    // The plaintext first, which encryption only grows, so that the cast cannot truncate.
+    const bool fits =
+            source.size() <= max_encrypted_size &&
+            attachment::encrypted_size(static_cast<size_t>(source.size())) <= max_encrypted_size;
     auto info = probe(source);
     if (!info) {
         if (recognized(source))

@@ -313,3 +313,41 @@ TEST_CASE("Client: a send plan for a file that is not there", "[client][send][pi
     REQUIRE(r);
     CHECK(*r == image::SendPlan::reencoded);
 }
+
+TEST_CASE(
+        "Client: the file server's limit holds a file sent as it is once encrypted",
+        "[client][send][pictures]") {
+    // The default limit, 10,000,000 bytes, on what is uploaded.
+    constexpr size_t fits = 9'956'278;
+    REQUIRE(attachment::encrypted_size(fits) <= 10'000'000);
+    REQUIRE(attachment::encrypted_size(fits + 1) > 10'000'000);
+
+    Sandbox s;
+    std::vector<std::string_view> codes;
+    auto send = [&](const std::filesystem::path& p) {
+        return s.c->send_message(
+                ConversationId::dm(own_sid(*s.c)),
+                {.attachments = {OutgoingAttachment{.path = p}}},
+                [&](size_t, int64_t, int64_t, std::optional<Expected<void>> r) {
+                    if (r && !*r)
+                        codes.push_back(r->error().code);
+                },
+                await);
+    };
+    auto state = [&](int64_t id) { return s.c->message(id, await)->send_state; };
+
+    auto small = s.write("small.bin", bytes(fits, std::byte{1}));
+    auto big = s.write("big.bin", bytes(fits + 1, std::byte{1}));
+    CHECK(s.c->attachment_send_plan(small, std::nullopt, await) == image::SendPlan::as_is);
+    CHECK(s.c->attachment_send_plan(big, std::nullopt, await) ==
+          image::SendPlan::too_large_for_server);
+
+    auto refused = send(big);
+    until(s.c, [&] { return state(refused) == SendState::unsendable; });
+    CHECK(codes == std::vector<std::string_view>{err::attachment_too_large});
+    CHECK(s.net->served.empty());
+
+    send(small);
+    until(s.c, [&] { return accept_stores(*s.net) == 1; });
+    CHECK(codes.size() == 1);
+}

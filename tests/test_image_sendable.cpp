@@ -243,6 +243,11 @@ TEST_CASE("Sendable: send_plan says what a send does from the header", "[image][
     auto apng = animated_png(save(draw(40, 30, [](int, int) { return RED; }).get(), ".png"));
     CHECK(plan(apng, "image/png", 1'000'000) == image::SendPlan::original_animated_png);
     CHECK(plan(apng, "image/png", 10) == image::SendPlan::too_large_for_server);
+    // The limit is on the encrypted file.
+    bytes edge(9'956'278, std::byte{'t'});
+    CHECK(plan(edge, std::nullopt, 10'000'000) == image::SendPlan::as_is);
+    edge.push_back(std::byte{'t'});
+    CHECK(plan(edge, std::nullopt, 10'000'000) == image::SendPlan::too_large_for_server);
     bytes cut{photo.begin(), photo.begin() + 20};
     CHECK(plan(cut, "image/jpeg") == image::SendPlan::unreadable);
 }

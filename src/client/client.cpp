@@ -5752,14 +5752,16 @@ void Client::_convert_outgoing(
         bool undecodable = false;
     };
 
-    const uint64_t max_size = _attachment_size_limit();
+    const uint64_t max_encrypted_size = _attachment_max_encrypted_size();
 
-    auto convert = [path, file_size, content_type, max_size, client_id, index] {
+    auto convert = [path, file_size, content_type, max_encrypted_size, client_id, index] {
         Converted out;
         try {
             // Held whole when it could be sent as it is, so that what is sent is what was looked
             // at; a larger one can only go out re-encoded, read from its path.
-            const bool fits = static_cast<uint64_t>(file_size) <= max_size;
+            const bool fits = static_cast<uint64_t>(file_size) <= max_encrypted_size &&
+                              attachment::encrypted_size(static_cast<size_t>(file_size)) <=
+                                      max_encrypted_size;
             if (fits)
                 out.body = read_file(path, file_size);
             auto source = out.body ? image::Source{std::span<const std::byte>{*out.body}}
@@ -5768,7 +5770,7 @@ void Client::_convert_outgoing(
                 out = Converted{.outcome = Outcome::too_large};
                 return out;
             };
-            switch (image::send_plan(source, content_type, max_size)) {
+            switch (image::send_plan(source, content_type, max_encrypted_size)) {
                 case image::SendPlan::unreadable:
                 case image::SendPlan::missing:
                     throw std::runtime_error{"its header cannot be read"};
@@ -5783,7 +5785,7 @@ void Client::_convert_outgoing(
                 case image::SendPlan::as_is: return out;
                 case image::SendPlan::reencoded: break;
             }
-            auto sendable = image::sendable(source, max_size);
+            auto sendable = image::sendable(source, max_encrypted_size);
             if (!sendable)
                 return refuse();
             out.outcome = Outcome::converted;
@@ -5904,7 +5906,7 @@ void Client::_convert_outgoing(
     }
 }
 
-uint64_t Client::_attachment_size_limit() {
+uint64_t Client::_attachment_max_encrypted_size() {
     // Without a network the upload fails regardless.
     auto net = core.network();
     return net ? net->file_server_config.max_file_size : 10'000'000;
@@ -5913,14 +5915,16 @@ uint64_t Client::_attachment_size_limit() {
 static image::SendPlan send_plan_of(
         const std::filesystem::path& path,
         const std::optional<std::string>& content_type,
-        uint64_t max_size) {
+        uint64_t max_encrypted_size) {
     std::error_code ec;
     if (!std::filesystem::is_regular_file(path, ec) || ec)
         return image::SendPlan::missing;
     try {
         image::Source source{path};
         return image::send_plan(
-                source, content_type ? *content_type : infer_content_type(path), max_size);
+                source,
+                content_type ? *content_type : infer_content_type(path),
+                max_encrypted_size);
     } catch (const std::exception&) {
         return image::SendPlan::unreadable;
     }
@@ -5937,9 +5941,9 @@ void Client::attachment_send_plan(
         _post_disk([this,
                     path = std::move(path),
                     content_type = std::move(content_type),
-                    max_size = _attachment_size_limit(),
+                    max_encrypted_size = _attachment_max_encrypted_size(),
                     cb = std::move(cb)]() mutable {
-            auto plan = send_plan_of(path, content_type, max_size);
+            auto plan = send_plan_of(path, content_type, max_encrypted_size);
             call([this, plan, cb = std::move(cb)]() mutable {
                 _report(cb, Expected<image::SendPlan>{plan});
             });
@@ -5951,7 +5955,8 @@ image::SendPlan Client::attachment_send_plan(
         const std::filesystem::path& path,
         const std::optional<std::string>& content_type,
         await_t) {
-    return send_plan_of(path, content_type, call_get([this] { return _attachment_size_limit(); }));
+    return send_plan_of(
+            path, content_type, call_get([this] { return _attachment_max_encrypted_size(); }));
 }
 
 void Client::_drop_taken_file(int64_t client_id, size_t index) {

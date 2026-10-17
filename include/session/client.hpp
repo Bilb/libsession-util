@@ -1612,8 +1612,8 @@ class Client {
             std::optional<std::string> content_type,
             Conversation::upload_progress on_upload);
 
-    // The file server's limit on one file, which an attachment sent as it is must be within.
-    uint64_t _attachment_size_limit();
+    // The file server's limit on one file, which applies to it encrypted.
+    uint64_t _attachment_max_encrypted_size();
 
     // The rest of `_upload_next`, once the file is known: uploads attachment `index` from `path`,
     // or from `body` when that is set, or fails the message for good if `file_size` says the file
