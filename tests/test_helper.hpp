@@ -145,6 +145,7 @@ class MockNetwork : public network::Network {
     }
 
     void release_upload() {
+        REQUIRE_FALSE(held.empty());
         auto [request, seed] = std::move(held.front());
         held.pop_front();
         serve_upload(std::move(request), seed);

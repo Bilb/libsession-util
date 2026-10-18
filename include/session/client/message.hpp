@@ -193,8 +193,8 @@ struct Message {
     bool gallery_viewable = false;
     /// Whether it *is* being shown that way.
     ///
-    /// Stored, because it is a decision rather than a property: on from the start for every
-    /// message stored under this rule that can be shown that way, whatever the conversation
+    /// Stored, because it is a decision rather than a property: on from the moment it can be
+    /// shown that way, for every message stored under this rule, whatever the conversation
     /// auto-downloads, and a client's `set_gallery` may say otherwise later, which recomputing it
     /// would discard.  A message stored before the rule keeps the decision it was stored with.
     ///
