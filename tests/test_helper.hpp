@@ -4,6 +4,7 @@
 #include <oxenc/base64.h>
 
 #include <atomic>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -131,8 +132,25 @@ class MockNetwork : public network::Network {
     int next_file_id = 1000;
     // How many uploads to come fail, as a file server answering 500 would.
     int failing_uploads = 0;
+    // While set, uploads wait in `held` until release_upload() serves the oldest.
+    bool hold_uploads = false;
+    std::deque<std::pair<network::FileUploadRequest, std::vector<std::byte>>> held;
 
     void upload_file(network::FileUploadRequest request, std::span<const std::byte> seed) override {
+        if (hold_uploads) {
+            held.emplace_back(std::move(request), std::vector<std::byte>{seed.begin(), seed.end()});
+            return;
+        }
+        serve_upload(std::move(request), seed);
+    }
+
+    void release_upload() {
+        auto [request, seed] = std::move(held.front());
+        held.pop_front();
+        serve_upload(std::move(request), seed);
+    }
+
+    void serve_upload(network::FileUploadRequest request, std::span<const std::byte> seed) {
         if (failing_uploads > 0) {
             failing_uploads--;
             if (request.on_complete)

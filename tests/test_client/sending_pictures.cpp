@@ -351,3 +351,89 @@ TEST_CASE(
     until(s.c, [&] { return accept_stores(*s.net) == 1; });
     CHECK(codes.size() == 1);
 }
+
+TEST_CASE(
+        "Client: converting a message's pictures keeps the reader's choice of a list",
+        "[client][send][pictures][gallery]") {
+    Sandbox s;
+    s.net->hold_uploads = true;
+    auto photo = derived_test::picture(64, 48, ".jpg");
+    OutgoingMessage out;
+    for (auto name : {"a.jpg", "b.jpg", "c.jpg"})
+        out.attachments.push_back({.path = s.write(name, photo)});
+    auto id = s.c->send_message(ConversationId::dm(own_sid(*s.c)), std::move(out), await);
+    auto gallery = [&] { return s.c->message(id, await)->gallery; };
+    auto state = [&] { return s.c->message(id, await)->send_state; };
+    auto converted_next = [&] { until(s.c, [&] { return s.net->held.size() == 1; }); };
+
+    converted_next();
+    CHECK(gallery());
+    REQUIRE(s.c->set_gallery(id, false, await));
+
+    SECTION("while it uploads") {
+        for (int i = 0; i < 2; i++) {
+            s.net->release_upload();
+            converted_next();
+            CHECK_FALSE(gallery());
+        }
+        s.net->hold_uploads = false;
+        s.net->release_upload();
+        until(s.c, [&] { return accept_stores(*s.net) == 1; });
+    }
+
+    SECTION("when it is retried, with one picture already up and one converted again") {
+        s.net->release_upload();
+        converted_next();
+        s.net->failing_uploads = 1;
+        s.net->release_upload();
+        until(s.c, [&] { return state() == SendState::failed; });
+        CHECK_FALSE(gallery());
+
+        s.net->hold_uploads = false;
+        s.c->retry_send(id, await);
+        until(s.c, [&] { return accept_stores(*s.net) == 1; });
+    }
+
+    auto msg = s.c->message(id, await);
+    REQUIRE(msg);
+    CHECK(msg->gallery_viewable);
+    CHECK_FALSE(msg->gallery);
+    for (const auto& a : msg->attachments)
+        CHECK(a.content_type == "image/jpeg");
+}
+
+TEST_CASE(
+        "Client: a message whose pictures become displayable only once converted starts as a "
+        "gallery",
+        "[client][send][pictures][gallery]") {
+    Sandbox s;
+    s.net->hold_uploads = true;
+    auto photo = derived_test::picture(64, 48, ".jpg");
+    std::span<const std::byte> heic{image_fixtures::heic_64x48};
+
+    // A picture declared as something else stands in for a HEIC where this build cannot decode
+    // one: either way the set is displayable only once its last file is converted.
+    OutgoingMessage out;
+    out.attachments.push_back({.path = s.write("photo.jpg", photo)});
+    if (heic_decodes())
+        out.attachments.push_back({.path = s.write("shot.heic", bytes{heic.begin(), heic.end()})});
+    else
+        out.attachments.push_back(
+                {.path = s.write("shot.bin", photo), .content_type = "application/octet-stream"});
+    auto id = s.c->send_message(ConversationId::dm(own_sid(*s.c)), std::move(out), await);
+
+    until(s.c, [&] { return s.net->held.size() == 1; });
+    auto msg = s.c->message(id, await);
+    REQUIRE(msg);
+    CHECK_FALSE(msg->gallery_viewable);
+    CHECK_FALSE(msg->gallery);
+
+    s.net->hold_uploads = false;
+    s.net->release_upload();
+    until(s.c, [&] { return accept_stores(*s.net) == 1; });
+    msg = s.c->message(id, await);
+    REQUIRE(msg);
+    CHECK(msg->attachments[1].content_type == "image/jpeg");
+    CHECK(msg->gallery_viewable);
+    CHECK(msg->gallery);
+}

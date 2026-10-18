@@ -1293,17 +1293,23 @@ void Client::_register_sql_functions(sqlite::Connection& c) {
     register_content_type_functions(c);
 }
 
+static const std::string EVERY_ATTACHMENT_DISPLAYABLE_SQL = R"(
+    EXISTS(SELECT 1 FROM message_attachments WHERE message = ?1)
+    AND NOT EXISTS(SELECT 1 FROM message_attachments
+                   WHERE message = ?1 AND NOT (content_type IS NOT NULL AND {}))
+)"_format(DISPLAYABLE_IMAGE_SQL);
+
+static bool every_attachment_displayable(sqlite::Connection& c, int64_t message_id) {
+    return c.prepared_get<int64_t>(
+                   "SELECT {}"_format(EVERY_ATTACHMENT_DISPLAYABLE_SQL), message_id) != 0;
+}
+
 // A message starts out shown as a gallery when every attachment is a picture Session displays;
 // set_gallery is a reader's later word on it.
 static void default_gallery(sqlite::Connection& c, int64_t message_id) {
     c.prepared_exec(
-            R"(
-        UPDATE messages SET gallery = 1
-        WHERE id = ?1
-          AND EXISTS(SELECT 1 FROM message_attachments WHERE message = ?1)
-          AND NOT EXISTS(SELECT 1 FROM message_attachments
-                         WHERE message = ?1 AND NOT (content_type IS NOT NULL AND {}))
-    )"_format(DISPLAYABLE_IMAGE_SQL),
+            "UPDATE messages SET gallery = 1 WHERE id = ?1 AND {}"_format(
+                    EVERY_ATTACHMENT_DISPLAYABLE_SQL),
             message_id);
 }
 
@@ -5858,6 +5864,7 @@ void Client::_convert_outgoing(
                         "SELECT filename FROM message_attachments WHERE message = ?1 AND idx = ?2",
                         client_id,
                         static_cast<int64_t>(index));
+                const bool was_displayable = every_attachment_displayable(conn, client_id);
                 auto renamed = name && *name ? utf8_path(**name) : utf8_path(path).filename();
                 renamed.replace_extension(c.content_type == "image/webp" ? ".webp" : ".jpg");
                 conn.prepared_exec(
@@ -5874,8 +5881,10 @@ void Client::_convert_outgoing(
                         static_cast<int64_t>(c.width),
                         static_cast<int64_t>(c.height),
                         c.thumbhash);
-                // A picture sent as one now, whatever the file was (a HEIC, say).
-                default_gallery(conn, client_id);
+                // Only the conversion that makes the set displayable (a HEIC, say) starts it as a
+                // gallery; once it was displayable, `gallery` is the reader's to keep.
+                if (!was_displayable)
+                    default_gallery(conn, client_id);
                 _emit_message(false, client_id);
                 break;
             }
