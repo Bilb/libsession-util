@@ -11,3 +11,7 @@ CREATE TABLE attachment_derived (
 ) STRICT;
 
 CREATE INDEX message_attachments_pending ON message_attachments(path) WHERE url IS NULL;
+
+ALTER TABLE message_attachments ADD COLUMN auto_pending INTEGER;
+CREATE INDEX message_attachments_auto_pending ON message_attachments(message)
+    WHERE auto_pending IS NOT NULL;

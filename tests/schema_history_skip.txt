@@ -55,7 +55,7 @@ c2ee7a45  attachment-availability, mid-branch
 9dfba1c6  attachment-availability, mid-branch
 
 # The attachments branch (Bilb/libsession-util#18): every commit of it before its client migrations
-# were collapsed into one.  The branch carried five while it was built, and a database made partway
+# were collapsed into one.  The branch carried six while it was built, and a database made partway
 # through has some of them recorded and cannot take the replacement.
 1fb6d1c8  attachments, mid-branch
 ec849c2d  attachments, mid-branch
@@ -72,3 +72,4 @@ cdb9c308  attachments, mid-branch
 7ff98e0d  attachments, mid-branch
 a80b2fcb  attachments, mid-branch
 0161f39a  attachments, mid-branch
+1e3f051b  attachments, mid-branch
