@@ -20,8 +20,33 @@ constexpr size_t MAX_THUMBHASH_SIZE = 25;
 /// and uploaded when the message is sent, not when it is attached, so a caller can hold these
 /// against a draft for as long as the user takes to write it.
 struct OutgoingAttachment {
-    /// The file to send.  Read at send time, so it must still be there and unchanged by then.
+    /// The file to send.  Read when its upload comes up and again by any retry, not by
+    /// `send_message` itself, so without `take_file` it must stay here, unchanged, until the upload
+    /// is done.
     std::filesystem::path path;
+
+    /// Hands the file to libsession, which keeps it beneath `Client::set_cache_dir` (needed for
+    /// this), reads it from there for the upload and any retry, and deletes it once nothing can
+    /// send it: when it has uploaded (a retry never uploads it again), when its message turns
+    /// `SendState::unsendable`, or when its message is deleted.
+    ///
+    /// The caller's file is removed once the message is stored, and must not be used afterwards.
+    /// Until then it is untouched, and it stays at `path` whenever the message is never stored,
+    /// which includes every send that throws.  A symbolic link is refused.
+    ///
+    /// The file is hard-linked into place, or copied where it cannot be (across filesystems, say).
+    /// Either happens on the calling thread, so a copy of a large file blocks the `send_message`
+    /// call, callback form included.
+    ///
+    /// It waits there **unencrypted**, as handed over, unlike the rest of the cache.
+    ///
+    /// Until it is uploaded, `Client::attachment_data`, `attachment_data_cached` and
+    /// `save_attachment` serve it and `Attachment::availability` says `cached`, since the caller
+    /// no longer has it to draw from.
+    ///
+    /// `filename` defaults to `path`'s filename as it was, and `content_type` to what its
+    /// extension implies, as without this.
+    bool take_file = false;
 
     /// MIME type to advertise.  Recipients use it to decide how to display the attachment; when
     /// unset it is inferred from the filename's extension.
@@ -35,23 +60,25 @@ struct OutgoingAttachment {
     /// present differently.
     bool voice_message = false;
 
+    /// Sends the file exactly as it is, metadata included, flagged so that recipients offer it as
+    /// a file to export rather than as a picture.  Otherwise a picture this build decodes is sent
+    /// re-encoded (`image::sendable`): `content_type`, the filename's extension, the size and the
+    /// fields below then describe what was sent rather than the file at `path`.  A picture this
+    /// build does not decode (a format it does not read, an animated PNG) is sent as if this were
+    /// set; one too large to decode is refused with `err::attachment_too_large`.
+    bool original_file = false;
+
     /// Pixel dimensions, for visual media.  Recipients use them to lay out a placeholder before
-    /// the file itself has been fetched, so supplying them avoids the layout jumping.
-    ///
-    /// TODO: these are the caller's to supply because libsession cannot read them -- deriving them
-    /// means either an image library or hand-written header parsing of untrusted files.  Worth
-    /// revisiting if libsession takes on an image dependency for other reasons (thumbnailing, say),
-    /// at which point every client stops needing its own.
+    /// the file itself has been fetched.  Supplied values are sent as given unless the picture is
+    /// re-encoded; for a picture Session displays (`image::is_displayable_image`) that the
+    /// caller left unset, libsession reads them from the file before the upload.
     std::optional<uint32_t> width;
     std::optional<uint32_t> height;
 
     /// ThumbHash of the image, for a recipient to draw in the attachment's place until the file
     /// itself arrives.  Advisory and unvalidated: libsession carries the bytes and never looks
-    /// inside them.
-    ///
-    /// The caller's to supply for the same reason as `width`/`height` above: encoding one needs
-    /// the pixels, which means decoding and scaling the image, and that is the dependency the
-    /// comment beside those two declines to take on.
+    /// inside them.  Derived as `width`/`height` are when left unset
+    /// (`image::thumbhash::of_picture`), and from the re-encoded picture when there is one.
     std::optional<std::vector<std::byte>> thumbhash;
 };
 
@@ -69,8 +96,24 @@ struct OutgoingAttachment {
 enum class AutoDownload : int {
     none = 0,               ///< Nothing; every attachment waits to be asked for.
     image_attachments = 1,  ///< Attachments whose content type is one Session displays as an
-                            ///< image; see image::displayable_image_types.
+                            ///< image; see image::is_displayable_image.
     all = 2,                ///< Every attachment.
+};
+
+/// Files already in a conversation that `Conversation::download_existing_attachments` would
+/// download.
+struct ExistingAttachmentCount {
+    /// Distinct files: one carried by several messages counts once.
+    size_t count = 0;
+    /// The sizes their senders declared, summed; one declaring no size adds nothing.
+    int64_t bytes = 0;
+};
+
+/// `ExistingAttachmentCount` for each mode that fetches anything, so a prompt offering both can
+/// show either without asking again.
+struct ExistingAttachmentCounts {
+    ExistingAttachmentCount all;
+    ExistingAttachmentCount image_attachments;
 };
 
 /// How an attachment transfer is going.
@@ -162,6 +205,26 @@ enum class AttachmentAvailability {
     unreadable,
 };
 
+/// What a cached picture's header says, read when libsession first makes something from it.
+struct PictureInfo {
+    /// One frame's size as displayed, with the file's EXIF orientation applied: what decoding it
+    /// yields, as opposed to the sender's claim in `Attachment::width` and `height`.  Both 0 when
+    /// the file could not be read as a picture.
+    uint32_t width = 0;
+    uint32_t height = 0;
+
+    /// 1 for a still picture, more for an animation, 0 when the file could not be read as a
+    /// picture at all.  An animated PNG counts as an animation, and is never given a rendition.
+    uint32_t frames = 0;
+
+    /// Whether `Client::attachment_rendition` has refused this picture under the current
+    /// `image::renderer_version`: no rendition will come, and the original is what there is.
+    bool rendition_refused = false;
+
+    bool readable() const { return frames > 0; }
+    bool animated() const { return frames > 1; }
+};
+
 struct Attachment {
     /// Position within the message's attachment list.  This is the index `send_message`'s upload
     /// handler reports progress against, and what `save_attachment` takes.
@@ -173,6 +236,11 @@ struct Attachment {
     /// A recorded voice message rather than an ordinary audio file, which clients present
     /// differently.
     bool voice_message = false;
+
+    /// The sender's file exactly as it was, metadata included
+    /// (`OutgoingAttachment::original_file`). Shown as a file to export, never opened as a picture,
+    /// though its thumbnail is drawn.
+    bool original_file = false;
 
     std::optional<uint32_t> width;
     std::optional<uint32_t> height;
@@ -196,16 +264,18 @@ struct Attachment {
     ///
     /// `availability` is not an exception to that.  The cache is ours, at a path derived from the
     /// url rather than chosen by anybody, so it is a fact about this attachment and not about
-    /// somewhere the application happens to have put a copy.
+    /// somewhere the application happens to have put a copy.  The same goes for a file a send
+    /// took (`OutgoingAttachment::take_file`), which is ours until it uploads.
     bool uploaded = false;
 
     /// Whether the bytes are here, on their way, fetchable, or not to be had -- see
     /// `AttachmentAvailability`.
     ///
-    /// Reported the same way for an outgoing attachment as an incoming one: what we send is kept
-    /// on upload under the rule that would have fetched it had it arrived, plus anything on a
-    /// gallery-viewable message, which is drawn as its pictures and so needs them either way.  So
-    /// "can I draw this without a download" has one answer regardless of direction.
+    /// Reported the same way for an outgoing attachment as an incoming one: whatever we send is
+    /// kept on upload, unless it is larger than the whole attachment cache limit, then evicted like
+    /// any cached file.  So "can I draw this without a download" has one answer regardless of
+    /// direction.  Before its upload, an attachment that took its file is `cached` while that
+    /// file is there, and an un-taken one is `absent`, its bytes being the caller's.
     AttachmentAvailability availability = AttachmentAvailability::absent;
 
     /// How far the transfer has got, when `availability` is `fetching`; both 0 otherwise.
@@ -220,6 +290,32 @@ struct Attachment {
     /// where it has reached.
     int64_t fetch_done = 0;
     int64_t fetch_total = 0;
+
+    /// Whether `Client::attachment_thumbnail` has a thumbnail to serve: a small square JPEG of the
+    /// picture, for drawing it in a grid or a list without decoding the whole file.
+    ///
+    /// Only ever true while the file itself is in the cache, because the thumbnail is part of the
+    /// cached copy: made from it once it is here, and evicted or deleted with it.  So it turns
+    /// true a little after the file arrives -- reported through `messages_updated` like any other
+    /// change to the message -- and false again when the file leaves the cache.
+    ///
+    /// Never true for anything but a picture Session displays (see
+    /// `image::is_displayable_image`) that libsession could decode.  Videos have none.
+    bool has_thumbnail = false;
+
+    /// Whether `Client::attachment_rendition` has a rendition to serve: the whole picture as a
+    /// JPEG or WebP (the bytes say which) at the rendition edge, for a viewer to draw in place of
+    /// the original.  Made once the picture's thumbnail is, and otherwise kept, evicted and
+    /// reported exactly as `has_thumbnail` is.
+    bool has_rendition = false;
+
+    /// What the cached file's header says, once libsession has read it, which it does when it
+    /// first makes a thumbnail or rendition from it: a little after the file arrives, reported
+    /// through `messages_updated` as `has_thumbnail` is.  Unset until then, and again once the
+    /// file leaves the cache.  What a viewer decides from: a picture is drawn from its rendition,
+    /// an animation played from it; until that is made, the original if the platform decodes it,
+    /// else the thumbnail; and one that could not be read is the platform's to decode or not.
+    std::optional<PictureInfo> picture;
 
     /// When the *recipient* of this message last saved this attachment -- us, on an incoming one,
     /// and the other party on one we sent.  The same fact from either end, so it does not have to

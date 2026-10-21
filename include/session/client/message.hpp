@@ -186,16 +186,17 @@ struct Message {
     /// Whether this message *can* be shown as a gallery rather than as a list of attachments.
     ///
     /// Derived, never stored, and the rule is ours: today it is "has attachments, and every one of
-    /// them has a content type Session displays as an image" (image::displayable_image_types, which
+    /// them has a content type Session displays as an image" (image::is_displayable_image, which
     /// matches what libsession will decode), but it may gain a size ceiling.  Deriving it means a
     /// change to that rule takes effect on old messages too, rather than leaving stored answers
     /// from whatever the rule used to be.
     bool gallery_viewable = false;
     /// Whether it *is* being shown that way.
     ///
-    /// Stored, because it is a decision rather than a property: it is made when the message is
-    /// processed — on if the conversation was auto-downloading then — and the conversation's
-    /// setting may have changed since, so recomputing it later would not give the same answer.
+    /// Stored, because it is a decision rather than a property: on from the moment it can be
+    /// shown that way, for every message stored under this rule, whatever the conversation
+    /// auto-downloads, and a client's `set_gallery` may say otherwise later, which recomputing it
+    /// would discard.  A message stored before the rule keeps the decision it was stored with.
     ///
     /// Never true when `gallery_viewable` is false: a stored decision that no longer agrees with
     /// the current rule is dropped rather than honoured, so a message that qualified under an older
