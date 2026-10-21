@@ -1287,8 +1287,6 @@ namespace {
     constexpr int DEFAULT_AUTO_DL_CONCURRENCY = 4;
 }  // namespace
 
-static const std::string DISPLAYABLE_IMAGE_SQL = displayable_image_sql("content_type");
-
 void Client::_register_sql_functions(sqlite::Connection& c) {
     register_content_type_functions(c);
 }

@@ -92,15 +92,16 @@ struct TempDb {
 TEST_CASE("content types: the C++ check and its SQL counterpart agree", "[client][content_type]") {
     TempDb t;
     auto c = t.db.conn();
-    c.sql.exec("CREATE TABLE t (id INTEGER PRIMARY KEY NOT NULL, ct TEXT)");
+    c.sql.exec("CREATE TABLE t (id INTEGER PRIMARY KEY NOT NULL, content_type TEXT)");
     for (const auto& [ct, _] : content_types)
-        c.prepared_exec("INSERT INTO t (ct) VALUES (?)", ct);
-    c.sql.exec("INSERT INTO t (ct) VALUES (NULL)");
+        c.prepared_exec("INSERT INTO t (content_type) VALUES (?)", ct);
+    c.sql.exec("INSERT INTO t (content_type) VALUES (NULL)");
 
     size_t i = 0;
     for (auto&& [ct, displayable] :
          c.prepared_results<std::optional<std::string>, std::optional<int>>(
-                 "SELECT ct, {} FROM t ORDER BY id"_format(client::displayable_image_sql("ct")))) {
+                 "SELECT content_type, {} FROM t ORDER BY id"_format(
+                         client::DISPLAYABLE_IMAGE_SQL))) {
         if (!ct) {
             CHECK_FALSE(displayable);
             continue;
@@ -123,7 +124,7 @@ TEST_CASE(
     TempClient c{sqlite::post_open{[&](sqlite::Connection&) { ++theirs; }}};
     auto ask = [&] {
         return c->core.database().conn().prepared_get<int>(
-                "SELECT {}"_format(client::displayable_image_sql("'IMAGE/PNG; x=y'")));
+                "SELECT session_displayable_image('IMAGE/PNG; x=y')");
     };
     CHECK(ask() == 1);
     int other = 0;
