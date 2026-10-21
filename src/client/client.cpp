@@ -1607,7 +1607,7 @@ void Client::_attachment_data(
         }())
         return _read_taken_file(
                 std::move(*file),
-                false,
+                /*wait=*/false,
                 [this, message_id, index, cb = std::move(cb), ended = std::move(ended)](
                         auto bytes) {
                     if (bytes)
@@ -1650,7 +1650,8 @@ void Client::_attachment_data(
 void Client::_answer_bytes(bytes_read start, result_function<std::vector<std::byte>> cb) {
     call([this, start = std::move(start), cb = std::move(cb)]() mutable {
         try {
-            start([this, cb](auto answer) mutable { _report(cb, std::move(answer)); }, false);
+            start([this, cb](auto answer) mutable { _report(cb, std::move(answer)); },
+                  /*wait=*/false);
         } catch (const std::exception& e) {
             _fail<std::vector<std::byte>>(cb, error_from(e));
         }
@@ -2085,7 +2086,7 @@ void Client::_fetch_cached(FetchTarget target, bool caching, Waiter w) {
         if (!file.empty()) {
             _read_cache_file(
                     std::move(file),
-                    false,
+                    /*wait=*/false,
                     [this,
                      entry = std::move(entry),
                      target = std::move(target),
@@ -5649,7 +5650,7 @@ void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress o
                 }
             }
             if (changed)
-                _emit_message(false, client_id);
+                _emit_message(/*added=*/false, client_id);
             _upload_next(client_id, std::move(on_upload));
         });
     });
@@ -5838,7 +5839,11 @@ void Client::_convert_outgoing(
                 std::string_view reason = c.undecodable
                                                 ? "the picture is too large to decode"
                                                 : "the file does not fit the file server's limit";
-                return fail(err::attachment_too_large, reason, std::string{reason}, true);
+                return fail(
+                        err::attachment_too_large,
+                        reason,
+                        std::string{reason},
+                        /*permanent=*/true);
             }
             case Outcome::unreadable:
                 return fail(
@@ -5853,7 +5858,7 @@ void Client::_convert_outgoing(
                         client_id,
                         static_cast<int64_t>(index),
                         ATTACHMENT_FLAG_ORIGINAL_FILE);
-                _emit_message(false, client_id);
+                _emit_message(/*added=*/false, client_id);
                 break;
             case Outcome::as_is: break;
             case Outcome::converted: {
@@ -5883,7 +5888,7 @@ void Client::_convert_outgoing(
                 // gallery; once it was displayable, `gallery` is the reader's to keep.
                 if (!was_displayable)
                     default_gallery(conn, client_id);
-                _emit_message(false, client_id);
+                _emit_message(/*added=*/false, client_id);
                 break;
             }
         }

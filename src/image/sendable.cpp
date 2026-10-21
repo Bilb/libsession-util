@@ -68,9 +68,9 @@ Reencoded detail::reencode(Source& source, const Info& info, uint32_t box, int q
 SendableVerdict sendable_verdict(const Info& info) {
     if (!info.decodable || info.first_frame_only())
         return SendableVerdict::cannot_decode;
-    if (!detail::acceptable(
-                info, std::min(sendable_edge, std::max(info.width, info.height)), false) ||
-        !info.within_pixel_limits(true))
+    uint32_t longest_edge = std::max(info.width, info.height);
+    if (!detail::acceptable(info, std::min(sendable_edge, longest_edge), /*crop=*/false) ||
+        !info.within_pixel_limits(/*all_frames=*/true))
         return SendableVerdict::too_large;
     return SendableVerdict::encode;
 }

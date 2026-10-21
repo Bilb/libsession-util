@@ -122,7 +122,8 @@ namespace detail {
     }
 
     bool acceptable(const Info& info, uint32_t box, bool crop) {
-        return info.decodable && info.within_pixel_limits(false) && info.width && info.height &&
+        return info.decodable && info.within_pixel_limits(/*all_frames=*/false) && info.width &&
+               info.height &&
                !(info.decoded_whole &&
                  whole_decode_bytes(info, box, crop) > max_whole_decode_bytes);
     }
@@ -208,14 +209,15 @@ namespace detail {
             return std::nullopt;
         edge = std::clamp(edge, min_thumbnail_edge, max_thumbnail_edge);
         uint32_t side = std::min({edge, info->width, info->height});
-        if (!acceptable(*info, side, true))
+        if (!acceptable(*info, side, /*crop=*/true))
             return std::nullopt;
 
         // libvips evaluates lazily, so a read of an encrypted source can fail anywhere from here
         // to the end of encoding; its own exception, rather than libvips' generic read error, is
         // what the caller needs.
         try {
-            return finish(scaled(source, *info, side, side, true), backdrop, thumbnail_quality);
+            return finish(
+                    scaled(source, *info, side, side, /*crop=*/true), backdrop, thumbnail_quality);
         } catch (...) {
             source_access::rethrow_error(source);
             throw;
@@ -233,11 +235,11 @@ std::optional<std::vector<std::byte>> thumbhash::of_picture(Source& source) {
     if (!info)
         return std::nullopt;
     auto box = std::min(thumbhash::max_input_dimension, std::max(info->width, info->height));
-    if (!detail::acceptable(*info, box, false))
+    if (!detail::acceptable(*info, box, /*crop=*/false))
         return std::nullopt;
 
     try {
-        auto img = detail::to_srgb8(detail::scaled(source, *info, box, box, false).get());
+        auto img = detail::to_srgb8(detail::scaled(source, *info, box, box, /*crop=*/false).get());
         if (!vips_image_hasalpha(img.get())) {
             VipsImage* out;
             if (vips_addalpha(img.get(), &out, nullptr))
