@@ -19,6 +19,23 @@ inline constexpr uint32_t max_rendition_edge = 4096;
 /// of an image it refused before.  A caller that remembers refusals retries them once it changes.
 inline constexpr int renderer_version = 3;
 
+/// What `rendition` does with a picture, from its header alone.
+enum class RenditionVerdict {
+    /// Re-encode it.
+    encode,
+    /// None needed: the original is already what `rendition` would make (`rendition_is_original`),
+    /// and a viewer draws it.
+    original,
+    /// Refuse it: `rendition` returns nullopt, and the original is what there is.
+    refused,
+};
+
+/// API: image/rendition_verdict
+///
+/// What `rendition` would do for `edge` with the picture `probe` described as `info`.  Cheap: a
+/// caller that has probed a picture for something else learns this without decoding it.
+RenditionVerdict rendition_verdict(const Info& info, uint32_t edge);
+
 /// API: image/rendition
 ///
 /// The whole picture in `source` re-encoded for showing it on a screen, as `sendable` makes a

@@ -1933,16 +1933,35 @@ void Client::_attachment_rendition(int64_t message_id, size_t index, bytes_answe
     auto& [entry, name, rendition, picture] = *row;
     if (_cache_dir.empty())
         throw no_rendition(message_id, index);
-    if (!rendition) {
-        // None yet, made unasked only after a thumbnail: queued here at the front, since somebody
-        // is looking.  Not for a file that is not here or not a picture to open, nor one already
-        // refused, which the pump turns away.
-        if (entry && picture) {
-            _queue_derived(*entry, kind);
-            _hurry_derived(*entry, kind);
-        }
-        throw no_rendition(message_id, index);
+    // None yet, and only an ask makes one: queued at the front, since somebody is looking.  Not
+    // for a file that is not here or not a picture to open, nor one already refused, which the
+    // pump turns away.
+    if (!rendition && entry && picture) {
+        _queue_derived(*entry, kind);
+        _hurry_derived(*entry, kind);
     }
+    // Then the rest of the message's pictures, behind it: a viewer swipes from one to the next.
+    if (picture) {
+        std::vector<int64_t> others;
+        for (auto other : c.prepared_results<int64_t>(
+                     R"(
+            SELECT a.cached FROM message_attachments a
+            LEFT JOIN attachment_derived d ON d.entry = a.cached AND d.kind = ?3
+            WHERE a.message = ?1 AND a.idx != ?2 AND a.cached IS NOT NULL
+              AND a.content_type IS NOT NULL AND {} AND a.flags & {} = 0
+              AND d.size IS NULL AND d.failed IS NOT ?4
+            GROUP BY a.cached ORDER BY min(a.idx)
+        )"_format(DISPLAYABLE_IMAGE_SQL, ATTACHMENT_FLAG_ORIGINAL_FILE),
+                     message_id,
+                     static_cast<int64_t>(index),
+                     static_cast<int>(kind),
+                     image::renderer_version))
+            others.push_back(other);
+        for (auto other : others)
+            _queue_derived(other, kind);
+    }
+    if (!rendition)
+        throw no_rendition(message_id, index);
 
     // Size 0: the original is already what a viewer draws.
     const bool original = *rendition == 0;
@@ -7032,7 +7051,8 @@ void Client::_pump_derived() {
                                     file = std::move(file),
                                     plain = std::move(next.plain),
                                     key = _cache_encryption_key(),
-                                    edge = _derived_edge(next.kind)]() mutable {
+                                    edge = _derived_edge(next.kind),
+                                    rendition_edge = _rendition_edge()]() mutable {
             std::optional<std::vector<std::byte>> made;
             std::optional<PictureFacts> facts;
             bool failed = false;
@@ -7049,11 +7069,14 @@ void Client::_pump_derived() {
                 auto info = image::probe(source);
                 if (info)
                     facts = PictureFacts{info->width, info->height, info->frames};
+                facts->rendition = info ? image::rendition_verdict(*info, rendition_edge)
+                                        : image::RenditionVerdict::refused;
+                if (kind != cache::Derived::rendition)
+                    made = make_derived(kind, source, edge);
                 // Empty: the original is already what a viewer draws, and is served instead.
-                if (kind == cache::Derived::rendition && info &&
-                    image::rendition_is_original(*info, edge))
+                else if (facts->rendition == image::RenditionVerdict::original)
                     made.emplace();
-                else
+                else if (facts->rendition == image::RenditionVerdict::encode)
                     made = make_derived(kind, source, edge);
             } catch (const std::exception& e) {
                 failed = true;
@@ -7093,6 +7116,7 @@ void Client::_derived_made(
     _derived_attempt.reset();
     auto c = core.database().conn();
     const int k = static_cast<int>(kind);
+    bool news = false;
     if (facts) {
         std::optional<int64_t> width, height;
         if (facts->frames) {
@@ -7100,47 +7124,65 @@ void Client::_derived_made(
             height = facts->height;
         }
         // Every kind made from the file reads the same header, so only the first write is news.
-        if (c.prepared_exec(
-                    R"(
+        news = c.prepared_exec(
+                       R"(
             UPDATE attachment_cache SET width = ?3, height = ?4, frames = ?5
             WHERE id = ?1 AND name = ?2
               AND (width IS NOT ?3 OR height IS NOT ?4 OR frames IS NOT ?5)
         )",
-                    entry,
-                    name,
-                    width,
-                    height,
-                    static_cast<int64_t>(facts->frames)) > 0) {
-            std::vector<int64_t> showing;
-            for (auto message : c.prepared_results<int64_t>(
-                         "SELECT DISTINCT message FROM message_attachments WHERE cached = ?",
-                         entry))
-                showing.push_back(message);
-            _emit_messages_showing(c, showing);
-        }
+                       entry,
+                       name,
+                       width,
+                       height,
+                       static_cast<int64_t>(facts->frames)) > 0;
     }
-    // A picture's rendition is queued once its thumbnail is made, behind every thumbnail waiting;
-    // not for a picture only ever sent as its original file, which nobody opens, nor one whose
-    // thumbnail was refused.
-    if (made && kind == cache::Derived::thumbnail &&
+    // A rendition the header alone settles -- the original itself, or none -- is recorded with
+    // the thumbnail, so that a viewer knows before it asks; only one to re-encode waits to be
+    // asked for.  Not for a picture only ever sent as its original file, which nobody opens.
+    if (kind == cache::Derived::thumbnail && facts && facts->rendition &&
+        *facts->rendition != image::RenditionVerdict::encode &&
         c.prepared_get<int64_t>(
                 "SELECT EXISTS(SELECT 1 FROM message_attachments"
                 " WHERE cached = ? AND {} AND flags & {} = 0)"_format(
                         DISPLAYABLE_IMAGE_SQL, ATTACHMENT_FLAG_ORIGINAL_FILE),
-                entry))
-        _queue_derived(entry, cache::Derived::rendition);
+                entry)) {
+        const bool original = *facts->rendition == image::RenditionVerdict::original;
+        std::optional<int64_t> size, refused;
+        if (original)
+            size = 0;
+        else
+            refused = image::renderer_version;
+        news |= c.prepared_exec(
+                        R"(
+            INSERT INTO attachment_derived (entry, kind, size, failed)
+            SELECT id, ?2, ?3, ?4 FROM attachment_cache WHERE id = ?1 AND name = ?5
+            ON CONFLICT (entry, kind) DO UPDATE SET size = ?3, failed = ?4
+                WHERE size IS NULL AND (?3 IS NOT NULL OR failed IS NOT ?4)
+        )",
+                        entry,
+                        static_cast<int>(cache::Derived::rendition),
+                        size,
+                        refused,
+                        name) > 0;
+    }
+    if (news)
+        _emit_messages_showing(c, _messages_cached_as(c, entry));
 
-    // An exception may not happen again.  A thumbnail is unmarked and tried again at the next
-    // start, by the pass; a rendition keeps its strike, so the next ask is its last try rather
-    // than every open decoding it again.
+    // A thumbnail that threw is unmarked and tried again at the next start, by the pass.  A
+    // rendition is made only while a viewer waits for it, so one that threw is refused as one that
+    // cannot be made is, and the viewer told: the original is what there is.
     if (made || (failed && kind == cache::Derived::thumbnail))
         _unmark_derived_attempt(entry, kind);
-    else if (!failed)
-        c.prepared_exec(
-                "UPDATE attachment_derived SET failed = ? WHERE entry = ? AND kind = ?",
-                derived_version(kind),
-                entry,
-                k);
+    else {
+        bool refused =
+                c.prepared_exec(
+                        "UPDATE attachment_derived SET failed = ? WHERE entry = ? AND kind = ?",
+                        derived_version(kind),
+                        entry,
+                        k) > 0;
+        if (refused && kind == cache::Derived::rendition)
+            _emit_messages_showing(c, _messages_cached_as(c, entry));
+    }
 
     // Checked here and again once it is written: an eviction can land on either side of the write.
     bool wanted = made && c.prepared_get<int64_t>(

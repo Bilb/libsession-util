@@ -19,15 +19,22 @@ bool rendition_is_original(const Info& info, uint32_t edge) {
            info.bits_per_sample <= 8 && longest_edge <= edge;
 }
 
+RenditionVerdict rendition_verdict(const Info& info, uint32_t edge) {
+    edge = std::clamp(edge, min_rendition_edge, max_rendition_edge);
+    uint32_t box = std::min(edge, std::max(info.width, info.height));
+    if (info.first_frame_only() || !detail::acceptable(info, box, /*crop=*/false) ||
+        !info.within_pixel_limits(/*all_frames=*/true))
+        return RenditionVerdict::refused;
+    return rendition_is_original(info, edge) ? RenditionVerdict::original
+                                             : RenditionVerdict::encode;
+}
+
 std::optional<std::vector<std::byte>> rendition(Source& source, uint32_t edge) {
     auto info = probe(source);
-    if (!info)
+    if (!info || rendition_verdict(*info, edge) == RenditionVerdict::refused)
         return std::nullopt;
     edge = std::clamp(edge, min_rendition_edge, max_rendition_edge);
     uint32_t box = std::min(edge, std::max(info->width, info->height));
-    if (info->first_frame_only() || !detail::acceptable(*info, box, /*crop=*/false) ||
-        !info->within_pixel_limits(/*all_frames=*/true))
-        return std::nullopt;
 
     try {
         return detail::reencode(source, *info, box, thumbnail_quality).bytes;

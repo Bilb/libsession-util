@@ -62,11 +62,10 @@ TEST_CASE("Client: a cached picture reports what its header says", "[client][pic
         CHECK(a.picture->width == 4900);
         CHECK(a.picture->height == 4900);
         CHECK(a.picture->frames == 1);
-        // Its thumbnail was refused, so no rendition is queued after it; one asked for is refused.
-        CHECK_FALSE(a.picture->rendition_refused);
+        // Refused a rendition from the same reading of its header, so asking queues nothing.
+        CHECK(a.picture->rendition_refused);
         CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
-        settle(*f.c);
-        CHECK(f.attachment(id).picture->rendition_refused);
+        CHECK(TestHelper::thumbnails_queued(*f.c) == 0);
     }
 
     SECTION("nothing is said before the header has been read, or after the file has gone") {
@@ -106,9 +105,7 @@ TEST_CASE("Client: an animation's rendition is animated", "[client][picture]") {
     // The tile still gets its first frame.
     CHECK(a.has_thumbnail);
 
-    settle(*f.c);
-    REQUIRE(f.attachment(id).has_rendition);
-    auto webp = f.c->attachment_rendition(id, 0, await);
+    auto webp = ask_until_made(f, id);
     image::detail::image_ptr img{
             vips_image_new_from_buffer(webp.data(), webp.size(), "n=-1", nullptr)};
     REQUIRE(img);
@@ -129,7 +126,7 @@ TEST_CASE(
     CHECK(a.picture->frames == 3);
     CHECK(a.picture->animated());
     CHECK(a.picture->width == 400);
-    // Refused when made after the thumbnail, so the viewer draws the animation itself.
+    // Refused from its header when the thumbnail is made, so the viewer draws the animation itself.
     CHECK_FALSE(a.has_rendition);
     CHECK(a.picture->rendition_refused);
     CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);

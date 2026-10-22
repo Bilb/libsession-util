@@ -14,29 +14,27 @@ std::filesystem::path view_file(Fixture& f, const std::string& url) {
     return p;
 }
 
-// Asks until the rendition is served, as a viewer told through messages_updated would.
-std::vector<std::byte> ask_until_made(Fixture& f, int64_t id) {
-    std::vector<std::byte> got;
-    REQUIRE(eventually([&] {
-        try {
-            got = f.c->attachment_rendition(id, 0, await);
+bool told_refused(Fixture& f, int64_t id) {
+    for (const auto& m : Recorder::messages(f.rec.msg_updated))
+        if (m.id == id && m.attachments[0].picture && m.attachments[0].picture->rendition_refused)
             return true;
-        } catch (const session::error&) {
-            return false;
-        }
-    }));
-    return got;
+    return false;
 }
 
 }  // namespace
 
-TEST_CASE("Client: a rendition is made once a picture is cached, and kept", "[client][rendition]") {
+TEST_CASE("Client: a rendition is made when first asked for, and kept", "[client][rendition]") {
     Fixture f;
-    f.rec.msg_updated.clear();
     // A PNG, so the rendition is a copy of its own rather than the original itself.
     auto [id, url] = f.arrive(picture(1600, 1200));
     settle(*f.c);
     REQUIRE(f.attachment(id).has_thumbnail);
+    CHECK_FALSE(f.attachment(id).has_rendition);
+    CHECK_FALSE(std::filesystem::exists(view_file(f, url)));
+
+    f.rec.msg_updated.clear();
+    CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
+    settle(*f.c);
     CHECK(f.attachment(id).has_rendition);
     bool told = false;
     for (const auto& m : Recorder::messages(f.rec.msg_updated))
@@ -141,17 +139,21 @@ TEST_CASE(
     CHECK_FALSE(f.attachment(id).has_rendition);
     CHECK_FALSE(std::filesystem::exists(view_file(f, url)));
     CHECK_FALSE(std::filesystem::exists(f.thumb_file(url)));
-    // The later picture's own is all that is left.
     settle(*f.c);
-    CHECK(f.db_get("SELECT count(*) FROM attachment_derived WHERE kind = ?", rendition_kind) == 1);
+    CHECK(f.db_get("SELECT count(*) FROM attachment_derived WHERE kind = ?", rendition_kind) == 0);
 }
 
 TEST_CASE("Client: a picture no rendition can be made of is refused once", "[client][rendition]") {
     Fixture f;
-    // Labelled a picture, so a thumbnail is attempted and refused; the rendition likewise.
+    f.rec.msg_updated.clear();
+    // Labelled a picture, so a thumbnail is attempted and refused; the rendition likewise, from
+    // the same reading of its header, and said before anyone asks.
     auto [bad, url] = f.arrive(std::vector<std::byte>(600, std::byte{7}), "image/png");
     CHECK_FALSE(f.attachment(bad).has_thumbnail);
+    CHECK(f.attachment(bad).picture->rendition_refused);
+    CHECK(told_refused(f, bad));
     CHECK(error_code([&] { f.c->attachment_rendition(bad, 0, await); }) == err::no_rendition);
+    CHECK(TestHelper::thumbnails_queued(*f.c) == 0);
     settle(*f.c);
     CHECK_FALSE(f.attachment(bad).has_rendition);
     auto refused = f.db_get(
@@ -179,25 +181,9 @@ TEST_CASE("Client: a picture no rendition can be made of is refused once", "[cli
           image::renderer_version);
 }
 
-namespace {
-
-// Removes a made rendition, rows and file, as a picture cached before renditions were made on
-// arrival would be: only an ask makes one then.
-void forget_rendition(Fixture& f, const std::string& url) {
-    settle(*f.c);
-    std::filesystem::remove(view_file(f, url));
-    TestHelper::on_loop(f.c->core, [&] {
-        f.c->core.database().conn().prepared_exec(
-                "DELETE FROM attachment_derived WHERE kind = ?", rendition_kind);
-    });
-}
-
-}  // namespace
-
 TEST_CASE("Client: asking twice for one rendition queues it once", "[client][rendition]") {
     Fixture f;
     auto [id, url] = f.arrive(picture(400, 300));
-    forget_rendition(f, url);
     TestHelper::stall_thumbnails(*f.c);
     CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
     CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
@@ -208,10 +194,9 @@ TEST_CASE("Client: asking twice for one rendition queues it once", "[client][ren
     CHECK(TestHelper::thumbnails_queued(*f.c) == 0);
 }
 
-TEST_CASE("Client: a rendition whose decode fails gets one more try", "[client][rendition]") {
+TEST_CASE("Client: a rendition whose decode fails is refused, and said", "[client][rendition]") {
     Fixture f;
     auto [id, url] = f.arrive(picture(400, 300));
-    forget_rendition(f, url);
     auto refused = [&] {
         return f.db_get(
                 "SELECT coalesce((SELECT failed FROM attachment_derived d WHERE d.entry = c.id"
@@ -220,18 +205,17 @@ TEST_CASE("Client: a rendition whose decode fails gets one more try", "[client][
                 f.file(url).filename().string());
     };
 
-    // The cached file damaged from outside, so that reading it throws rather than refuses.
+    // The cached file damaged from outside, so that reading it throws rather than refuses.  The
+    // viewer that asked is waiting, so it is told at once rather than left to ask again.
     std::vector<std::byte> junk(3000);
     random::fill(junk);
     overwrite(f.file(url), junk);
-    CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
-    settle(*f.c);
-    CHECK(refused() == -image::renderer_version);
-
-    // Asked again: the second strike, after which it is refused and not tried again.
+    f.rec.msg_updated.clear();
     CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
     settle(*f.c);
     CHECK(refused() == image::renderer_version);
+    CHECK(told_refused(f, id));
+
     // Turned away rather than tried: an attempt would have marked it -version again.
     CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
     settle(*f.c);
@@ -257,8 +241,7 @@ TEST_CASE("Client: which pictures get which rendition", "[client][rendition]") {
 
     SECTION("a large one is drawn at the default edge") {
         auto [id, url] = f.arrive(picture(4000, 3000));
-        settle(*f.c);
-        CHECK(jpeg_size(f.c->attachment_rendition(id, 0, await)) == std::pair{2048, 1536});
+        CHECK(jpeg_size(ask_until_made(f, id)) == std::pair{2048, 1536});
     }
 
     SECTION("one sent as its original file gets a thumbnail and no rendition") {
@@ -281,12 +264,11 @@ TEST_CASE("Client: which pictures get which rendition", "[client][rendition]") {
         auto [jpeg, jpeg_url] = f.arrive(photo, "IMAGE/JPEG; charset=binary");
         auto [png, png_url] = f.arrive(picture(400, 300), " image/png ; foo=bar");
         settle(*f.c);
-        for (auto id : {jpeg, png}) {
-            CHECK(f.attachment(id).has_thumbnail);
-            CHECK(f.attachment(id).has_rendition);
-        }
+        CHECK(f.attachment(jpeg).has_thumbnail);
+        CHECK(f.attachment(png).has_thumbnail);
+        CHECK(f.attachment(jpeg).has_rendition);
         CHECK(f.c->attachment_rendition(jpeg, 0, await) == photo);
-        CHECK(jpeg_size(f.c->attachment_rendition(png, 0, await)) == std::pair{400, 300});
+        CHECK(jpeg_size(ask_until_made(f, png)) == std::pair{400, 300});
     }
 
     SECTION("a type that only starts like one Session displays gets neither") {
@@ -307,4 +289,75 @@ TEST_CASE("Client: which pictures get which rendition", "[client][rendition]") {
         CHECK(f.db_get("SELECT count(*) FROM attachment_cache") == 0);
         CHECK_FALSE(f.attachment(id).has_rendition);
     }
+}
+
+namespace {
+
+// Delivers `pictures` as the PNG attachments of one message, lets them download, and returns its
+// id and their urls.
+std::pair<int64_t, std::vector<std::string>> arrive_together(
+        Fixture& f, const std::vector<std::vector<std::byte>>& pictures) {
+    std::vector<std::string> urls, keys;
+    for (const auto& data : pictures) {
+        auto [ct, key] = attachment::encrypt(f.seed, data, attachment::Domain::ATTACHMENT);
+        auto file_id = "f{}-{}"_format(f.sent, urls.size());
+        f.net->served[file_id] = ct;
+        urls.push_back(network::file_server::generate_download_url(file_id, {}, true));
+        keys.emplace_back(reinterpret_cast<const char*>(key.data()), key.size());
+    }
+    deliver(*f.c,
+            f.peer,
+            "",
+            from_epoch_ms(1000 + f.sent),
+            "h{}"_format(f.sent),
+            "",
+            std::nullopt,
+            [&](SessionProtos::DataMessage& d) {
+                for (size_t i = 0; i < pictures.size(); i++) {
+                    auto* a = d.add_attachments();
+                    a->set_id(i + 1);
+                    a->set_url(urls[i]);
+                    a->set_key(keys[i]);
+                    a->set_size(pictures[i].size());
+                    a->set_contenttype("image/png");
+                }
+            });
+    f.sent++;
+    size_t served = 0;
+    REQUIRE(eventually([&] {
+        sync(*f.c);
+        served += serve_downloads(*f.net);
+        return served == pictures.size();
+    }));
+    settle(*f.c);
+    return {f.c->conversation(f.convo, await)->messages(await)[0].id, urls};
+}
+
+}  // namespace
+
+TEST_CASE(
+        "Client: asking for one rendition queues its message's others behind it",
+        "[client][rendition]") {
+    Fixture f;
+    auto [alone, alone_url] = f.arrive(picture(400, 300));
+    auto [id, urls] = arrive_together(f, {picture(400, 300), picture(500, 300), picture(600, 300)});
+    auto has_rendition = [&](size_t i) {
+        return f.c->message(id, await)->attachments.at(i).has_rendition;
+    };
+    for (size_t i = 0; i < urls.size(); i++)
+        CHECK_FALSE(has_rendition(i));
+
+    TestHelper::stall_thumbnails(*f.c);
+    CHECK(error_code([&] { f.c->attachment_rendition(id, 1, await); }) == err::no_rendition);
+    CHECK(TestHelper::thumbnails_pending(*f.c) ==
+          std::vector{f.entry(urls[1]), f.entry(urls[0]), f.entry(urls[2])});
+    TestHelper::resume_thumbnails(*f.c);
+    settle(*f.c);
+    for (size_t i = 0; i < urls.size(); i++)
+        CHECK(has_rendition(i));
+    CHECK_FALSE(f.attachment(alone).has_rendition);
+
+    // Asking again for one already made queues nothing.
+    CHECK_FALSE(f.c->attachment_rendition(id, 0, await).empty());
+    CHECK(TestHelper::thumbnails_queued(*f.c) == 0);
 }

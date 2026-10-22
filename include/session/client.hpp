@@ -15,6 +15,7 @@
 #include <session/client/message.hpp>
 #include <session/clock.hpp>
 #include <session/core.hpp>
+#include <session/image/rendition.hpp>
 #include <session/image/sendable.hpp>
 #include <session/util.hpp>
 #include <string>
@@ -516,19 +517,21 @@ class Client {
     /// is.  A picture already a JPEG or WebP within the box (`image::rendition_is_original`) is its
     /// own rendition, served as it is.
     ///
-    /// **From the cache only, never the network.**  Made as soon as a picture Session displays is
-    /// cached, after its thumbnail; one cached before that is made when first asked for, queued
-    /// ahead of everything else waiting to be made, and the ask fails with `err::no_rendition`.
-    /// When it is made, `messages_updated` reports `Attachment::has_rendition` true, and asking
-    /// again serves it.  Nothing waits on the decode, which runs on another thread and would
-    /// otherwise deadlock a caller on Core's loop.  Until then, the original if the platform
-    /// decodes it, else the thumbnail.
+    /// **From the cache only, never the network.**  One to re-encode is made only when asked for:
+    /// the first ask queues it ahead of everything else waiting to be made, with the renditions of
+    /// the message's other pictures behind it, and fails with `err::no_rendition`.  When it is
+    /// made, `messages_updated` reports `Attachment::has_rendition` true, and asking again serves
+    /// it.  Nothing waits on the decode, which runs on another thread and would otherwise deadlock
+    /// a caller on Core's loop.  Until then, the original if the platform decodes it, else the
+    /// thumbnail.  Whether the original is its own rendition is settled from its header when the
+    /// thumbnail is made, so such a picture's first ask is served.
     ///
     /// Kept, evicted, counted and read as a thumbnail is: part of the file's cache entry, gone
     /// with it, and marking the file used when read.  A picture no rendition can be made of is
-    /// refused under `image::renderer_version` and not tried again until that rises.  So is an
-    /// animated PNG labelled `image/png`: libvips decodes only its first frame, so the original is
-    /// what a viewer draws (`image::Info::first_frame_only`).
+    /// refused under `image::renderer_version` and not tried again until that rises, reported as
+    /// `PictureInfo::rendition_refused` through `messages_updated`.  So is an animated PNG
+    /// labelled `image/png`: libvips decodes only its first frame, so the original is what a
+    /// viewer draws (`image::Info::first_frame_only`).
     ///
     /// For an attachment sent as its original file (`Attachment::original_file`) asking never
     /// queues one: it is a file to export, not a picture to open.
@@ -1372,10 +1375,12 @@ class Client {
     // False once the queue has stopped.
     bool _post_derive(std::function<void()> job);
 
-    // What the derive thread read from a file's header, for `attachment_cache`'s columns of the
-    // same names: all zero when it could not be read as a picture.
+    // What the derive thread read from a file's header: for `attachment_cache`'s columns of the
+    // same names, all zero when it could not be read as a picture; and what a rendition of it at
+    // the rendition edge would be, nullopt when reading the header threw.
     struct PictureFacts {
         uint32_t width = 0, height = 0, frames = 0;
+        std::optional<image::RenditionVerdict> rendition;
     };
 
     // Cache entries waiting for a derived image of some kind, next first, and whether one is being
@@ -1412,8 +1417,9 @@ class Client {
     // Back from the derive thread with what it made: writes it beside the entry if the entry
     // still wants it.  Nullopt is a refusal, which stays recorded until the kind's version
     // changes; `failed`, an exception, which may not happen again: a thumbnail is retried at the
-    // next start, a rendition at the next ask, once.  `facts` is what the header said, written to
-    // the entry; nullopt when the file could not be opened at all.
+    // next start, and a rendition is refused.  `facts` is what the header said, written to the
+    // entry, with a rendition's verdict when that needs no decode; nullopt when the file could not
+    // be opened at all.
     void _derived_made(
             int64_t entry,
             cache::Derived kind,

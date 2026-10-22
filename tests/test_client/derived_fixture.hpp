@@ -230,6 +230,20 @@ struct Fixture {
     }
 };
 
+// Asks until the rendition is served, as a viewer told through messages_updated would.
+inline std::vector<std::byte> ask_until_made(Fixture& f, int64_t id, size_t index = 0) {
+    std::vector<std::byte> got;
+    REQUIRE(eventually([&] {
+        try {
+            got = f.c->attachment_rendition(id, index, await);
+            return true;
+        } catch (const session::error&) {
+            return false;
+        }
+    }));
+    return got;
+}
+
 // Replaces a file's contents, as something outside libsession going wrong would.
 inline void overwrite(const std::filesystem::path& file, std::span<const std::byte> data) {
     std::ofstream out{file, std::ios::binary | std::ios::trunc};

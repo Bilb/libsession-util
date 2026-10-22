@@ -217,8 +217,9 @@ struct PictureInfo {
     /// picture at all.  An animated PNG counts as an animation, and is never given a rendition.
     uint32_t frames = 0;
 
-    /// Whether `Client::attachment_rendition` has refused this picture under the current
-    /// `image::renderer_version`: no rendition will come, and the original is what there is.
+    /// Whether no rendition will come of this picture under the current `image::renderer_version`:
+    /// settled from its header when its thumbnail is made, or by an asked-for rendition that
+    /// failed.  The original is what there is, to draw if the platform decodes it, else to export.
     bool rendition_refused = false;
 
     bool readable() const { return frames > 0; }
@@ -305,8 +306,8 @@ struct Attachment {
 
     /// Whether `Client::attachment_rendition` has a rendition to serve: the whole picture as a
     /// JPEG or WebP (the bytes say which) at the rendition edge, for a viewer to draw in place of
-    /// the original.  Made once the picture's thumbnail is, and otherwise kept, evicted and
-    /// reported exactly as `has_thumbnail` is.
+    /// the original.  Made when first asked for, or settled with the thumbnail when the original
+    /// is its own, and otherwise kept, evicted and reported exactly as `has_thumbnail` is.
     bool has_rendition = false;
 
     /// What the cached file's header says, once libsession has read it, which it does when it
