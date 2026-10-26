@@ -297,6 +297,17 @@ TEST_CASE(
     }
 }
 
+TEST_CASE("Client: the upload limit is the file server's", "[client][send]") {
+    {
+        Sandbox s;
+        CHECK(s.c->attachment_upload_limit(await) == 10'000'000);
+    }
+    network::config::Config config;
+    config.custom_file_server_max_file_size = 2'000;
+    Sandbox s{config};
+    CHECK(s.c->attachment_upload_limit(await) == 2'000);
+}
+
 TEST_CASE("Client: a send plan for a file that is not there", "[client][send][pictures]") {
     Sandbox s;
     CHECK(s.c->attachment_send_plan(s.dir / "nothing.jpg", std::nullopt, await) ==

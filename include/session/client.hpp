@@ -340,6 +340,13 @@ class Client {
             const std::optional<std::string>& content_type,
             await_t);
 
+    /// The most the file server takes in one upload, counted encrypted and padded: the limit
+    /// `attachment_send_plan` and a send hold a file to, so the file itself has to be somewhat
+    /// smaller.  The attached network's file server's, `opt::file_server_max_file_size` where one
+    /// was given; before a network is attached, the 10 MB default `attachment_send_plan` uses too.
+    void attachment_upload_limit(result_function<uint64_t> cb);
+    uint64_t attachment_upload_limit(await_t);
+
     /// Sends a failed message again, resuming rather than restarting: attachments that already
     /// reached the file server are left alone and only the ones that did not are uploaded, because
     /// what each upload achieved is recorded against the message.  A message whose files all got

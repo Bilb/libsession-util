@@ -5971,6 +5971,13 @@ image::SendPlan Client::attachment_send_plan(
             path, content_type, call_get([this] { return _attachment_max_encrypted_size(); }));
 }
 
+void Client::attachment_upload_limit(result_function<uint64_t> cb) {
+    _async([this] { return _attachment_max_encrypted_size(); }, std::move(cb));
+}
+uint64_t Client::attachment_upload_limit(await_t) {
+    return call_get([this] { return _attachment_max_encrypted_size(); });
+}
+
 void Client::_drop_taken_file(int64_t client_id, size_t index) {
     auto path = core.database().conn().prepared_maybe_get<std::string>(
             "SELECT path FROM message_attachments WHERE message = ?1 AND idx = ?2",
