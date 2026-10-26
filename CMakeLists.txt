@@ -181,11 +181,15 @@ session_dep(libutf8proc 2.5)
 add_subdirectory(src)
 add_subdirectory(proto)
 
+# Whether or not STATIC_BUNDLE is on: a project that add_subdirectory()s libsession links this list.
+libsession_static_bundle_libs(bundle_libs)
+set(LIBSESSION_STATIC_BUNDLE_LIBS "${bundle_libs}" CACHE INTERNAL
+    "every static library libsession's targets link, each once")
+
 if(STATIC_BUNDLE)
 
     include(combine_archives)
 
-    libsession_static_bundle_libs(bundle_libs)
     combine_archives(session-util libsession-static-bundle ${bundle_libs})
     set(lib_folder lib)
     if(IOS)
