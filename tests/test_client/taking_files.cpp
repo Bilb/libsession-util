@@ -1,6 +1,7 @@
 #include <session/client/error_codes.hpp>
 #include <session/file.hpp>
 
+#include "../image_fixtures.hpp"
 #include "derived_fixture.hpp"
 
 using namespace std::literals;
@@ -357,6 +358,20 @@ TEST_CASE("Client: a file too large for the file server is not taken", "[client]
             std::invalid_argument);
     CHECK(read_all(original) == photo);
 
+    CHECK(files_in(s.outgoing) == 0);
+}
+
+TEST_CASE("Client: a picture too large to decode is not taken", "[client][send][take]") {
+    Sandbox s;
+    attach_mock_network(s.c->core);
+
+    std::span<const std::byte> avif{image_fixtures::avif8_4900x4900};
+    bytes body{avif.begin(), avif.end()};
+    auto file = s.write("huge.avif", body);
+    REQUIRE(s.c->attachment_send_plan(file, std::nullopt, await) ==
+            image::SendPlan::too_large_to_decode);
+    CHECK_THROWS_AS(s.send(file), std::invalid_argument);
+    CHECK(read_all(file) == body);
     CHECK(files_in(s.outgoing) == 0);
 }
 

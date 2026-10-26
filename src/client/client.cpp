@@ -720,17 +720,23 @@ void Client::_require_readable(const std::vector<OutgoingAttachment>& attachment
             throw std::invalid_argument{
                     "send_message: attachment {} has a thumbhash longer than {} bytes"_format(
                             utf8_string(a.path), MAX_THUMBHASH_SIZE)};
-        // A taken file is deleted once its message turns unsendable, so a refusal its size alone
-        // decides comes here, while the caller still has the file.  Only a re-encode can find a
-        // picture too large, and that one is still taken.
+        // A taken file is deleted once its message turns unsendable, so a refusal its size or
+        // header decides comes here, while the caller still has the file.  Only a re-encode can
+        // find a picture too large, and that one is still taken.
         if (a.take_file) {
             if (!max_encrypted_size)
                 max_encrypted_size = call_get([this] { return _attachment_max_encrypted_size(); });
-            if (!fits_file_server(size, *max_encrypted_size) &&
-                (a.original_file || send_plan_of(a.path, a.content_type, *max_encrypted_size) ==
-                                            image::SendPlan::too_large_for_server))
+            auto plan = a.original_file ? (fits_file_server(size, *max_encrypted_size)
+                                                   ? image::SendPlan::as_is
+                                                   : image::SendPlan::too_large_for_server)
+                                        : send_plan_of(a.path, a.content_type, *max_encrypted_size);
+            if (plan == image::SendPlan::too_large_for_server)
                 throw std::invalid_argument{
                         "send_message: attachment {} is larger than the file server accepts"_format(
+                                utf8_string(a.path))};
+            if (plan == image::SendPlan::too_large_to_decode)
+                throw std::invalid_argument{
+                        "send_message: attachment {} is a picture too large to decode"_format(
                                 utf8_string(a.path))};
         }
     }
