@@ -325,6 +325,31 @@ TEST_CASE(
     REQUIRE(info);
     CHECK(info->coefficient_bytes == 2ull * 64 * 64 * 4);
     CHECK(info->coefficient_bytes >= read->coefficient_bytes);
+
+    // A stuffed FF 00, which libjpeg skips as data and the walk would take for a marker whose
+    // length lands on a decoy frame header in APP1: luma at 4x4 makes the chroma a sixteenth.
+    auto sof = text(plain).find("\xFF\xC2"sv);
+    REQUIRE(sof != std::string_view::npos);
+    bytes decoy{plain.begin() + sof, plain.begin() + sof + 2 + u16be(plain, sof + 2)};
+    decoy[11] = std::byte{0x44};
+    auto app1_len = static_cast<uint16_t>(2 + decoy.size());
+    bytes stuffed{plain.begin(), plain.begin() + 2};
+    stuffed.insert(
+            stuffed.end(),
+            {std::byte{0xFF},
+             std::byte{0x00},
+             std::byte{0x00},
+             std::byte{0x06},
+             std::byte{0xFF},
+             std::byte{0xE1},
+             std::byte(app1_len >> 8),
+             std::byte(app1_len & 0xFF)});
+    stuffed.insert(stuffed.end(), decoy.begin(), decoy.end());
+    stuffed.insert(stuffed.end(), plain.begin() + 2, plain.end());
+    image::Source stuffed_source{std::span<const std::byte>{stuffed}};
+    auto charged = image::probe(stuffed_source);
+    REQUIRE(charged);
+    CHECK(charged->coefficient_bytes == 2ull * 64 * 64 * 4);
 }
 
 TEST_CASE(

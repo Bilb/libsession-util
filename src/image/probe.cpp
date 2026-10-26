@@ -186,9 +186,10 @@ namespace {
                         break;
                     continue;
                 }
-                // Markers with no length, which libjpeg accepts before the frame header: walking
-                // on from here would read a different frame header than it does.
-                if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7))
+                // Markers with no length, and a stuffed FF 00 that libjpeg skips as data, all of
+                // which it accepts before the frame header: walking on from here would read a
+                // different frame header than it does.
+                if (marker == 0x00 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7))
                     break;
                 bool sof = marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 &&
                            marker != 0xCC;
