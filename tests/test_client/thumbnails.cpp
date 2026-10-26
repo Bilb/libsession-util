@@ -221,6 +221,29 @@ TEST_CASE("Client: the startup pass fills in what was cached before", "[client][
 }
 
 TEST_CASE(
+        "Client: a cached picture that no longer decrypts is dropped, not tried at every open",
+        "[client][thumbnail]") {
+    Fixture f;
+    auto [id, url] = f.arrive(picture(400, 300));
+    f.strip_thumbnail(url);
+    auto file = f.file(url);
+    {
+        auto middle = static_cast<std::streamoff>(std::filesystem::file_size(file) / 2);
+        std::fstream io{file, std::ios::binary | std::ios::in | std::ios::out};
+        io.seekg(middle);
+        char was = static_cast<char>(io.get());
+        io.seekp(middle);
+        io.put(static_cast<char>(was ^ 0x5a));
+    }
+
+    f.reopen();
+    settle(*f.c);
+    CHECK(f.db_get("SELECT count(*) FROM attachment_cache") == 0);
+    CHECK_FALSE(std::filesystem::exists(file));
+    CHECK(f.attachment(id).availability == AttachmentAvailability::absent);
+}
+
+TEST_CASE(
         "Client: a thumbnail still queued when the Client goes is made at the next open",
         "[client][thumbnail]") {
     Fixture f;
@@ -405,18 +428,19 @@ TEST_CASE(
 }
 
 TEST_CASE(
-        "Client: a thumbnail that fails to be made is tried again at the next open",
+        "Client: a thumbnail whose making threw is tried again at the next open",
         "[client][thumbnail]") {
     Fixture f;
     auto [id, url] = f.arrive(picture(400, 300));
-    auto good = contents(f.file(url));
     f.strip_thumbnail(url);
-
-    // Not an encrypted file at all, so making a thumbnail throws rather than refusing.
-    std::vector<std::byte> junk(3000);
-    random::fill(junk);
-    overwrite(f.file(url), junk);
-    f.reopen();
+    auto entry = f.entry(url);
+    TestHelper::on_loop(f.c->core, [&] {
+        f.c->core.database().conn().prepared_exec(
+                "INSERT INTO attachment_derived (entry, kind, failed) VALUES (?2, 1, ?1)",
+                -image::thumbnailer_version,
+                entry);
+    });
+    TestHelper::thumbnail_threw(*f.c, entry, f.file(url).filename().string());
     CHECK_FALSE(f.attachment(id).has_thumbnail);
     CHECK(f.refused_under(url) == 0);
 
@@ -428,7 +452,6 @@ TEST_CASE(
         CHECK(TestHelper::thumbnails_queued(*f.c) == 0);
     }
 
-    overwrite(f.file(url), good);
     f.reopen();
     CHECK(f.attachment(id).has_thumbnail);
 }

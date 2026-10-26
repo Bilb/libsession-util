@@ -323,7 +323,8 @@ TEST_CASE("Client: a taken file goes when its message turns unsendable", "[clien
     config.custom_file_server_max_file_size = 2'000;
     attach_mock_network(s.c->core, std::move(config));
 
-    auto id = s.send(s.write("big.bin", contents(3000)));
+    // A picture, since only re-encoding it finds that it cannot be made small enough.
+    auto id = s.send(s.write("big.jpg", derived_test::picture(640, 480, ".jpg")));
     auto owned = s.cache.path / stored_path(s.c, id);
     CHECK(derived_test::eventually([&] {
         sync(*s.c);
@@ -332,6 +333,31 @@ TEST_CASE("Client: a taken file goes when its message turns unsendable", "[clien
     CHECK(eventually_gone(s.c, owned));
     CHECK(s.c->message(id, await)->attachments[0].availability == AttachmentAvailability::absent);
     CHECK_THROWS(s.c->attachment_data_cached(id, 0, await));
+}
+
+TEST_CASE("Client: a file too large for the file server is not taken", "[client][send][take]") {
+    Sandbox s;
+    network::config::Config config;
+    config.custom_file_server_max_file_size = 2'000;
+    attach_mock_network(s.c->core, std::move(config));
+
+    auto body = contents(3000);
+    auto file = s.write("big.bin", body);
+    CHECK_THROWS_AS(s.send(file), std::invalid_argument);
+    CHECK(read_all(file) == body);
+
+    auto photo = derived_test::picture(640, 480, ".jpg");
+    auto original = s.write("big.jpg", photo);
+    CHECK_THROWS_AS(
+            s.c->send_message(
+                    ConversationId::dm(s.me),
+                    {.attachments = {OutgoingAttachment{
+                             .path = original, .take_file = true, .original_file = true}}},
+                    await),
+            std::invalid_argument);
+    CHECK(read_all(original) == photo);
+
+    CHECK(files_in(s.outgoing) == 0);
 }
 
 TEST_CASE("Client: a sweep keeps a file taken for a send not yet stored", "[client][send][take]") {
@@ -438,4 +464,15 @@ TEST_CASE("Client: a name outside ASCII is stored as UTF-8", "[client][send][tak
     CHECK(msg->attachments[0].filename == "caf\xc3\xa9 \xe2\x98\x95.txt");
     CHECK(msg->attachments[0].content_type == "text/plain");
     CHECK(on_server(s.c, *net, id) == body);
+}
+
+TEST_CASE("sync_to_disk takes a file and a directory, and throws for neither", "[file]") {
+    auto dir = std::filesystem::temp_directory_path() / random::unique_id("test_sync", 7);
+    std::filesystem::create_directories(dir);
+    auto file = dir / "copy.bin";
+    write_whole_file(file, "contents");
+    CHECK_NOTHROW(sync_to_disk(file));
+    CHECK_NOTHROW(sync_to_disk(dir));
+    CHECK_THROWS_AS(sync_to_disk(dir / "missing.bin"), std::system_error);
+    std::filesystem::remove_all(dir);
 }

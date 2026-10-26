@@ -26,6 +26,11 @@ std::vector<std::byte> read_whole_file(const fs::path& filename);
 /// Dumps (binary) string contents to disk. The file is overwritten if it already exists.
 void write_whole_file(const fs::path& filename, std::string_view contents = "");
 
+/// Waits until what is written to `path`, a file or a directory's entries, is on the storage
+/// device rather than in a cache.  A directory is a no-op on Windows, which cannot open one for
+/// this.  Throws std::system_error on failure.
+void sync_to_disk(const fs::path& path);
+
 /// A path as UTF-8, the form one is stored and logged in.  `path::string()` is the ANSI code page
 /// on Windows, which cannot represent every name and throws for one it cannot; on POSIX the two
 /// are the same bytes.

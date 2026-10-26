@@ -325,7 +325,8 @@ class Client {
     /// limit: for a staging screen to say before sending that a file will be refused, or will go
     /// as the original rather than re-encoded.  `content_type` is the attachment's label, inferred
     /// from the extension when unset as `send_message` infers it.  Says nothing about an attachment
-    /// marked `OutgoingAttachment::original_file`, which is sent as it is whatever it holds.
+    /// marked `OutgoingAttachment::original_file`, which is sent as it is whatever it holds, and
+    /// refused only when it is larger than the file server's limit once encrypted.
     ///
     /// The file server's limit is the one known when asked: before the network has the server's
     /// configuration it is the 10 MB default, and the send is held to whatever it is by then.  A
@@ -1630,14 +1631,15 @@ class Client {
 
     // The rest of `_upload_next`, once the file is known: uploads attachment `index` from `path`,
     // or from `body` when that is set, or fails the message for good if `file_size` says the file
-    // is gone.
+    // is gone.  `on_recorded`, when set, writes to the row in the transaction that records the url.
     void _upload_one(
             int64_t client_id,
             size_t index,
             std::string path,
             std::optional<int64_t> file_size,
             std::shared_ptr<const std::vector<std::byte>> body,
-            Conversation::upload_progress on_upload);
+            Conversation::upload_progress on_upload,
+            std::function<void(sqlite::Connection&)> on_recorded = nullptr);
 
     // Rebuilds the message's content with its now-uploaded attachments named in it, replaces what
     // was stored, and dispatches it.  Rebuilt from the database rather than from what send_message

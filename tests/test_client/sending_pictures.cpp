@@ -364,6 +364,53 @@ TEST_CASE(
 }
 
 TEST_CASE(
+        "Client: a converted picture is described as sent once it is uploaded",
+        "[client][send][pictures]") {
+    Sandbox s;
+    s.net->hold_uploads = true;
+    auto id = s.c->send_message(
+            ConversationId::dm(own_sid(*s.c)),
+            {.attachments = {{.path = s.write("shot.png", derived_test::picture(64, 48, ".png"))}}},
+            await);
+    until(s.c, [&] { return s.net->held.size() == 1; });
+
+    // Until then the original file is what is served, so it is what the row describes.
+    auto a = s.c->message(id, await)->attachments.at(0);
+    CHECK(a.content_type == "image/png");
+    CHECK(a.filename == "shot.png");
+    CHECK(a.thumbhash);
+
+    s.net->hold_uploads = false;
+    s.net->release_upload();
+    until(s.c, [&] { return accept_stores(*s.net) == 1; });
+    a = s.c->message(id, await)->attachments.at(0);
+    CHECK(a.content_type != "image/png");
+    CHECK(a.filename != "shot.png");
+}
+
+TEST_CASE(
+        "Client: a file sent as the original is held to the file server's limit",
+        "[client][send][pictures]") {
+    network::config::Config config;
+    config.custom_file_server_max_file_size = 2'000;
+    Sandbox s{config};
+    std::vector<std::string_view> codes;
+    auto id = s.c->send_message(
+            ConversationId::dm(own_sid(*s.c)),
+            {.attachments = {OutgoingAttachment{
+                     .path = s.write("photo.jpg", derived_test::picture(640, 480, ".jpg")),
+                     .original_file = true}}},
+            [&](size_t, int64_t, int64_t, std::optional<Expected<void>> r) {
+                if (r && !*r)
+                    codes.push_back(r->error().code);
+            },
+            await);
+    until(s.c, [&] { return s.c->message(id, await)->send_state == SendState::unsendable; });
+    CHECK(codes == std::vector<std::string_view>{err::attachment_too_large});
+    CHECK(s.net->served.empty());
+}
+
+TEST_CASE(
         "Client: converting a message's pictures keeps the reader's choice of a list",
         "[client][send][pictures][gallery]") {
     Sandbox s;

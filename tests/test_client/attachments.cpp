@@ -2302,6 +2302,9 @@ TEST_CASE(
     c->set_attachment_cache_limit(contents.size() - 1, await);
     CHECK(availability(send({as_document}), 0) != AttachmentAvailability::cached);
     CHECK(availability(gallery_id, 0) == AttachmentAvailability::cached);
+    // Measured as the cache measures it, encrypted and padded on disk.
+    c->set_attachment_cache_limit(contents.size(), await);
+    CHECK(availability(send({as_document}), 0) != AttachmentAvailability::cached);
 
     std::filesystem::remove_all(dir);
 }

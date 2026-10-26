@@ -194,7 +194,9 @@ TEST_CASE("Client: asking twice for one rendition queues it once", "[client][ren
     CHECK(TestHelper::thumbnails_queued(*f.c) == 0);
 }
 
-TEST_CASE("Client: a rendition whose decode fails is refused, and said", "[client][rendition]") {
+TEST_CASE(
+        "Client: a rendition of a cached file that is no picture is refused, and said",
+        "[client][rendition]") {
     Fixture f;
     auto [id, url] = f.arrive(picture(400, 300));
     auto refused = [&] {
@@ -205,11 +207,11 @@ TEST_CASE("Client: a rendition whose decode fails is refused, and said", "[clien
                 f.file(url).filename().string());
     };
 
-    // The cached file damaged from outside, so that reading it throws rather than refuses.  The
-    // viewer that asked is waiting, so it is told at once rather than left to ask again.
+    // The cached file replaced from outside by one that decrypts to no picture.  The viewer that
+    // asked is waiting, so it is told at once rather than left to ask again.
     std::vector<std::byte> junk(3000);
     random::fill(junk);
-    overwrite(f.file(url), junk);
+    TestHelper::write_cached(*f.c, cache::ATTACHMENT_DIR, url, junk);
     f.rec.msg_updated.clear();
     CHECK(error_code([&] { f.c->attachment_rendition(id, 0, await); }) == err::no_rendition);
     settle(*f.c);

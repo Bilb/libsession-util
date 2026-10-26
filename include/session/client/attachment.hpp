@@ -32,7 +32,9 @@ struct OutgoingAttachment {
     ///
     /// The caller's file is removed once the message is stored, and must not be used afterwards.
     /// Until then it is untouched, and it stays at `path` whenever the message is never stored,
-    /// which includes every send that throws.  A symbolic link is refused.
+    /// which includes every send that throws.  A symbolic link is refused, and so is a file the
+    /// send would refuse for its size alone (see `Conversation::send_message`), since refusing it
+    /// later would delete it.
     ///
     /// The file is hard-linked into place, or copied where it cannot be (across filesystems, say).
     /// Either happens on the calling thread, so a copy of a large file blocks the `send_message`
@@ -65,7 +67,8 @@ struct OutgoingAttachment {
     /// re-encoded (`image::sendable`): `content_type`, the filename's extension, the size and the
     /// fields below then describe what was sent rather than the file at `path`.  A picture this
     /// build does not decode (a format it does not read, an animated PNG) is sent as if this were
-    /// set; one too large to decode is refused with `err::attachment_too_large`.
+    /// set; one too large to decode is refused with `err::attachment_too_large`, as is a file sent
+    /// with this set that is larger than the file server's limit once encrypted.
     bool original_file = false;
 
     /// Pixel dimensions, for visual media.  Recipients use them to lay out a placeholder before

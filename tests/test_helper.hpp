@@ -499,6 +499,20 @@ class TestHelper {
         return c._cache_path(kind, url);
     }
 
+    /// Replaces a url's cached file with `data`, encrypted under the cache key as the Client
+    /// writes it: a file that decrypts, whatever it holds.
+    template <typename Client>
+    static void write_cached(
+            Client& c,
+            std::string_view kind,
+            std::string_view url,
+            std::span<const std::byte> data) {
+        c.core.loop().call_get([&] {
+            session::client::cache::write(
+                    c._cache_path(kind, url), c._cache_encryption_key(), data);
+        });
+    }
+
     /// Takes a message's `take_file` attachments as `send_message` does, without sending: the
     /// window between a file being taken and its message being stored, held open.
     template <typename Client, typename Message>
@@ -559,6 +573,23 @@ class TestHelper {
         c.core.call_get([&c, entry] {
             c._derived_running = true;
             c._derived_attempt.emplace(entry, client::cache::Derived::thumbnail);
+        });
+    }
+
+    /// Delivers what a thumbnail decode that threw reports, for an attempt marked as the pump
+    /// marks one.  No cache file that decrypts makes the decode throw on demand.
+    template <typename Client>
+    static void thumbnail_threw(Client& c, int64_t entry, std::string name) {
+        c.core.call_get([&] {
+            c._derived_running = true;
+            c._derived_attempt.emplace(entry, client::cache::Derived::thumbnail);
+            c._derived_made(
+                    entry,
+                    client::cache::Derived::thumbnail,
+                    std::move(name),
+                    std::nullopt,
+                    /*failed=*/true,
+                    std::nullopt);
         });
     }
 

@@ -379,8 +379,10 @@ class Conversation {
     /// unless `OutgoingAttachment::take_file` hands it over.
     ///
     /// @throws std::invalid_argument if any attachment's file is not a readable, non-empty file,
-    /// if one with `take_file` is a symbolic link, cannot be linked or copied, or has no cache
-    /// directory to go to, or if `reply_to` names a message that does not exist or belongs to
+    /// if one with `take_file` is a symbolic link, cannot be linked or copied, has no cache
+    /// directory to go to, or is too large for the file server and not a picture re-encoding could
+    /// shrink (`image::SendPlan::too_large_for_server`, or any file past the limit with
+    /// `original_file`), or if `reply_to` names a message that does not exist or belongs to
     /// another conversation; thrown on the calling thread, before anything is stored or dispatched.
     using upload_progress = std::function<void(
             size_t index, int64_t sent, int64_t total, std::optional<Expected<void>> result)>;

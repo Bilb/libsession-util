@@ -187,9 +187,11 @@ struct Message {
     ///
     /// Derived, never stored, and the rule is ours: today it is "has attachments, and every one of
     /// them has a content type Session displays as an image" (image::is_displayable_image, which
-    /// matches what libsession will decode), but it may gain a size ceiling.  Deriving it means a
-    /// change to that rule takes effect on old messages too, rather than leaving stored answers
-    /// from whatever the rule used to be.
+    /// matches what libsession will decode), but it may gain a size ceiling.  A picture sent as its
+    /// original file (`Attachment::original_file`) counts too: a gallery is laid out from
+    /// thumbnails, which it has, and opening it offers the file for export as anywhere else.
+    /// Deriving it means a change to that rule takes effect on old messages too, rather than
+    /// leaving stored answers from whatever the rule used to be.
     bool gallery_viewable = false;
     /// Whether it *is* being shown that way.
     ///
