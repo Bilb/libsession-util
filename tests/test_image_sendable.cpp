@@ -309,6 +309,25 @@ TEST_CASE(
 }
 
 TEST_CASE(
+        "Sendable: a progressive JPEG whose markers libjpeg reads differently is charged in full",
+        "[image][sendable]") {
+    auto plain = save(
+            draw(64, 48, [](int, int) { return RED; }).get(), ".jpg[interlace,subsample_mode=off]");
+    image::Source plain_source{std::span<const std::byte>{plain}};
+    auto read = image::probe(plain_source);
+    REQUIRE(read);
+
+    // An RST marker straight after SOI, which libjpeg skips as having no length.
+    auto marked = plain;
+    marked.insert(marked.begin() + 2, {std::byte{0xFF}, std::byte{0xD0}});
+    image::Source source{std::span<const std::byte>{marked}};
+    auto info = image::probe(source);
+    REQUIRE(info);
+    CHECK(info->coefficient_bytes == 2ull * 64 * 64 * 4);
+    CHECK(info->coefficient_bytes >= read->coefficient_bytes);
+}
+
+TEST_CASE(
         "Sendable: a picture too large for the limit is shrunk until it fits",
         "[image][sendable]") {
     auto noise =

@@ -160,14 +160,19 @@ namespace {
         return std::min(frames, MAX_APNG_FRAMES);
     }
 
+    struct JpegFrame {
+        uint32_t width, height, components;
+        uint64_t coefficient_bytes;
+    };
+
     // What libjpeg allocates for a progressive JPEG's coefficients, from its frame header's own
     // sampling factors: per component, its blocks padded to whole MCUs, at 128 bytes a block.
     // nullopt if the header cannot be found or makes no sense.
-    std::optional<uint64_t> jpeg_coefficient_bytes(Source& src) {
+    std::optional<JpegFrame> jpeg_frame(Source& src) {
         VipsSource* vsrc = detail::source_access::vips(src);
         if (vips_source_rewind(vsrc))
             return std::nullopt;
-        std::optional<uint64_t> bytes;
+        std::optional<JpegFrame> frame;
         unsigned char m[4];
         int64_t at = 2;
         if (read_exact(vsrc, m, 2) && m[0] == 0xFF && m[1] == 0xD8)
@@ -181,6 +186,10 @@ namespace {
                         break;
                     continue;
                 }
+                // Markers with no length, which libjpeg accepts before the frame header: walking
+                // on from here would read a different frame header than it does.
+                if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7))
+                    break;
                 bool sof = marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 &&
                            marker != 0xCC;
                 if (sof) {
@@ -206,7 +215,7 @@ namespace {
                                  down = (uint64_t{height} * v + 8 * vmax - 1) / (8 * vmax);
                         total += (across + h - 1) / h * h * ((down + v - 1) / v * v) * 128;
                     }
-                    bytes = total;
+                    frame = JpegFrame{width, height, n, total};
                     break;
                 }
                 if (marker == 0xDA || marker == 0xD9 || len < 2)
@@ -216,7 +225,7 @@ namespace {
                     break;
             }
         vips_source_rewind(vsrc);
-        return bytes;
+        return frame;
     }
 
 }  // namespace
@@ -275,7 +284,7 @@ std::optional<Info> probe(Source& source) {
         return std::nullopt;
 
     uint32_t png_frames = info.format == Format::png ? apng_frames(source) : 0;
-    auto coefficients = info.format == Format::jpeg ? jpeg_coefficient_bytes(source) : std::nullopt;
+    auto frame = info.format == Format::jpeg ? jpeg_frame(source) : std::nullopt;
     detail::source_access::rethrow_error(source);
 
     VipsImage* raw =
@@ -309,11 +318,16 @@ std::optional<Info> probe(Source& source) {
         case Format::avif: info.decoded_whole = true; break;
     }
     if (info.format == Format::jpeg && interlaced) {
-        // Without the frame header's factors: a JPEG's most components, all at full size, in MCUs
-        // of up to 32 pixels.
+        // Only a frame header describing the image libvips read is trusted for its factors.
+        // Without one: every component at full size, in MCUs of up to 32 pixels.
+        bool trusted = frame && frame->width == static_cast<uint32_t>(img->Xsize) &&
+                       frame->height == static_cast<uint32_t>(img->Ysize) &&
+                       frame->components == static_cast<uint32_t>(img->Bands);
         uint64_t padded =
                 uint64_t{(img->Xsize + 31u) / 32u * 32u} * ((img->Ysize + 31u) / 32u * 32u);
-        info.coefficient_bytes = coefficients.value_or(2 * padded * 4);
+        info.coefficient_bytes =
+                trusted ? frame->coefficient_bytes
+                        : 2 * padded * std::max<uint64_t>(4, static_cast<uint64_t>(img->Bands));
     }
     info.decodable = can_decode(info.format);
     info.size = source.size();
