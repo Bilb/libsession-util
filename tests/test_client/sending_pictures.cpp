@@ -2,6 +2,7 @@
 
 #include <session/client/error_codes.hpp>
 #include <session/image/sendable.hpp>
+#include <session/network/backends/session_file_server.hpp>
 
 #include "../image_drawing.hpp"
 #include "../image_fixtures.hpp"
@@ -298,9 +299,14 @@ TEST_CASE(
 }
 
 TEST_CASE("Client: the upload limit is the file server's", "[client][send]") {
+    const auto default_limit = network::file_server::DEFAULT_CONFIG.max_file_size;
+    {
+        TempClient c;
+        CHECK(c->attachment_upload_limit(await) == default_limit);
+    }
     {
         Sandbox s;
-        CHECK(s.c->attachment_upload_limit(await) == 10'000'000);
+        CHECK(s.c->attachment_upload_limit(await) == default_limit);
     }
     network::config::Config config;
     config.custom_file_server_max_file_size = 2'000;

@@ -6042,7 +6042,8 @@ void Client::_convert_outgoing(
 uint64_t Client::_attachment_max_encrypted_size() {
     // Without a network the upload fails regardless.
     auto net = core.network();
-    return net ? net->file_server_config.max_file_size : 10'000'000;
+    return net ? net->file_server_config.max_file_size
+               : network::file_server::DEFAULT_CONFIG.max_file_size;
 }
 
 void Client::attachment_send_plan(
