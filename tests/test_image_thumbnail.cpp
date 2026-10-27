@@ -57,8 +57,8 @@ TEST_CASE("thumbnail makes a JPEG with no metadata", "[image][thumbnail]") {
     CHECK_FALSE(has_marker(*out, 0xFE));  // COM
 
     auto img = decode_jpeg(*out);
-    CHECK(img->Xsize == 128);
-    CHECK(img->Ysize == 96);
+    CHECK(img->Xsize == 171);
+    CHECK(img->Ysize == 128);
     CHECK(img->Bands == 3);
 }
 
@@ -82,7 +82,7 @@ TEST_CASE("thumbnail converts a wide-gamut picture to sRGB", "[image][thumbnail]
     CHECK(near(pixel(img.get(), 16, 16), RED, 8));
 }
 
-TEST_CASE("thumbnail fits the picture inside the edge and never upscales", "[image][thumbnail]") {
+TEST_CASE("thumbnail is the edge tall and never upscales", "[image][thumbnail]") {
     auto size_of = [](const std::optional<std::vector<std::byte>>& jpeg) {
         REQUIRE(jpeg);
         auto img = decode_jpeg(*jpeg);
@@ -94,7 +94,7 @@ TEST_CASE("thumbnail fits the picture inside the edge and never upscales", "[ima
     using size = std::pair<int, int>;
 
     auto landscape = picture(2000, 1500);
-    CHECK(size_of(thumb(landscape, 300)) == size{300, 225});
+    CHECK(size_of(thumb(landscape, 300)) == size{400, 300});
     CHECK(size_of(thumb(picture(1500, 2000), 300)) == size{225, 300});
     CHECK(size_of(thumb(picture(1000, 1000), 300)) == size{300, 300});
     // Its own size, rather than the 128 asked for.
@@ -102,12 +102,11 @@ TEST_CASE("thumbnail fits the picture inside the edge and never upscales", "[ima
     // A phone screenshot, about 9:19.5, is inside 21:9 and kept whole.
     CHECK(size_of(thumb(picture(900, 1950), 260)) == size{120, 260});
     // Exactly 21:9 is not cropped.
-    CHECK(size_of(thumb(picture(2100, 900), 210)) == size{210, 90});
+    CHECK(size_of(thumb(picture(2100, 900), 210)) == size{490, 210});
 
-    CHECK(size_of(thumb(landscape, 10)) ==
-          size{int(image::min_thumbnail_edge), int(image::min_thumbnail_edge) * 3 / 4});
-    CHECK(size_of(thumb(landscape, 5000)) ==
-          size{int(image::max_thumbnail_edge), int(image::max_thumbnail_edge) * 3 / 4});
+    // 4:3 at each end of the clamp, the width rounded.
+    CHECK(size_of(thumb(landscape, 10)) == size{85, int(image::min_thumbnail_edge)});
+    CHECK(size_of(thumb(landscape, 5000)) == size{1365, int(image::max_thumbnail_edge)});
 }
 
 TEST_CASE("thumbnail draws transparency over a checkerboard", "[image][thumbnail]") {
@@ -128,6 +127,7 @@ TEST_CASE("thumbnail draws transparency over a checkerboard", "[image][thumbnail
     REQUIRE(out);
     auto img = decode_jpeg(*out);
     REQUIRE(img->Xsize == 128);
+    REQUIRE(img->Ysize == 128);
     REQUIRE(img->Bands == 3);
 
     constexpr rgba LIGHT{0xFF, 0xFF, 0xFF, 255}, DARK{0xCC, 0xCC, 0xCC, 255};
@@ -149,9 +149,10 @@ TEST_CASE("thumbnail of an animation is its first frame", "[image][thumbnail]") 
         auto out = thumb(anim, 64);
         REQUIRE(out);
         auto img = decode_jpeg(*out);
-        CHECK(img->Xsize == 64);
-        CHECK(img->Ysize == 48);
-        CHECK(near(pixel(img.get(), 32, 24), RED));
+        // Its own size, being shorter than the 64 asked for.
+        CHECK(img->Xsize == 80);
+        CHECK(img->Ysize == 60);
+        CHECK(near(pixel(img.get(), 40, 30), RED));
     }
 }
 
@@ -209,10 +210,10 @@ TEST_CASE("thumbnail applies EXIF orientation", "[image][thumbnail]") {
         auto out = thumb(save(stored.get(), ".jpg"), 64);
         REQUIRE(out);
         auto img = decode_jpeg(*out);
-        CHECK(img->Xsize == 64);
-        CHECK(img->Ysize == 32);
-        CHECK(near(pixel(img.get(), 8, 16), RED));
-        CHECK(near(pixel(img.get(), 56, 16), BLUE));
+        CHECK(img->Xsize == 128);
+        CHECK(img->Ysize == 64);
+        CHECK(near(pixel(img.get(), 16, 32), RED));
+        CHECK(near(pixel(img.get(), 112, 32), BLUE));
     }
 
     SECTION("orientation 6: displayed a quarter turn clockwise, so the left edge is on top") {
@@ -224,6 +225,17 @@ TEST_CASE("thumbnail applies EXIF orientation", "[image][thumbnail]") {
         CHECK(img->Ysize == 64);
         CHECK(near(pixel(img.get(), 16, 8), RED));
         CHECK(near(pixel(img.get(), 16, 56), BLUE));
+    }
+
+    SECTION("orientation 8: displayed a quarter turn anticlockwise, so the left edge is below") {
+        vips_image_set_int(stored.get(), "orientation", 8);
+        auto out = thumb(save(stored.get(), ".jpg"), 64);
+        REQUIRE(out);
+        auto img = decode_jpeg(*out);
+        CHECK(img->Xsize == 32);
+        CHECK(img->Ysize == 64);
+        CHECK(near(pixel(img.get(), 16, 8), BLUE));
+        CHECK(near(pixel(img.get(), 16, 56), RED));
     }
 }
 
@@ -240,9 +252,9 @@ TEST_CASE("thumbnail of a panorama is its centre at 21:9", "[image][thumbnail]")
         auto out = thumb(pano, 64);
         REQUIRE(out);
         auto img = decode_jpeg(*out);
-        // 64 by 64 x 9/21, rounded.
-        CHECK(img->Xsize == (wide ? 64 : 27));
-        CHECK(img->Ysize == (wide ? 27 : 64));
+        // 64 tall; wide, 64 x 233/100 rounded, and tall, 64 x 100/233.
+        CHECK(img->Xsize == (wide ? 149 : 27));
+        CHECK(img->Ysize == 64);
         int w = img->Xsize - 1, h = img->Ysize - 1;
         for (auto [x, y] :
              {std::pair{4, 4}, {w - 4, 4}, {4, h - 4}, {w - 4, h - 4}, {w / 2, h / 2}})
@@ -279,8 +291,9 @@ TEST_CASE("thumbnail reads an encrypted file", "[image][thumbnail]") {
     auto out = image::thumbnail(src, 100);
     REQUIRE(out);
     auto img = decode_jpeg(*out);
-    CHECK(img->Xsize == 100);
-    CHECK(near(pixel(img.get(), 50, 50), BLUE));
+    CHECK(img->Xsize == 150);
+    CHECK(img->Ysize == 100);
+    CHECK(near(pixel(img.get(), 75, 50), BLUE));
 }
 
 // Not run by default: `testAll "[thumbnail-bench]"`.  What drawing transparency over the

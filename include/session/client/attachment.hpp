@@ -296,8 +296,8 @@ struct Attachment {
     int64_t fetch_total = 0;
 
     /// Whether `Client::attachment_thumbnail` has a thumbnail to serve: a small JPEG of the
-    /// picture in its own shape, for drawing it in a grid or a list without decoding the whole
-    /// file.
+    /// picture in its own shape, `Client::thumbnail_edge` pixels tall, for drawing it in rows of
+    /// tiles of one height without decoding the whole file.
     ///
     /// Only ever true while the file itself is in the cache, because the thumbnail is part of the
     /// cached copy: made from it once it is here, and evicted or deleted with it.  So it turns

@@ -76,18 +76,20 @@ namespace session::client {
 using namespace std::literals;
 
 /// The thumbnail edge used when neither the application nor a stored setting gives one: the 240
-/// points a tile's longer side is drawn at, at 1x.  An application on a denser display passes its
-/// own through `default_thumbnail_edge`.
+/// points tall a tile is drawn at, at 1x.  An application on a denser display passes its own
+/// through `default_thumbnail_edge`.
 inline constexpr uint32_t DEFAULT_THUMBNAIL_EDGE = 240;
 
-/// A Client constructor option: the box, in pixels a side, that the attachment thumbnails this
-/// Client makes fit inside, for as long as none has been stored with `Client::set_thumbnail_edge`.
+/// A Client constructor option: the height, in pixels, of the attachment thumbnails this Client
+/// makes -- the height a tile is drawn at times the display's pixel ratio -- for as long as none
+/// has been stored with `Client::set_thumbnail_edge`.
 /// A stored value wins whatever this says, so an application can pass the edge its display wants on
 /// every launch without discarding one the user chose.  Clamped as that setter's argument is.
 ///
 ///     session::client::Client client{path, cbs, session::client::default_thumbnail_edge{720}};
 ///
-/// A default rather than a setting because what suits a display -- 240 points at its density, say
+/// A default rather than a setting because what suits a display -- 240 points tall at its density,
+/// say
 /// -- is the application's to know every run, while a stored value has to survive the next run.
 struct default_thumbnail_edge {
     uint32_t px;
@@ -485,9 +487,9 @@ class Client {
             int64_t message_id, size_t index, result_function<std::vector<std::byte>> cb);
     std::vector<std::byte> attachment_data_cached(int64_t message_id, size_t index, await_t);
 
-    /// An attachment's thumbnail: a JPEG of the picture in its own shape, fitted inside a
-    /// `thumbnail_edge` box (never enlarged, and cropped to 21:9 at most), for a grid or a list to
-    /// draw without decoding the whole file.  `Attachment::thumbnail_width` and `thumbnail_height`
+    /// An attachment's thumbnail: a JPEG of the picture in its own shape, `thumbnail_edge` pixels
+    /// tall (never enlarged, and cropped to 21:9 at most), for rows of tiles of one height to draw
+    /// without decoding the whole file.  `Attachment::thumbnail_width` and `thumbnail_height`
     /// give its size before it is read.  See `image::thumbnail` for exactly what it is.
     ///
     /// **From the cache only, never the network.**  A thumbnail is made from the cached copy of the
@@ -854,13 +856,14 @@ class Client {
     void auto_download_concurrency(result_function<std::optional<int>> cb);
     std::optional<int> auto_download_concurrency(await_t);
 
-    /// The box, in pixels a side, that attachment thumbnails made from now on fit inside (see
-    /// `attachment_thumbnail`): the stored value if one has been set, and otherwise the
-    /// `default_thumbnail_edge` this Client was constructed with, or `DEFAULT_THUMBNAIL_EDGE`.
+    /// The height, in pixels, of the attachment thumbnails made from now on -- the height a tile is
+    /// drawn at times the display's pixel ratio (see `attachment_thumbnail`): the stored value if
+    /// one has been set, and otherwise the `default_thumbnail_edge` this Client was constructed
+    /// with, or `DEFAULT_THUMBNAIL_EDGE`.
     ///
     /// Clamped to [`image::min_thumbnail_edge`, `image::max_thumbnail_edge`], 64 to 1024: the top
-    /// keeps a decoded thumbnail to 4 MiB.  nullopt removes the stored value, going back to the
-    /// constructor's.
+    /// keeps a decoded thumbnail to about 9.3 MiB.  nullopt removes the stored value, going back to
+    /// the constructor's.
     ///
     /// Thumbnails already made are kept at the size they were made at, rather than all made again:
     /// a change is a preference about new ones, and remaking a whole cache's worth is a cost

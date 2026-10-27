@@ -9,8 +9,9 @@
 
 namespace session::image {
 
-/// The range `thumbnail` clamps its `edge` to.  The top keeps a decoded thumbnail to 4 MiB
-/// (1024² RGBA), which is what makes it cheap enough to draw a screenful of.
+/// The range `thumbnail` clamps its `edge`, the thumbnail's height, to.  The top keeps a decoded
+/// thumbnail to about 9.3 MiB (2389 x 1024 RGBA, a 21:9 strip), which is what makes it cheap
+/// enough to draw a screenful of.
 inline constexpr uint32_t min_thumbnail_edge = 64;
 inline constexpr uint32_t max_thumbnail_edge = 1024;
 
@@ -38,11 +39,12 @@ inline constexpr int thumbnailer_version = 4;
 
 /// API: image/thumbnail
 ///
-/// A JPEG of the image in `source` in its own shape, for drawing it small: the image fitted inside
-/// an `edge × edge` box, `edge` being clamped to [`min_thumbnail_edge`, `max_thumbnail_edge`].
-/// Its longer side is `edge`, or the image's own longer side if that is smaller -- a thumbnail is
-/// never larger than the picture it stands for, so an image smaller than `edge` gives a smaller
-/// thumbnail rather than an upscaled one.
+/// A JPEG of the image in `source` in its own shape, for drawing it small in rows of one height:
+/// `edge`, clamped to [`min_thumbnail_edge`, `max_thumbnail_edge`], is the height a tile is drawn
+/// at times the display's pixel ratio, and the thumbnail is that tall, or the image's own height
+/// if that is smaller -- a thumbnail is never larger than the picture it stands for, so an image
+/// smaller than `edge` gives a smaller thumbnail rather than an upscaled one.  The width follows
+/// the image's shape, so it is at most `edge` x 21 / 9.
 ///
 /// - An image wider than 21:9 either way up (`max_thumbnail_aspect_long`) is first cropped to its
 ///   centre at 21:9, so a panorama gives a strip that can still be drawn rather than a sliver.
