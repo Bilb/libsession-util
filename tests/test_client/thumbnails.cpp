@@ -19,9 +19,11 @@ TEST_CASE("Client: a downloaded picture gets a thumbnail", "[client][thumbnail]"
             reported = true;
     CHECK(reported);
 
-    // Square, at the default edge, and beside the file it was made from.
+    // In the picture's shape, its longer side at the default edge, and beside the file it was made
+    // from.
     auto jpeg = f.c->attachment_thumbnail(id, 0, await);
-    CHECK(jpeg_size(jpeg) == std::pair{int(DEFAULT_THUMBNAIL_EDGE), int(DEFAULT_THUMBNAIL_EDGE)});
+    CHECK(jpeg_size(jpeg) ==
+          std::pair{int(DEFAULT_THUMBNAIL_EDGE), int(DEFAULT_THUMBNAIL_EDGE) * 3 / 4});
     REQUIRE(std::filesystem::exists(f.thumb_file(url)));
 
     // Encrypted like the file, so the bytes on disk are not the JPEG.
@@ -40,6 +42,38 @@ TEST_CASE("Client: a downloaded picture gets a thumbnail", "[client][thumbnail]"
     auto r = got.get_future().get();
     REQUIRE(r);
     CHECK(*r == jpeg);
+}
+
+TEST_CASE(
+        "Client: a thumbnail keeps the picture's shape, and the attachment gives its size",
+        "[client][thumbnail]") {
+    struct Shape {
+        int w, h;
+        std::pair<int, int> thumbnail;
+    };
+    Fixture f;
+    for (auto [w, h, want] : {
+                 Shape{800, 600, {240, 180}},
+                 Shape{600, 800, {180, 240}},
+                 Shape{500, 500, {240, 240}},
+                 // Smaller than the edge: its own size.
+                 Shape{200, 100, {200, 100}},
+                 // Wider than 21:9: cropped to it, 240 by 240 x 9/21 rounded.
+                 Shape{2400, 300, {240, 103}},
+         }) {
+        INFO(w << "x" << h);
+        auto [id, url] = f.arrive(picture(w, h));
+        auto a = f.attachment(id);
+        REQUIRE(a.has_thumbnail);
+        CHECK(jpeg_size(f.c->attachment_thumbnail(id, 0, await)) == want);
+        CHECK(std::pair{int(a.thumbnail_width), int(a.thumbnail_height)} == want);
+
+        f.strip_thumbnail(url);
+        a = f.attachment(id);
+        REQUIRE_FALSE(a.has_thumbnail);
+        CHECK(a.thumbnail_width == 0);
+        CHECK(a.thumbnail_height == 0);
+    }
 }
 
 TEST_CASE("Client: only a picture gets a thumbnail", "[client][thumbnail]") {
@@ -154,7 +188,7 @@ TEST_CASE("Client: a file we send gets a thumbnail", "[client][thumbnail][send]"
     auto a = c->message(id, await)->attachments.at(0);
     CHECK(a.availability == AttachmentAvailability::cached);
     CHECK(a.has_thumbnail);
-    CHECK(jpeg_size(c->attachment_thumbnail(id, 0, await)) == std::pair{240, 240});
+    CHECK(jpeg_size(c->attachment_thumbnail(id, 0, await)) == std::pair{240, 180});
 
     std::filesystem::remove_all(dir);
 }
@@ -192,12 +226,12 @@ TEST_CASE("Client: the thumbnail edge", "[client][thumbnail][edge]") {
     SECTION("a change applies to new thumbnails, and leaves the old ones") {
         Fixture f{default_thumbnail_edge{64}};
         auto [before, before_url] = f.arrive(picture(400, 300));
-        CHECK(jpeg_size(f.c->attachment_thumbnail(before, 0, await)) == std::pair{64, 64});
+        CHECK(jpeg_size(f.c->attachment_thumbnail(before, 0, await)) == std::pair{64, 48});
 
         f.c->set_thumbnail_edge(128, await);
         auto [after, after_url] = f.arrive(picture(300, 400));
-        CHECK(jpeg_size(f.c->attachment_thumbnail(after, 0, await)) == std::pair{128, 128});
-        CHECK(jpeg_size(f.c->attachment_thumbnail(before, 0, await)) == std::pair{64, 64});
+        CHECK(jpeg_size(f.c->attachment_thumbnail(after, 0, await)) == std::pair{96, 128});
+        CHECK(jpeg_size(f.c->attachment_thumbnail(before, 0, await)) == std::pair{64, 48});
     }
 }
 
@@ -254,7 +288,7 @@ TEST_CASE(
 
     f.reopen();
     CHECK(f.attachment(id).has_thumbnail);
-    CHECK(jpeg_size(f.c->attachment_thumbnail(id, 0, await)) == std::pair{240, 240});
+    CHECK(jpeg_size(f.c->attachment_thumbnail(id, 0, await)) == std::pair{240, 180});
 }
 
 TEST_CASE(
@@ -336,7 +370,7 @@ TEST_CASE("Client: a thumbnail found missing is made again", "[client][thumbnail
     CHECK(error_code([&] { f.c->attachment_thumbnail(id, 0, await); }) == err::no_thumbnail);
     settle(*f.c);
     CHECK(f.attachment(id).has_thumbnail);
-    CHECK(jpeg_size(f.c->attachment_thumbnail(id, 0, await)) == std::pair{240, 240});
+    CHECK(jpeg_size(f.c->attachment_thumbnail(id, 0, await)) == std::pair{240, 180});
 }
 
 TEST_CASE("Client: a thumbnail is marked as attempted until it is made", "[client][thumbnail]") {

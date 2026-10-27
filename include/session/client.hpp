@@ -76,14 +76,14 @@ namespace session::client {
 using namespace std::literals;
 
 /// The thumbnail edge used when neither the application nor a stored setting gives one: the 240
-/// points a tile is drawn at, at 1x.  An application on a denser display passes its own through
-/// `default_thumbnail_edge`.
+/// points a tile's longer side is drawn at, at 1x.  An application on a denser display passes its
+/// own through `default_thumbnail_edge`.
 inline constexpr uint32_t DEFAULT_THUMBNAIL_EDGE = 240;
 
-/// A Client constructor option: the edge, in pixels, of the attachment thumbnails this Client
-/// makes for as long as none has been stored with `Client::set_thumbnail_edge`.  A stored value
-/// wins whatever this says, so an application can pass the edge its display wants on every launch
-/// without discarding one the user chose.  Clamped as that setter's argument is.
+/// A Client constructor option: the box, in pixels a side, that the attachment thumbnails this
+/// Client makes fit inside, for as long as none has been stored with `Client::set_thumbnail_edge`.
+/// A stored value wins whatever this says, so an application can pass the edge its display wants on
+/// every launch without discarding one the user chose.  Clamped as that setter's argument is.
 ///
 ///     session::client::Client client{path, cbs, session::client::default_thumbnail_edge{720}};
 ///
@@ -485,9 +485,10 @@ class Client {
             int64_t message_id, size_t index, result_function<std::vector<std::byte>> cb);
     std::vector<std::byte> attachment_data_cached(int64_t message_id, size_t index, await_t);
 
-    /// An attachment's thumbnail: a square JPEG of the picture, `thumbnail_edge` pixels a side (or
-    /// the picture's shorter side, if that is smaller), for a grid or a list to draw without
-    /// decoding the whole file.  See `image::thumbnail` for exactly what it is.
+    /// An attachment's thumbnail: a JPEG of the picture in its own shape, fitted inside a
+    /// `thumbnail_edge` box (never enlarged, and cropped to 21:9 at most), for a grid or a list to
+    /// draw without decoding the whole file.  `Attachment::thumbnail_width` and `thumbnail_height`
+    /// give its size before it is read.  See `image::thumbnail` for exactly what it is.
     ///
     /// **From the cache only, never the network.**  A thumbnail is made from the cached copy of the
     /// file, once it is here, so there is never one to fetch: `Attachment::has_thumbnail` says
@@ -853,7 +854,7 @@ class Client {
     void auto_download_concurrency(result_function<std::optional<int>> cb);
     std::optional<int> auto_download_concurrency(await_t);
 
-    /// The edge, in pixels, of the attachment thumbnails made from now on (see
+    /// The box, in pixels a side, that attachment thumbnails made from now on fit inside (see
     /// `attachment_thumbnail`): the stored value if one has been set, and otherwise the
     /// `default_thumbnail_edge` this Client was constructed with, or `DEFAULT_THUMBNAIL_EDGE`.
     ///
@@ -1429,10 +1430,16 @@ class Client {
             bool failed,
             std::optional<PictureFacts> facts);
 
-    // Records a derived image written beside entry `entry`, and tells the messages showing it; or,
-    // if the entry has gone meanwhile, removes the file again.
+    // Records a derived image written beside entry `entry`, `width` x `height` pixels (0 for none
+    // of its own), and tells the messages showing it; or, if the entry has gone meanwhile, removes
+    // the file again.
     void _record_derived(
-            int64_t entry, cache::Derived kind, const std::string& name, int64_t on_disk);
+            int64_t entry,
+            cache::Derived kind,
+            const std::string& name,
+            int64_t on_disk,
+            uint32_t width = 0,
+            uint32_t height = 0);
 
     // Queues a thumbnail for every cached picture with neither a thumbnail nor a recorded failure
     // to make one.  Run at every start because the queue is not kept: this is what picks up

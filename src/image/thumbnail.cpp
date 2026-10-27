@@ -208,16 +208,33 @@ namespace detail {
         if (!info)
             return std::nullopt;
         edge = std::clamp(edge, min_thumbnail_edge, max_thumbnail_edge);
-        uint32_t side = std::min({edge, info->width, info->height});
-        if (!acceptable(*info, side, /*crop=*/true))
+
+        // The longer side cut back to the widest shape allowed, then the whole fitted to `edge`.
+        uint64_t longer = std::max(info->width, info->height),
+                 shorter = std::min(info->width, info->height);
+        uint64_t kept =
+                std::min(longer, shorter * max_thumbnail_aspect_long / max_thumbnail_aspect_short);
+        auto box = static_cast<uint32_t>(std::min<uint64_t>(edge, kept));
+        bool crop = kept < longer;
+        uint32_t width = box, height = box;
+        if (crop) {
+            auto across = box == kept ? shorter
+                                      : std::max<uint64_t>(1, (box * shorter + kept / 2) / kept);
+            (info->width > info->height ? height : width) = static_cast<uint32_t>(across);
+        }
+        if (!acceptable(*info, std::min(width, height), crop))
             return std::nullopt;
 
         // libvips evaluates lazily, so a read of an encrypted source can fail anywhere from here
         // to the end of encoding; its own exception, rather than libvips' generic read error, is
         // what the caller needs.
         try {
-            return finish(
-                    scaled(source, *info, side, side, /*crop=*/true), backdrop, thumbnail_quality);
+            auto jpeg =
+                    finish(scaled(source, *info, width, height, crop), backdrop, thumbnail_quality);
+            // A loader can take a read failure for a truncated file and return what it decoded,
+            // only warning; the source still holds the failure.
+            source_access::rethrow_error(source);
+            return jpeg;
         } catch (...) {
             source_access::rethrow_error(source);
             throw;

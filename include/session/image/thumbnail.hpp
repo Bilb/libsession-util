@@ -23,20 +23,29 @@ inline constexpr uint32_t max_thumbnail_edge = 1024;
 /// `max_frame_pixels` alone, a file of a few hundred bytes could take gigabytes.
 inline constexpr uint64_t max_whole_decode_bytes = uint64_t{336} << 20;
 
+/// The widest shape a thumbnail keeps, 21:9 either way up: a phone screenshot (about 9:19.5) stays
+/// whole, while a panorama or a scrolling capture is cropped to its centre rather than fitted to a
+/// sliver too thin to show anything.
+inline constexpr uint32_t max_thumbnail_aspect_long = 21;
+inline constexpr uint32_t max_thumbnail_aspect_short = 9;
+
 /// The JPEG quality thumbnails are encoded at.
 inline constexpr int thumbnail_quality = 90;
 
 /// Raised with any change to `thumbnail`, or to the decoders it uses, that could make a thumbnail
 /// of an image it refused before.  A caller that remembers refusals retries them once it changes.
-inline constexpr int thumbnailer_version = 3;
+inline constexpr int thumbnailer_version = 4;
 
 /// API: image/thumbnail
 ///
-/// A square JPEG of the image in `source`, for drawing it small: the image scaled to cover a
-/// `side × side` square and cropped to its centre, where `side` is `edge` clamped to
-/// [`min_thumbnail_edge`, `max_thumbnail_edge`] and then to the image's own shorter side -- a
-/// thumbnail is never larger than the picture it stands for, so an image smaller than `edge` gives
-/// a smaller thumbnail rather than an upscaled one.
+/// A JPEG of the image in `source` in its own shape, for drawing it small: the image fitted inside
+/// an `edge × edge` box, `edge` being clamped to [`min_thumbnail_edge`, `max_thumbnail_edge`].
+/// Its longer side is `edge`, or the image's own longer side if that is smaller -- a thumbnail is
+/// never larger than the picture it stands for, so an image smaller than `edge` gives a smaller
+/// thumbnail rather than an upscaled one.
+///
+/// - An image wider than 21:9 either way up (`max_thumbnail_aspect_long`) is first cropped to its
+///   centre at 21:9, so a panorama gives a strip that can still be drawn rather than a sliver.
 ///
 /// - EXIF orientation is applied, so the thumbnail is upright however the original was stored.
 /// - An animation gives its first frame.
