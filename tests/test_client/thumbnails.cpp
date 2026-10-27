@@ -361,6 +361,27 @@ TEST_CASE("Client: the sweep reconciles thumbnails", "[client][thumbnail][evict]
     CHECK(told == std::vector{false, true});
 }
 
+TEST_CASE(
+        "Client: a thumbnail file whose row is gone is swept and made again",
+        "[client][thumbnail][evict]") {
+    // What the upgrade to fitted thumbnails leaves behind: the square files, with no rows.
+    Fixture f;
+    auto [id, url] = f.arrive(picture(400, 300));
+    auto size = f.c->attachment_cache_size(await);
+    TestHelper::on_loop(f.c->core, [&] {
+        f.c->core.database().conn().prepared_exec("DELETE FROM attachment_derived WHERE kind = 1");
+    });
+    REQUIRE(std::filesystem::exists(f.thumb_file(url)));
+
+    f.reopen();
+    settle(*f.c);
+    auto a = f.attachment(id);
+    CHECK(a.has_thumbnail);
+    CHECK(std::pair{a.thumbnail_width, a.thumbnail_height} == std::pair{240u, 180u});
+    CHECK(jpeg_size(f.c->attachment_thumbnail(id, 0, await)) == std::pair{240, 180});
+    CHECK(f.c->attachment_cache_size(await) == size);
+}
+
 TEST_CASE("Client: a thumbnail found missing is made again", "[client][thumbnail]") {
     Fixture f;
     auto [id, url] = f.arrive(picture(400, 300));
