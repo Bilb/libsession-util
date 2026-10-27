@@ -332,6 +332,10 @@ CREATE TABLE attachment_derived (
     -- running or ended with the process; a second such attempt sets the version itself, refusing
     -- the file.  A refusal is not tried again until the version changes.
     failed INTEGER,
+    -- The derived image's size in pixels, read from it when it was made; NULL while there is no
+    -- file, and for a rendition that is the original itself.
+    width INTEGER,
+    height INTEGER,
     PRIMARY KEY (entry, kind)
 ) STRICT;
 

@@ -383,8 +383,9 @@ class Conversation {
     /// directory to go to, is too large for the file server and not a picture re-encoding could
     /// shrink (`image::SendPlan::too_large_for_server`, or any file past the limit with
     /// `original_file`), or is a picture past the decode limits sent without `original_file`
-    /// (`image::SendPlan::too_large_to_decode`), or if `reply_to` names a message that does not exist or belongs to
-    /// another conversation; thrown on the calling thread, before anything is stored or dispatched.
+    /// (`image::SendPlan::too_large_to_decode`), or if `reply_to` names a message that does not
+    /// exist or belongs to another conversation; thrown on the calling thread, before anything is
+    /// stored or dispatched.
     using upload_progress = std::function<void(
             size_t index, int64_t sent, int64_t total, std::optional<Expected<void>> result)>;
     void send_message(OutgoingMessage msg, upload_progress on_upload, result_function<int64_t> cb);

@@ -208,16 +208,36 @@ namespace detail {
         if (!info)
             return std::nullopt;
         edge = std::clamp(edge, min_thumbnail_edge, max_thumbnail_edge);
-        uint32_t side = std::min({edge, info->width, info->height});
-        if (!acceptable(*info, side, /*crop=*/true))
+
+        // The longer side cut back to the widest shape allowed, then scaled so the height is
+        // `edge`, never enlarged.  Always a cover of an exact box, so the size is the one computed
+        // here; inside 21:9 the box has the picture's own shape and at most a pixel is trimmed.
+        uint64_t longer = std::max(info->width, info->height),
+                 shorter = std::min(info->width, info->height);
+        uint64_t kept =
+                std::min(longer, shorter * max_thumbnail_aspect_long / max_thumbnail_aspect_short);
+        bool landscape = info->width >= info->height;
+        uint64_t cropped_width = landscape ? kept : shorter,
+                 cropped_height = landscape ? shorter : kept;
+        uint64_t height = std::min<uint64_t>(edge, cropped_height);
+        uint64_t width = std::max<uint64_t>(
+                1, (cropped_width * height + cropped_height / 2) / cropped_height);
+        auto out_width = static_cast<uint32_t>(width), out_height = static_cast<uint32_t>(height);
+        if (!acceptable(*info, std::min(out_width, out_height), /*crop=*/true))
             return std::nullopt;
 
         // libvips evaluates lazily, so a read of an encrypted source can fail anywhere from here
         // to the end of encoding; its own exception, rather than libvips' generic read error, is
         // what the caller needs.
         try {
-            return finish(
-                    scaled(source, *info, side, side, /*crop=*/true), backdrop, thumbnail_quality);
+            auto jpeg =
+                    finish(scaled(source, *info, out_width, out_height, /*crop=*/true),
+                           backdrop,
+                           thumbnail_quality);
+            // A loader can take a read failure for a truncated file and return what it decoded,
+            // only warning; the source still holds the failure.
+            source_access::rethrow_error(source);
+            return jpeg;
         } catch (...) {
             source_access::rethrow_error(source);
             throw;

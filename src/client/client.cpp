@@ -4870,8 +4870,7 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
             R"(
         SELECT a.message, a.idx, a.content_type, a.filename, a.flags, a.width, a.height,
                a.thumbhash, a.size, a.url, a.unavailable, a.cached, a.saved_at,
-               EXISTS(SELECT 1 FROM attachment_derived d
-                      WHERE d.entry = c.id AND d.kind = {} AND d.size IS NOT NULL),
+               t.entry IS NOT NULL, coalesce(t.width, 0), coalesce(t.height, 0),
                EXISTS(SELECT 1 FROM attachment_derived d
                       WHERE d.entry = c.id AND d.kind = {} AND d.size IS NOT NULL),
                c.width, c.height, c.frames,
@@ -4879,11 +4878,13 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
                          WHERE d.entry = c.id AND d.kind = {}), 0) = {},
                a.path
         FROM message_attachments a LEFT JOIN attachment_cache c ON c.id = a.cached
+        LEFT JOIN attachment_derived t
+            ON t.entry = c.id AND t.kind = {} AND t.size IS NOT NULL
         WHERE a.message IN ({}) ORDER BY a.message, a.idx
-    )"_format(static_cast<int>(cache::Derived::thumbnail),
-              static_cast<int>(cache::Derived::rendition),
+    )"_format(static_cast<int>(cache::Derived::rendition),
               static_cast<int>(cache::Derived::rendition),
               image::renderer_version,
+              static_cast<int>(cache::Derived::thumbnail),
               sqlite::placeholders(msgs.size())));
 
     int n = 1;
@@ -4904,6 +4905,8 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
                  cached,
                  saved_at,
                  thumbnail,
+                 thumbnail_width,
+                 thumbnail_height,
                  rendition,
                  picture_width,
                  picture_height,
@@ -4927,6 +4930,8 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
                  std::optional<int64_t>,
                  std::optional<int64_t>,
                  int,
+                 int64_t,
+                 int64_t,
                  int,
                  std::optional<int64_t>,
                  std::optional<int64_t>,
@@ -4968,6 +4973,8 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
                 .fetch_done = status.done,
                 .fetch_total = status.total,
                 .has_thumbnail = thumbnail != 0,
+                .thumbnail_width = static_cast<uint32_t>(thumbnail_width),
+                .thumbnail_height = static_cast<uint32_t>(thumbnail_height),
                 .has_rendition = rendition != 0,
                 .picture =
                         frames ? std::optional{PictureInfo{
@@ -7363,7 +7370,15 @@ void Client::_derived_made(
                 key = _cache_encryption_key(),
                 made = std::move(*made)] {
         std::optional<int64_t> on_disk;
+        uint32_t width = 0, height = 0;
         try {
+            // Read back from what was made rather than worked out from the edge, which libvips
+            // rounds its own way.
+            image::Source written{made};
+            if (auto info = image::probe(written)) {
+                width = info->width;
+                height = info->height;
+            }
             cache::write(file, key, made);
             on_disk = static_cast<int64_t>(std::filesystem::file_size(file));
         } catch (const std::exception& e) {
@@ -7374,9 +7389,9 @@ void Client::_derived_made(
                     entry,
                     e.what());
         }
-        call([this, entry, kind, name, on_disk] {
+        call([this, entry, kind, name, on_disk, width, height] {
             if (on_disk)
-                _record_derived(entry, kind, name, *on_disk);
+                _record_derived(entry, kind, name, *on_disk, width, height);
             _derived_running = false;
             _pump_derived();
         });
@@ -7384,7 +7399,12 @@ void Client::_derived_made(
 }
 
 void Client::_record_derived(
-        int64_t entry, cache::Derived kind, const std::string& name, int64_t on_disk) {
+        int64_t entry,
+        cache::Derived kind,
+        const std::string& name,
+        int64_t on_disk,
+        uint32_t width,
+        uint32_t height) {
     auto c = core.database().conn();
     const int k = static_cast<int>(kind);
     if (!c.prepared_get<int64_t>(
@@ -7405,12 +7425,16 @@ void Client::_record_derived(
     }
     c.prepared_exec(
             R"(
-        INSERT INTO attachment_derived (entry, kind, size, failed) VALUES (?1, ?2, ?3, NULL)
-        ON CONFLICT (entry, kind) DO UPDATE SET size = ?3, failed = NULL
+        INSERT INTO attachment_derived (entry, kind, size, failed, width, height)
+        VALUES (?1, ?2, ?3, NULL, nullif(?4, 0), nullif(?5, 0))
+        ON CONFLICT (entry, kind) DO UPDATE
+            SET size = ?3, failed = NULL, width = nullif(?4, 0), height = nullif(?5, 0)
     )",
             entry,
             k,
-            on_disk);
+            on_disk,
+            static_cast<int64_t>(width),
+            static_cast<int64_t>(height));
 
     _emit_messages_showing(c, _messages_cached_as(c, entry));
     // The entry has grown, which is the other moment the total can.

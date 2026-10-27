@@ -295,8 +295,9 @@ struct Attachment {
     int64_t fetch_done = 0;
     int64_t fetch_total = 0;
 
-    /// Whether `Client::attachment_thumbnail` has a thumbnail to serve: a small square JPEG of the
-    /// picture, for drawing it in a grid or a list without decoding the whole file.
+    /// Whether `Client::attachment_thumbnail` has a thumbnail to serve: a small JPEG of the
+    /// picture in its own shape, `Client::thumbnail_edge` pixels tall, for drawing it in rows of
+    /// tiles of one height without decoding the whole file.
     ///
     /// Only ever true while the file itself is in the cache, because the thumbnail is part of the
     /// cached copy: made from it once it is here, and evicted or deleted with it.  So it turns
@@ -306,6 +307,11 @@ struct Attachment {
     /// Never true for anything but a picture Session displays (see
     /// `image::is_displayable_image`) that libsession could decode.  Videos have none.
     bool has_thumbnail = false;
+
+    /// The thumbnail's size in pixels, read from the JPEG when it was made, so that a layout can
+    /// give its tile the right shape before loading it.  Both 0 while `has_thumbnail` is false.
+    uint32_t thumbnail_width = 0;
+    uint32_t thumbnail_height = 0;
 
     /// Whether `Client::attachment_rendition` has a rendition to serve: the whole picture as a
     /// JPEG or WebP (the bytes say which) at the rendition edge, for a viewer to draw in place of
