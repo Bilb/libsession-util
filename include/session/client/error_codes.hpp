@@ -32,8 +32,9 @@ inline constexpr std::string_view no_rendition = "attachment.no_rendition";
 /// be sent.
 inline constexpr std::string_view attachment_file_missing = "attachment.file_missing";
 
-/// A picture does not fit the file server's limit even re-encoded at `image::min_sendable_edge`,
-/// so the message cannot be sent.
+/// Too large to send: a picture that does not fit the file server's limit even re-encoded at
+/// `image::min_sendable_edge`, a file sent as it is or as its original that does not fit it, or a
+/// picture too large to decode.  The message cannot be sent.
 inline constexpr std::string_view attachment_too_large = "attachment.too_large";
 
 /// A picture could not be read or re-encoded for sending: the file failed to read, or failed to

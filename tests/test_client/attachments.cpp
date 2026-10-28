@@ -165,6 +165,42 @@ TEST_CASE("Client: a message reports the attachments it carries", "[client][send
     std::filesystem::remove_all(dir);
 }
 
+TEST_CASE(
+        "Client: an office document sent with no type is typed by its extension",
+        "[client][send][attachments]") {
+    TempClient c;
+    attach_mock_network(c->core);
+
+    auto dir = std::filesystem::temp_directory_path() / random::unique_id("test_attach", 7);
+    std::filesystem::create_directories(dir);
+    auto write = [&](std::string_view name) {
+        auto p = dir / name;
+        std::ofstream{p, std::ios::binary} << "not really a file";
+        return p;
+    };
+    auto me = own_sid(*c);
+    TestHelper::seed_pfs_nak(c->core, me);
+
+    auto id = c->send_message(
+            ConversationId::dm(me),
+            {.attachments =
+                     {OutgoingAttachment{.path = write("budget.XLSX")},
+                      OutgoingAttachment{.path = write("minutes.docx")},
+                      OutgoingAttachment{.path = write("deck.odp")}}},
+            await);
+
+    auto msg = c->message(id, await);
+    REQUIRE(msg.has_value());
+    REQUIRE(msg->attachments.size() == 3);
+    CHECK(msg->attachments[0].content_type ==
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    CHECK(msg->attachments[1].content_type ==
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    CHECK(msg->attachments[2].content_type == "application/vnd.oasis.opendocument.presentation");
+
+    std::filesystem::remove_all(dir);
+}
+
 TEST_CASE("Client: an attachment carries a thumbhash in both directions", "[client][attachments]") {
     TempClient c;
     SenderKeys peer;
