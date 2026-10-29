@@ -492,16 +492,18 @@ class Client {
     /// without decoding the whole file.  `Attachment::thumbnail_width` and `thumbnail_height`
     /// give its size before it is read.  See `image::thumbnail` for exactly what it is.
     ///
-    /// **From the cache only, never the network.**  A thumbnail is made from the cached copy of the
-    /// file, once it is here, so there is never one to fetch: `Attachment::has_thumbnail` says
-    /// whether there is one now, and changes to it are reported through `messages_updated`.  A
-    /// display that wants one sooner asks for the file itself with `attachment_data`, which caches
-    /// it and so leads to its thumbnail.
+    /// **Local only, never the network.**  A thumbnail is made from the cached copy of the file,
+    /// once it is here, so there is never one to fetch: `Attachment::has_thumbnail` says whether
+    /// there is one now, and changes to it are reported through `messages_updated`.  A display
+    /// that wants one sooner asks for the file itself with `attachment_data`, which caches it and
+    /// so leads to its thumbnail.
     ///
     /// Made for every cached picture Session displays: as a download is kept, as a file we send is
-    /// kept, and once for the files already cached by a version that made none.  Each is made at
-    /// the `thumbnail_edge` in force at the time and kept with the file, so it goes when the file
-    /// is evicted or deleted and counts towards `attachment_cache_limit` with it.
+    /// kept, and once for the files already cached by a version that made none.  A picture we send
+    /// has one sooner, made from libsession's own copy before its upload starts and served until
+    /// the cached file's own is made; it does not count towards `attachment_cache_limit`.  Each is
+    /// made at the `thumbnail_edge` in force at the time and kept with the file, so it goes when
+    /// the file is evicted or deleted and counts towards `attachment_cache_limit` with it.
     ///
     /// Reading one marks the cached file as used, as reading the file itself does: a picture being
     /// shown as its thumbnail is a picture in use, and should not be first to go.  Asking for one
@@ -1608,6 +1610,10 @@ class Client {
     // Removes what `_outgoing_dir()` holds that no message still has to upload.  Listed on the disk
     // loop and decided on Core's, as `_sweep_cache` is.
     void _sweep_outgoing();
+
+    // Forgets the sending thumbnails of the messages showing cache entry `entry`, whose own
+    // thumbnail now stands for them, and removes their files.
+    void _drop_sending_thumbnails(sqlite::Connection& c, int64_t entry);
 
     // Names taken or being copied into `_outgoing_dir()` that no row names yet, which a sweep must
     // keep.  Locked because taking happens on the caller's thread.

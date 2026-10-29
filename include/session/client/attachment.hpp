@@ -305,10 +305,14 @@ struct Attachment {
     /// picture in its own shape, `Client::thumbnail_edge` pixels tall, for drawing it in rows of
     /// tiles of one height without decoding the whole file.
     ///
-    /// Only ever true while the file itself is in the cache, because the thumbnail is part of the
-    /// cached copy: made from it once it is here, and evicted or deleted with it.  So it turns
+    /// True only while the file itself is in the cache, because the thumbnail is part of
+    /// the cached copy: made from it once it is here, and evicted or deleted with it.  So it turns
     /// true a little after the file arrives -- reported through `messages_updated` like any other
     /// change to the message -- and false again when the file leaves the cache.
+    ///
+    /// The exception is a picture we send: its thumbnail is made from libsession's own copy before
+    /// the upload starts, and served until the cached file's thumbnail replaces it, so it stays
+    /// true from just after the send to the file's eviction, however long the upload takes.
     ///
     /// Never true for anything but a picture Session displays (see
     /// `image::is_displayable_image`) that libsession could decode.  Videos have none.

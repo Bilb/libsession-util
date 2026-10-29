@@ -865,6 +865,12 @@ static std::string taken_path(std::string_view name) {
     return "{}/{}"_format(cache::OUTGOING_DIR, name);
 }
 
+// Named by its row, which outlives the copy it was made from: a re-encode replaces that copy, and
+// the upload removes it.  Never a taken name, which has no '-'.
+static std::string sending_thumbnail_name(int64_t message, int64_t idx) {
+    return "thumbnail-{}-{}"_format(message, idx);
+}
+
 std::filesystem::path Client::_attachment_file(const std::string& stored) const {
     if (taken_name(stored) && !_cache_dir.empty())
         return _cache_dir / utf8_path(stored);
@@ -972,6 +978,10 @@ void Client::_sweep_outgoing() {
                         if (auto name = taken_name(path))
                             needed.emplace(*name);
                 }
+                for (auto [message, idx] : c.prepared_results<int64_t, int64_t>(
+                             "SELECT message, idx FROM message_attachments"
+                             " WHERE sending_thumbnail_width IS NOT NULL"))
+                    needed.insert(sending_thumbnail_name(message, idx));
             } catch (const std::exception& e) {
                 log::warning(cat, "Outgoing file sweep failed: {}", e.what());
                 return;
@@ -1941,10 +1951,12 @@ void Client::_attachment_thumbnail(int64_t message_id, size_t index, bytes_answe
     auto row = c.prepared_maybe_get<
             std::optional<int64_t>,
             std::optional<std::string>,
-            std::optional<int64_t>>(
+            std::optional<int64_t>,
+            int64_t>(
             R"(
         SELECT c.id, c.name,
-               (SELECT d.size FROM attachment_derived d WHERE d.entry = c.id AND d.kind = ?3)
+               (SELECT d.size FROM attachment_derived d WHERE d.entry = c.id AND d.kind = ?3),
+               a.sending_thumbnail_width IS NOT NULL
         FROM message_attachments a LEFT JOIN attachment_cache c ON c.id = a.cached
         WHERE a.message = ?1 AND a.idx = ?2
     )",
@@ -1953,14 +1965,34 @@ void Client::_attachment_thumbnail(int64_t message_id, size_t index, bytes_answe
             static_cast<int>(kind));
     if (!row)
         throw_missing_attachment(c, message_id, index);
-    auto& [entry, name, thumbnail] = *row;
+    auto& [entry, name, thumbnail, sending] = *row;
     if (_cache_dir.empty())
         throw no_thumbnail(message_id, index);
-    if (!thumbnail) {
-        if (entry)
-            _hurry_derived(*entry, kind);
-        throw no_thumbnail(message_id, index);
+    if (!thumbnail && entry)
+        _hurry_derived(*entry, kind);
+    if (!thumbnail && sending) {
+        _read_cache_file(
+                _outgoing_dir() / sending_thumbnail_name(message_id, static_cast<int64_t>(index)),
+                wait,
+                [this, message_id, index, done = std::move(done)](auto bytes) {
+                    if (bytes)
+                        return done(std::move(*bytes));
+                    // Removed by the read if it was unreadable; nothing makes it again.
+                    if (core.database().conn().prepared_exec(
+                                R"(
+                    UPDATE message_attachments
+                    SET sending_thumbnail_width = NULL, sending_thumbnail_height = NULL
+                    WHERE message = ? AND idx = ? AND sending_thumbnail_width IS NOT NULL
+                )",
+                                message_id,
+                                static_cast<int64_t>(index)) > 0)
+                        _emit_message(/*added=*/false, message_id);
+                    done(unexpected{no_thumbnail(message_id, index).err()});
+                });
+        return;
     }
+    if (!thumbnail)
+        throw no_thumbnail(message_id, index);
 
     _read_cache_file(
             _cache_dir / cache::ATTACHMENT_DIR / cache::derived_name(*name, kind),
@@ -4882,7 +4914,9 @@ void Client::_load_attachments(sqlite::Connection& c, std::vector<Message>& msgs
             R"(
         SELECT a.message, a.idx, a.content_type, a.filename, a.flags, a.width, a.height,
                a.thumbhash, a.size, a.url, a.unavailable, a.cached, a.saved_at,
-               t.entry IS NOT NULL, coalesce(t.width, 0), coalesce(t.height, 0),
+               t.entry IS NOT NULL OR a.sending_thumbnail_width IS NOT NULL,
+               coalesce(t.width, a.sending_thumbnail_width, 0),
+               coalesce(t.height, a.sending_thumbnail_height, 0),
                EXISTS(SELECT 1 FROM attachment_derived d
                       WHERE d.entry = c.id AND d.kind = {} AND d.size IS NOT NULL),
                c.width, c.height, c.frames,
@@ -5836,43 +5870,91 @@ void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress o
     struct Wanted {
         int64_t idx;
         std::filesystem::path path;
-        bool needs_size, needs_placeholder, original;
+        bool needs_size, needs_placeholder, needs_thumbnail, original;
+        std::string thumbnail_name;
     };
     std::vector<Wanted> wanted;
     {
         auto c = core.database().conn();
-        for (auto&& [idx, path, w, h, thumbhash, original] :
-             c.prepared_results<int64_t, std::string, int, int, int, int>(
+        for (auto&& [idx, path, w, h, thumbhash, thumbnail, original] :
+             c.prepared_results<int64_t, std::string, int, int, int, int, int>(
                      R"(
             SELECT idx, path, width IS NOT NULL, height IS NOT NULL, thumbhash IS NOT NULL,
-                   flags & {} != 0
+                   sending_thumbnail_width IS NOT NULL, flags & {} != 0
             FROM message_attachments
             WHERE message = ?1 AND url IS NULL AND path IS NOT NULL
               AND content_type IS NOT NULL AND {}
             ORDER BY idx
         )"_format(ATTACHMENT_FLAG_ORIGINAL_FILE, DISPLAYABLE_IMAGE_SQL),
                      client_id))
-            if (!(w && h) || !thumbhash)
+            if (!(w && h) || !thumbhash || !thumbnail)
                 wanted.push_back(
-                        {idx, _attachment_file(path), !(w && h), !thumbhash, original != 0});
+                        {idx,
+                         _attachment_file(path),
+                         !(w && h),
+                         !thumbhash,
+                         !thumbnail,
+                         original != 0,
+                         sending_thumbnail_name(client_id, idx)});
     }
     if (wanted.empty())
         return _upload_next(client_id, std::move(on_upload));
+
+    // Claimed before the file exists and released once its row names it, as a taken file is.
+    std::vector<std::string> claimed;
+    for (const auto& want : wanted)
+        if (want.needs_thumbnail)
+            claimed.push_back(want.thumbnail_name);
+    {
+        std::lock_guard lock{_taking_mutex};
+        _taking.insert(claimed.begin(), claimed.end());
+    }
+    auto release = [this, claimed = std::move(claimed)] {
+        std::lock_guard lock{_taking_mutex};
+        for (const auto& name : claimed)
+            _taking.erase(name);
+    };
 
     struct Derived {
         int64_t idx;
         std::optional<std::pair<uint32_t, uint32_t>> size;
         std::optional<std::vector<std::byte>> placeholder;
+        std::optional<std::pair<uint32_t, uint32_t>> thumbnail;
     };
     // Behind whatever the derive loop is making, as a thumbnail would be: a burst of sends cannot
     // starve the tiles on screen.  A file that cannot be read or decoded is sent as it is.
     bool posted = _post_derive([this,
                                 client_id,
-                                wanted = std::move(wanted),
-                                on_upload = std::move(on_upload)]() mutable {
+                                wanted,
+                                dir = _outgoing_dir(),
+                                key = _cache_encryption_key(),
+                                edge = _thumbnail_edge(),
+                                release,
+                                on_upload]() mutable {
         std::vector<Derived> derived;
         for (auto& want : wanted) {
             Derived d{want.idx};
+            // Before the upload, from our own copy, so the tile has it while the file goes up and
+            // through until the cached file's own is made.
+            if (want.needs_thumbnail)
+                try {
+                    image::Source source{want.path};
+                    if (auto made = image::thumbnail(source, edge)) {
+                        image::Source written{*made};
+                        auto info = image::probe(written);
+                        if (info && info->width && info->height) {
+                            cache::write(dir / utf8_path(want.thumbnail_name), key, *made);
+                            d.thumbnail = std::pair{info->width, info->height};
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    log::debug(
+                            cat,
+                            "No thumbnail for attachment {} of message {} before its upload: {}",
+                            want.idx,
+                            client_id,
+                            e.what());
+                }
             try {
                 image::Source source{want.path};
                 auto info = image::probe(source);
@@ -5899,37 +5981,48 @@ void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress o
         }
         call([this,
               client_id,
+              release = std::move(release),
               derived = std::move(derived),
               on_upload = std::move(on_upload)]() mutable {
             bool changed = false;
             {
                 auto c = core.database().conn();
                 for (const auto& d : derived) {
-                    if (!d.size && !d.placeholder)
+                    if (!d.size && !d.placeholder && !d.thumbnail)
                         continue;
+                    auto px = [](const auto& wh, bool second) {
+                        return wh ? std::optional<int64_t>{second ? wh->second : wh->first}
+                                  : std::nullopt;
+                    };
                     // Only what the row still lacks: a value the caller gave stays theirs.
-                    changed |=
-                            c.prepared_exec(
-                                    R"(
+                    changed |= c.prepared_exec(
+                                       R"(
                     UPDATE message_attachments
                     SET width = coalesce(width, ?3), height = coalesce(height, ?4),
-                        thumbhash = coalesce(thumbhash, ?5)
+                        thumbhash = coalesce(thumbhash, ?5),
+                        sending_thumbnail_width = coalesce(sending_thumbnail_width, ?6),
+                        sending_thumbnail_height = coalesce(sending_thumbnail_height, ?7)
                     WHERE message = ?1 AND idx = ?2 AND url IS NULL
                 )",
-                                    client_id,
-                                    d.idx,
-                                    d.size ? std::optional<int64_t>{d.size->first} : std::nullopt,
-                                    d.size ? std::optional<int64_t>{d.size->second} : std::nullopt,
-                                    d.placeholder) > 0;
+                                       client_id,
+                                       d.idx,
+                                       px(d.size, false),
+                                       px(d.size, true),
+                                       d.placeholder,
+                                       px(d.thumbnail, false),
+                                       px(d.thumbnail, true)) > 0;
                 }
             }
+            release();
             if (changed)
                 _emit_message(/*added=*/false, client_id);
             _upload_next(client_id, std::move(on_upload));
         });
     });
-    if (!posted)
+    if (!posted) {
+        release();
         _upload_next(client_id, std::move(on_upload));
+    }
 }
 
 void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_upload) {
@@ -7609,10 +7702,36 @@ void Client::_record_derived(
             on_disk,
             static_cast<int64_t>(width),
             static_cast<int64_t>(height));
+    if (kind == cache::Derived::thumbnail)
+        _drop_sending_thumbnails(c, entry);
 
     _emit_messages_showing(c, _messages_cached_as(c, entry));
     // The entry has grown, which is the other moment the total can.
     _evict_cache(entry);
+}
+
+void Client::_drop_sending_thumbnails(sqlite::Connection& c, int64_t entry) {
+    std::vector<std::string> names;
+    for (auto [message, idx] : c.prepared_results<int64_t, int64_t>(
+                 "SELECT message, idx FROM message_attachments"
+                 " WHERE cached = ? AND sending_thumbnail_width IS NOT NULL",
+                 entry))
+        names.push_back(sending_thumbnail_name(message, idx));
+    if (names.empty())
+        return;
+    c.prepared_exec(
+            R"(
+        UPDATE message_attachments
+        SET sending_thumbnail_width = NULL, sending_thumbnail_height = NULL
+        WHERE cached = ? AND sending_thumbnail_width IS NOT NULL
+    )",
+            entry);
+    _post_disk([dir = _outgoing_dir(), names = std::move(names)] {
+        for (const auto& name : names) {
+            std::error_code ec;
+            std::filesystem::remove(dir / utf8_path(name), ec);
+        }
+    });
 }
 
 void Client::_thumbnail_pass() {

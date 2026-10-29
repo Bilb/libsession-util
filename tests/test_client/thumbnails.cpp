@@ -647,3 +647,87 @@ TEST_CASE(
 
     std::filesystem::remove_all(dir);
 }
+
+TEST_CASE(
+        "Client: a picture we send has a thumbnail before its upload",
+        "[client][thumbnail][send]") {
+    TempCacheDir cache;
+    TempClient c;
+    c->set_cache_dir(cache.path);
+    auto me = own_sid(*c);
+    TestHelper::seed_pfs_nak(c->core, me);
+    auto dir = std::filesystem::temp_directory_path() / random::unique_id("test_sending_thumb", 7);
+    std::filesystem::create_directories(dir);
+    auto write = [&](std::string_view name, std::span<const std::byte> bytes) {
+        auto p = dir / name;
+        std::ofstream out{p, std::ios::binary};
+        out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        return p;
+    };
+    auto photo = write("photo.jpg", picture(640, 480, ".jpg"));
+    auto doc = write("notes.pdf", std::vector<std::byte>(300, std::byte{1}));
+
+    // No network: the upload fails, so what is drawn is what was made before it.
+    auto id = c->send_message(
+            ConversationId::dm(me),
+            {.attachments = {OutgoingAttachment{.path = photo}, OutgoingAttachment{.path = doc}}},
+            await);
+    sync(*c);
+    auto msg = c->message(id, await);
+    REQUIRE(msg->send_state == SendState::failed);
+    auto a = msg->attachments.at(0);
+    CHECK_FALSE(a.uploaded);
+    CHECK(a.has_thumbnail);
+    CHECK(a.thumbnail_width == 320);
+    CHECK(a.thumbnail_height == 240);
+    CHECK(jpeg_size(c->attachment_thumbnail(id, 0, await)) == std::pair{320, 240});
+    CHECK_FALSE(msg->attachments.at(1).has_thumbnail);
+    auto sending = cache.path / "outgoing" / "thumbnail-{}-0"_format(id);
+    CHECK(std::filesystem::exists(sending));
+
+    // Once up, the cached file's own thumbnail replaces it, with no moment between without one.
+    auto* net = attach_mock_network(c->core);
+    REQUIRE(c->retry_send(id, nullptr, await));
+    sync(*c);
+    REQUIRE(accept_stores(*net) == 1);
+    settle(*c);
+    a = c->message(id, await)->attachments.at(0);
+    CHECK(a.uploaded);
+    CHECK(a.availability == AttachmentAvailability::cached);
+    CHECK(a.has_thumbnail);
+    CHECK(jpeg_size(c->attachment_thumbnail(id, 0, await)) == std::pair{320, 240});
+    CHECK(TestHelper::on_loop(c->core, [&] {
+              return c->core.database().conn().prepared_get<int64_t>(
+                      "SELECT count(*) FROM message_attachments"
+                      " WHERE sending_thumbnail_width IS NOT NULL");
+          }) == 0);
+    CHECK(eventually([&] { return !std::filesystem::exists(sending); }));
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("Client: a sending thumbnail that is gone is forgotten", "[client][thumbnail][send]") {
+    TempCacheDir cache;
+    TempClient c;
+    c->set_cache_dir(cache.path);
+    auto me = own_sid(*c);
+    TestHelper::seed_pfs_nak(c->core, me);
+    auto dir = std::filesystem::temp_directory_path() / random::unique_id("test_sending_thumb", 7);
+    std::filesystem::create_directories(dir);
+    auto photo = dir / "photo.jpg";
+    {
+        auto bytes = picture(640, 480, ".jpg");
+        std::ofstream out{photo, std::ios::binary};
+        out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    }
+    auto id = c->send_message(
+            ConversationId::dm(me), {.attachments = {OutgoingAttachment{.path = photo}}}, await);
+    sync(*c);
+    REQUIRE(c->message(id, await)->attachments.at(0).has_thumbnail);
+
+    std::filesystem::remove(cache.path / "outgoing" / "thumbnail-{}-0"_format(id));
+    CHECK_THROWS(c->attachment_thumbnail(id, 0, await));
+    CHECK_FALSE(c->message(id, await)->attachments.at(0).has_thumbnail);
+
+    std::filesystem::remove_all(dir);
+}

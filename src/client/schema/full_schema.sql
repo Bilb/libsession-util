@@ -486,6 +486,12 @@ CREATE TABLE message_attachments (
     -- so eviction never makes it owed again, or once the conversation's setting stops taking it.
     auto_pending INTEGER,
 
+    -- The size of the thumbnail libsession made of a picture we send, from its own copy, before the
+    -- upload: `outgoing/thumbnail-<message>-<idx>`, encrypted as a cache file is.  It stands in for
+    -- the cached file's thumbnail until that one is made, then goes.  NULL for none.
+    sending_thumbnail_width INTEGER,
+    sending_thumbnail_height INTEGER,
+
     PRIMARY KEY (message, idx)
 ) STRICT;
 
@@ -512,6 +518,10 @@ CREATE INDEX message_attachments_pending ON message_attachments(path) WHERE url 
 -- Partial for the same reason as above: most rows are not cached at any given moment, and those
 -- are never the subject of this question.
 CREATE INDEX message_attachments_cached ON message_attachments(cached) WHERE cached IS NOT NULL;
+
+-- Which sending thumbnails are still wanted, asked by the outgoing directory's sweep.
+CREATE INDEX message_attachments_sending_thumbnail ON message_attachments(message)
+    WHERE sending_thumbnail_width IS NOT NULL;
 
 -- What a restart queues again, and what a setting change checks: the few rows still owed.
 CREATE INDEX message_attachments_auto_pending ON message_attachments(message)
