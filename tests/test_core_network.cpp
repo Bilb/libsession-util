@@ -28,3 +28,9 @@ TEST_CASE("Core can hold an optional Network interface", "[core][network]") {
     if (std::filesystem::exists(db_path))
         std::filesystem::remove(db_path);
 }
+
+TEST_CASE("A file server's size limit keeps its full width", "[core][network]") {
+    // Past 16 bits, as every real limit is.
+    network::config::Config config{network::opt::file_server_max_file_size{10'000'000}};
+    CHECK(config.custom_file_server_max_file_size == 10'000'000);
+}

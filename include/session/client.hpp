@@ -4,6 +4,8 @@
 #include <deque>
 #include <filesystem>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <oxen/quic/loop.hpp>
 #include <session/client/attachment.hpp>
@@ -13,9 +15,12 @@
 #include <session/client/message.hpp>
 #include <session/clock.hpp>
 #include <session/core.hpp>
+#include <session/image/rendition.hpp>
+#include <session/image/sendable.hpp>
 #include <session/util.hpp>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -70,6 +75,47 @@ namespace session::client {
 
 using namespace std::literals;
 
+/// The thumbnail edge used when neither the application nor a stored setting gives one: the 240
+/// points tall a tile is drawn at, at 1x.  An application on a denser display passes its own
+/// through `default_thumbnail_edge`.
+inline constexpr uint32_t DEFAULT_THUMBNAIL_EDGE = 240;
+
+/// A Client constructor option: the height, in pixels, of the attachment thumbnails this Client
+/// makes -- the height a tile is drawn at times the display's pixel ratio -- for as long as none
+/// has been stored with `Client::set_thumbnail_edge`.
+/// A stored value wins whatever this says, so an application can pass the edge its display wants on
+/// every launch without discarding one the user chose.  Clamped as that setter's argument is.
+///
+///     session::client::Client client{path, cbs, session::client::default_thumbnail_edge{720}};
+///
+/// A default rather than a setting because what suits a display -- 240 points tall at its density,
+/// say
+/// -- is the application's to know every run, while a stored value has to survive the next run.
+struct default_thumbnail_edge {
+    uint32_t px;
+};
+
+/// The rendition edge used when neither the application nor a stored setting gives one: the edge a
+/// picture is sent at (`image::sendable_edge`), so a received picture is drawn as a sent one is.
+inline constexpr uint32_t DEFAULT_RENDITION_EDGE = 2048;
+
+/// As `default_thumbnail_edge`, for the renditions `Client::attachment_rendition` serves: the box
+/// they are made to fit, for as long as none has been stored with `Client::set_rendition_edge`.
+struct default_rendition_edge {
+    uint32_t px;
+};
+
+/// Anything a Client constructor accepts after the database path: everything `core::Core` takes,
+/// which is forwarded to it, and Client's own options.
+template <typename T>
+concept ClientOption =
+        core::CoreOption<T> || std::same_as<std::remove_cvref_t<T>, default_thumbnail_edge> ||
+        std::same_as<std::remove_cvref_t<T>, default_rendition_edge>;
+
+namespace cache {
+    enum class Derived : int;
+}
+
 class Client {
     friend class session::TestHelper;  // for unit tests
 
@@ -83,20 +129,21 @@ class Client {
     /// takes (database encryption, predefined_seed, …) and forwards them — with the one exception
     /// of `core::callbacks`, which a Client's application cannot supply: those are Client's own
     /// wiring, and the static_assert below rejects an attempt to pass a set rather than letting it
-    /// be silently overwritten.
+    /// be silently overwritten.  Client's own options (`default_thumbnail_edge`,
+    /// `default_rendition_edge`) are taken from the same list and not forwarded.
     ///
     /// What an application is told is `client::callbacks`, given as the `cbs` argument of the
     /// overloads below and reported through the dispatcher.  Anything an application needs that
     /// only Core knows is Client's job to handle and re-report there; if something Core reports has
     /// no `client::callbacks` equivalent, that is a gap to fill here rather than a reason to reach
     /// past Client for it.
-    template <core::CoreOption... Opts>
+    template <ClientOption... Opts>
     explicit Client(std::filesystem::path db_path, Opts&&... opts) :
             Client{std::move(db_path), callbacks{}, std::forward<Opts>(opts)...} {}
 
     /// As below, additionally taking the dispatcher every handler is delivered through.  See
     /// `dispatcher`; without one, handlers run on Core's event loop.
-    template <core::CoreOption... Opts>
+    template <ClientOption... Opts>
     explicit Client(
             std::filesystem::path db_path, callbacks cbs, dispatcher dispatch, Opts&&... opts) :
             Client{std::move(db_path), std::move(cbs), std::forward<Opts>(opts)...} {
@@ -106,13 +153,18 @@ class Client {
     /// As above, additionally taking the change notifications to deliver.  They are fixed for the
     /// life of the Client, exactly as core::callbacks are, and are the only way an application is
     /// told anything -- see `callbacks`, and read the startup ordering note there before using it.
-    template <core::CoreOption... Opts>
+    template <ClientOption... Opts>
     explicit Client(std::filesystem::path db_path, callbacks cbs, Opts&&... opts) :
             _cbs{std::make_shared<callbacks>(std::move(cbs))},
-            core{std::move(db_path),
-                 _core_callbacks(),
-                 core::schema_extension{"client", schema::MIGRATIONS, schema::FULL_SCHEMA},
-                 std::forward<Opts>(opts)...} {
+            _default_thumbnail_edge{
+                    core::detail::maybe_instance<default_thumbnail_edge>(opts...)
+                            .value_or(default_thumbnail_edge{DEFAULT_THUMBNAIL_EDGE})
+                            .px},
+            _default_rendition_edge{
+                    core::detail::maybe_instance<default_rendition_edge>(opts...)
+                            .value_or(default_rendition_edge{DEFAULT_RENDITION_EDGE})
+                            .px},
+            core{_make_core(std::move(db_path), _core_callbacks(), std::forward<Opts>(opts)...)} {
         static_assert(
                 (!std::same_as<std::remove_cvref_t<Opts>, core::callbacks> && ...),
                 "A Client's Core callbacks are its own wiring and cannot be supplied: what an "
@@ -254,9 +306,9 @@ class Client {
     /// See `Conversation::send_message` for what the arguments mean and what `on_upload` reports.
     ///
     /// @throws std::invalid_argument if the conversation is not a DM (groups and communities are
-    /// not implemented yet), if an attachment cannot be read, or if `reply_to` names a message that
-    /// does not exist or belongs to another conversation; thrown on the calling thread, before
-    /// anything is stored or dispatched.
+    /// not implemented yet), if an attachment cannot be read or taken, or if `reply_to` names a
+    /// message that does not exist or belongs to another conversation; thrown on the calling
+    /// thread, before anything is stored or dispatched.
     void send_message(
             const ConversationId& id,
             OutgoingMessage msg,
@@ -269,6 +321,35 @@ class Client {
             Conversation::upload_progress on_upload,
             await_t);
     int64_t send_message(const ConversationId& id, OutgoingMessage msg, await_t);
+
+    /// What sending the file at `path` as an attachment would do with it, decided from its header
+    /// alone exactly as the send will decide it (`image::send_plan`), under the file server's
+    /// limit: for a staging screen to say before sending that a file will be refused, or will go
+    /// as the original rather than re-encoded.  `content_type` is the attachment's label, inferred
+    /// from the extension when unset as `send_message` infers it.  Says nothing about an attachment
+    /// marked `OutgoingAttachment::original_file`, which is sent as it is whatever it holds, and
+    /// refused only when it is larger than the file server's limit once encrypted.
+    ///
+    /// The file server's limit is the one known when asked: before the network has the server's
+    /// configuration it is the 10 MB default, and the send is held to whatever it is by then.  A
+    /// symbolic link is followed, although `OutgoingAttachment::take_file` refuses one.
+    ///
+    /// The await form reads the file on the calling thread; the callback form on the disk thread.
+    void attachment_send_plan(
+            std::filesystem::path path,
+            std::optional<std::string> content_type,
+            result_function<image::SendPlan> cb);
+    image::SendPlan attachment_send_plan(
+            const std::filesystem::path& path,
+            const std::optional<std::string>& content_type,
+            await_t);
+
+    /// The most the file server takes in one upload, counted encrypted and padded: the limit
+    /// `attachment_send_plan` and a send hold a file to, so the file itself has to be somewhat
+    /// smaller.  The attached network's file server's, `opt::file_server_max_file_size` where one
+    /// was given; before a network is attached, the 10 MB default `attachment_send_plan` uses too.
+    void attachment_upload_limit(result_function<uint64_t> cb);
+    uint64_t attachment_upload_limit(await_t);
 
     /// Sends a failed message again, resuming rather than restarting: attachments that already
     /// reached the file server are left alone and only the ones that did not are uploaded, because
@@ -345,7 +426,8 @@ class Client {
     /// Returns false, having done nothing, if the message does not exist or is not
     /// `gallery_viewable` — a message that cannot be shown that way cannot be asked to be, so the
     /// stored decision can never disagree with the rule that governs it.  Clearing is always
-    /// allowed.
+    /// allowed.  Every message that can be shown as a gallery starts out shown as one, so this is
+    /// for a reader who wants the list, or the gallery back.
     ///
     /// Starts nothing.  Turning gallery mode on for a conversation that does not auto-download
     /// leaves its images unfetched, and getting them is the caller's move — `attachment_data` for
@@ -387,6 +469,87 @@ class Client {
             size_t index,
             std::function<void(const AttachmentProgress&)> on_progress,
             result_function<std::vector<std::byte>> cb);
+
+    /// An attachment's contents from the cache, or `err::not_cached` if they are not there: what
+    /// `attachment_data` answers without touching the network, for a display that must not start a
+    /// download by drawing -- one with auto-download off, say, whose user has not asked for the
+    /// file.  `Attachment::availability` says in advance which answer to expect.
+    ///
+    /// Marks the cached file as used, as `attachment_data` does.
+    ///
+    /// A cached file that turns out not to be readable -- gone from under us, or corrupt -- is
+    /// removed from the cache and answered as `err::not_cached`, and the messages showing it are
+    /// told that it is no longer cached.  So the caller's move after `not_cached` is the same
+    /// whichever it was: `attachment_data`, if a download is wanted.
+    ///
+    /// Fails with `err::message_not_found`, `err::attachment_not_found` or `err::not_cached`.
+    void attachment_data_cached(
+            int64_t message_id, size_t index, result_function<std::vector<std::byte>> cb);
+    std::vector<std::byte> attachment_data_cached(int64_t message_id, size_t index, await_t);
+
+    /// An attachment's thumbnail: a JPEG of the picture in its own shape, `thumbnail_edge` pixels
+    /// tall (never enlarged, and cropped to 21:9 at most), for rows of tiles of one height to draw
+    /// without decoding the whole file.  `Attachment::thumbnail_width` and `thumbnail_height`
+    /// give its size before it is read.  See `image::thumbnail` for exactly what it is.
+    ///
+    /// **Local only, never the network.**  A thumbnail is made from the cached copy of the file,
+    /// once it is here, so there is never one to fetch: `Attachment::has_thumbnail` says whether
+    /// there is one now, and changes to it are reported through `messages_updated`.  A display
+    /// that wants one sooner asks for the file itself with `attachment_data`, which caches it and
+    /// so leads to its thumbnail.
+    ///
+    /// Made for every cached picture Session displays: as a download is kept, as a file we send is
+    /// kept, and once for the files already cached by a version that made none.  A picture we send
+    /// has one sooner, made from libsession's own copy before its upload starts and served until
+    /// the cached file's own is made; it does not count towards `attachment_cache_limit`.  Each is
+    /// made at the `thumbnail_edge` in force at the time and kept with the file, so it goes when
+    /// the file is evicted or deleted and counts towards `attachment_cache_limit` with it.
+    ///
+    /// Reading one marks the cached file as used, as reading the file itself does: a picture being
+    /// shown as its thumbnail is a picture in use, and should not be first to go.  Asking for one
+    /// that is waiting to be made moves it to the front of the queue.
+    ///
+    /// Fails with:
+    ///
+    /// - `err::message_not_found`, `err::attachment_not_found` — there is no such attachment.
+    /// - `err::no_thumbnail` — there is no thumbnail for it, for any of the reasons above.
+    void attachment_thumbnail(
+            int64_t message_id, size_t index, result_function<std::vector<std::byte>> cb);
+    std::vector<std::byte> attachment_thumbnail(int64_t message_id, size_t index, await_t);
+
+    /// An attachment's rendition: the whole picture re-encoded as a JPEG, or a WebP when it has
+    /// transparency or is animated, fitting inside a `rendition_edge` box, for a viewer to draw in
+    /// place of the original whatever format that was.  See `image::rendition` for exactly what it
+    /// is.  A picture already a JPEG or WebP within the box (`image::rendition_is_original`) is its
+    /// own rendition, served as it is.
+    ///
+    /// **From the cache only, never the network.**  One to re-encode is made only when asked for:
+    /// the first ask queues it ahead of everything else waiting to be made, with the renditions of
+    /// the message's other pictures behind it, and fails with `err::no_rendition`.  When it is
+    /// made, `messages_updated` reports `Attachment::has_rendition` true, and asking again serves
+    /// it.  Nothing waits on the decode, which runs on another thread and would otherwise deadlock
+    /// a caller on Core's loop.  Until then, the original if the platform decodes it, else the
+    /// thumbnail.  Whether the original is its own rendition is settled from its header when the
+    /// thumbnail is made, so such a picture's first ask is served.
+    ///
+    /// Kept, evicted, counted and read as a thumbnail is: part of the file's cache entry, gone
+    /// with it, and marking the file used when read.  A picture no rendition can be made of is
+    /// refused under `image::renderer_version` and not tried again until that rises, reported as
+    /// `PictureInfo::rendition_refused` through `messages_updated`.  So is an animated PNG
+    /// labelled `image/png`: libvips decodes only its first frame, so the original is what a
+    /// viewer draws (`image::Info::first_frame_only`).
+    ///
+    /// For an attachment sent as its original file (`Attachment::original_file`) asking never
+    /// queues one: it is a file to export, not a picture to open.
+    ///
+    /// Fails with:
+    ///
+    /// - `err::message_not_found`, `err::attachment_not_found` — there is no such attachment.
+    /// - `err::no_rendition` — none yet, or none ever: not cached, not a picture Session
+    ///   displays, an original file, or refused.
+    void attachment_rendition(
+            int64_t message_id, size_t index, result_function<std::vector<std::byte>> cb);
+    std::vector<std::byte> attachment_rendition(int64_t message_id, size_t index, await_t);
 
     /// Withdraws one request made by `attachment_data` or `save_attachment`, by the token it
     /// returned or that its progress reports carry: its callback, and the last progress report it
@@ -479,7 +642,8 @@ class Client {
     /// written and verified, or the same error `cb` gets.
     ///
     /// Fails as `attachment_data` does, and with `err::save_failed` if the file cannot be written
-    /// where it was asked to go.
+    /// where it was asked to go.  A taken file not yet uploaded is saved from our own copy, as
+    /// `attachment_data` serves it.
     ///
     /// `notify_sender` tells the person who sent it that we saved their file, which is what
     /// Session's other clients do and so what a recipient expects.  Passing false keeps this
@@ -536,10 +700,15 @@ class Client {
     /// here, rather than on a timer: those are things that happen while we are not looking, and
     /// this is the moment we look.  It runs off the event loop and reports only to the log.
     ///
+    /// It also resumes the auto-downloads an earlier run left owed, once a network is attached.
+    ///
     /// Contents are encrypted under a key generated once and kept in the database, so they outlive
     /// the message or config entry whose key originally opened them — and so the files are not
     /// readable by whoever ends up with the disk.  That protection is only as good as the
     /// database's: with an unencrypted database the key sits in plaintext beside them.
+    ///
+    /// The exception is `outgoing/`, where files a send took (`OutgoingAttachment::take_file`)
+    /// wait **unencrypted**, as the caller handed them over, until they upload or are dropped.
     void set_cache_dir(std::filesystem::path dir);
 
     /// A conversation's picture, decrypted and ready to decode.
@@ -574,6 +743,8 @@ class Client {
     /// and padded, which makes the total larger than the same attachments would be as plain files.
     /// That is the right way round for a disk limit — 5GB means 5GB of disk.
     ///
+    /// A file we send that is larger than the limit is not kept at all.
+    ///
     /// Display pictures are not counted and are never evicted for this.  They are one small file
     /// per contact, replaced rather than accumulated, and a contact you have not spoken to in years
     /// should not lose the last picture you had of them; freeing them is the reference sweep's job.
@@ -591,6 +762,10 @@ class Client {
     void set_attachment_cache_limit(std::optional<int64_t> bytes, await_t);
     void attachment_cache_limit(result_function<std::optional<int64_t>> cb);
     std::optional<int64_t> attachment_cache_limit(await_t);
+
+    /// How stale a cache entry's last use must be before a read records a new one.  Eviction only
+    /// needs coarse recency, so an entry read again within this keeps the use it has.
+    static constexpr auto CACHE_TOUCH_INTERVAL = 1h;
 
     /// How much disk the cached attachments occupy at the moment, in bytes.
     ///
@@ -636,7 +811,8 @@ class Client {
     /// somebody asking for one particular file, and are never refused for being large; whether
     /// what they fetch is kept is `requested_cache_max_size`'s question.
     ///
-    /// Persisted and device-local, for the same reasons as the cache limit.
+    /// Persisted and device-local, for the same reasons as the cache limit.  Lowering it also
+    /// forgets the queued auto-downloads it now refuses.
     ///
     /// @throws std::invalid_argument if `bytes` is negative.
     void set_auto_download_max_size(std::optional<int64_t> bytes, result_function<> cb);
@@ -647,8 +823,7 @@ class Client {
     /// The largest file that `attachment_data` or `save_attachment` will keep in the cache, or
     /// nullopt for no limit, which is the default.  0 keeps nothing they fetch.
     ///
-    /// Also bounds the copy kept of a file we send, which costs the cache what a download of it
-    /// would.
+    /// A file we send is kept whatever this says.
     ///
     /// A file over it is still fetched -- this never refuses anything -- and is simply not kept, so
     /// asking for it again fetches it again.  One already in the cache is still served from there,
@@ -682,6 +857,35 @@ class Client {
     void set_auto_download_concurrency(std::optional<int> n, await_t);
     void auto_download_concurrency(result_function<std::optional<int>> cb);
     std::optional<int> auto_download_concurrency(await_t);
+
+    /// The height, in pixels, of the attachment thumbnails made from now on -- the height a tile is
+    /// drawn at times the display's pixel ratio (see `attachment_thumbnail`): the stored value if
+    /// one has been set, and otherwise the `default_thumbnail_edge` this Client was constructed
+    /// with, or `DEFAULT_THUMBNAIL_EDGE`.
+    ///
+    /// Clamped to [`image::min_thumbnail_edge`, `image::max_thumbnail_edge`], 64 to 1024: the top
+    /// keeps a decoded thumbnail to about 9.3 MiB.  nullopt removes the stored value, going back to
+    /// the constructor's.
+    ///
+    /// Thumbnails already made are kept at the size they were made at, rather than all made again:
+    /// a change is a preference about new ones, and remaking a whole cache's worth is a cost
+    /// nobody asked for.
+    ///
+    /// Persisted and device-local, for the same reasons as the cache limit, and because it follows
+    /// this device's display.
+    void set_thumbnail_edge(std::optional<uint32_t> px, result_function<> cb);
+    void set_thumbnail_edge(std::optional<uint32_t> px, await_t);
+    void thumbnail_edge(result_function<uint32_t> cb);
+    uint32_t thumbnail_edge(await_t);
+
+    /// The box, in pixels a side, that renditions made from now on fit inside (see
+    /// `attachment_rendition`): as `thumbnail_edge`, with `default_rendition_edge` and
+    /// `DEFAULT_RENDITION_EDGE` as the fallbacks, clamped to [`image::min_rendition_edge`,
+    /// `image::max_rendition_edge`].  Renditions already made keep their size.
+    void set_rendition_edge(std::optional<uint32_t> px, result_function<> cb);
+    void set_rendition_edge(std::optional<uint32_t> px, await_t);
+    void rendition_edge(result_function<uint32_t> cb);
+    uint32_t rendition_edge(await_t);
 
     // -- Our own account ----------------------------------------------------------------------
     //
@@ -753,6 +957,48 @@ class Client {
     // As above, and for the same reason.
     std::chrono::milliseconds _high_freq_dispatch_interval{100};
 
+    // Above `core`, which the constructor initialises after it from the same options.
+    uint32_t _default_thumbnail_edge;
+    uint32_t _default_rendition_edge;
+
+    // The SQL functions Client's queries call, on every connection the database opens.
+    static void _register_sql_functions(sqlite::Connection& c);
+
+    // Core, built from the options that are Core's: everything but Client's own.  An application's
+    // own `sqlite::post_open` runs after Client's.
+    template <ClientOption... Opts>
+    static core::Core _make_core(
+            std::filesystem::path db_path, core::callbacks cbs, Opts&&... opts) {
+        static_assert(
+                (int{std::same_as<std::remove_cvref_t<Opts>, sqlite::post_open>} + ... + 0) <= 1,
+                "At most one sqlite::post_open can be given.");
+        auto theirs = core::detail::maybe_instance<sqlite::post_open>(opts...);
+        sqlite::post_open ours{
+                [theirs = theirs ? std::move(theirs->post_open) : nullptr](sqlite::Connection& c) {
+                    _register_sql_functions(c);
+                    if (theirs)
+                        theirs(c);
+                }};
+        return std::apply(
+                [&]<typename... CoreOpts>(CoreOpts&&... core_opts) {
+                    return core::Core{
+                            std::move(db_path),
+                            std::move(cbs),
+                            core::schema_extension{
+                                    "client", schema::MIGRATIONS, schema::FULL_SCHEMA},
+                            std::move(ours),
+                            std::forward<CoreOpts>(core_opts)...};
+                },
+                std::tuple_cat([]<typename T>(T&& o) {
+                    if constexpr (
+                            core::CoreOption<T> &&
+                            !std::same_as<std::remove_cvref_t<T>, sqlite::post_open>)
+                        return std::tuple<std::remove_cvref_t<T>>{std::forward<T>(o)};
+                    else
+                        return std::tuple<>{};
+                }(std::forward<Opts>(opts))...));
+    }
+
     // Core's send ids are per-process (its counter restarts at 1 on every run), so this mapping
     // must not be persisted or a stale row would capture a later run's status updates.
     struct OutgoingSend {
@@ -800,6 +1046,8 @@ class Client {
     void _set_expiry(
             const ConversationId& id, config::expiration_mode mode, std::chrono::seconds timer);
     void _set_auto_download(const ConversationId& id, AutoDownload mode);
+    void _download_existing_attachments(const ConversationId& id);
+    ExistingAttachmentCounts _existing_attachments(const ConversationId& id);
     void _set_nickname(const ConversationId& id, std::string_view nickname);
 
     // One conversation-row column, updated where it differs and re-derived into the config if it
@@ -907,6 +1155,9 @@ class Client {
     // database rather than worked out at each of those, which delete in several different ways.
     void _withdraw_orphaned_requests();
 
+    // What everything that deletes messages or attachments calls once it has committed.
+    void _attachments_deleted();
+
     // Stops `found`'s transfer and forgets it if nobody is left on it, discarding whatever it was
     // keeping; true if it did.
     bool _abort_if_unwanted(std::map<std::string, std::shared_ptr<Transfer>>::iterator found);
@@ -1003,19 +1254,29 @@ class Client {
     //
     // Returns whether it got that far, which is what says the messages have been told: a caller
     // that gets false has left them where they were and owes them the news itself.
-    bool _record_cached(const std::string& url, const std::filesystem::path& file, int64_t on_disk);
+    //
+    // Queues a thumbnail for it when any of those messages shows it as a picture.  `plain`, for a
+    // file of our own, is the local file the copy was made from, which the thumbnail is then made
+    // from instead of decrypting the copy back.
+    bool _record_cached(
+            const std::string& url,
+            const std::filesystem::path& file,
+            int64_t on_disk,
+            std::optional<std::filesystem::path> plain = std::nullopt);
 
-    /// Keeps a copy of a file we just uploaded, so that a message we sent can be drawn without
-    /// fetching back a file that came off this disk in the first place.
+    /// Keeps a copy of a file we just uploaded, whatever it is, so that a message we sent can be
+    /// drawn and saved without fetching back a file that came off this disk in the first place.
     ///
-    /// Under the rule that would have applied had the same file arrived, plus anything on a
-    /// gallery-viewable message whatever that rule says -- see the definition.  Best effort: the
-    /// source is re-read, since the upload streamed it rather than holding it, and a file that has
-    /// since moved or changed is simply not cached.
+    /// Best effort: `body` is what the upload sent when it sent bytes rather than the file, else
+    /// the source is re-read, and a file that has since moved or changed is simply not cached.
     ///
     /// Call once the row carries the url, which is both where the copy belongs and what says the
     /// upload is done.
-    void _cache_outgoing_attachment(int64_t client_id, size_t index, const std::string& url);
+    void _cache_outgoing_attachment(
+            int64_t client_id,
+            size_t index,
+            const std::string& url,
+            std::shared_ptr<const std::vector<std::byte>> body);
 
     // The cache entry holding `url`, as (id, file name), found through the attachment rows that
     // reference it rather than by hashing the url.
@@ -1026,7 +1287,8 @@ class Client {
     std::optional<std::pair<int64_t, std::string>> _cached_entry(
             sqlite::Connection& c, std::string_view url);
 
-    // Marks a cache entry as used now, which is what makes eviction least-recently-used.
+    // Marks a cache entry as used now, which is what makes eviction least-recently-used.  Does
+    // nothing within CACHE_TOUCH_INTERVAL of its last use.
     void _touch_cached(int64_t id);
 
     // Removes least-recently-used entries until the cache fits its limit, never touching `keep` --
@@ -1044,6 +1306,10 @@ class Client {
 
     // Every message whose attachment names cache entry `id`.
     std::vector<int64_t> _messages_cached_as(sqlite::Connection& c, int64_t id);
+
+    // Takes a thumbnail whose file has gone out of entry `id`'s row, and returns the messages that
+    // were drawing it, or nothing if the row had none to take.
+    std::vector<int64_t> _forget_derived(sqlite::Connection& c, int64_t id, cache::Derived kind);
 
     // What the cache index says its files add up to, in bytes on disk.  The overload taking a
     // connection is for callers that already hold one and are about to write through it -- eviction
@@ -1106,6 +1372,85 @@ class Client {
     // of what is left.
     void _post_disk(std::function<void()> job);
 
+    // Where derived images (thumbnails, renditions) are made: a thread of their own, used for one
+    // at a time, since making one decodes a whole picture and neither Core's loop nor the disk loop
+    // can wait for that.  libvips spreads each one over its own worker threads, so one at a time
+    // still uses the cores.  Placed, emplaced and stopped as the disk loop is, for the same
+    // reasons.
+    std::shared_ptr<oxen::quic::Loop> _derive_loop;
+    std::optional<oxen::quic::JobQueue> _derive_jq;
+    // False once the queue has stopped.
+    bool _post_derive(std::function<void()> job);
+
+    // What the derive thread read from a file's header: for `attachment_cache`'s columns of the
+    // same names, all zero when it could not be read as a picture; and what a rendition of it at
+    // the rendition edge would be, nullopt when reading the header threw.
+    struct PictureFacts {
+        uint32_t width = 0, height = 0, frames = 0;
+        std::optional<image::RenditionVerdict> rendition;
+    };
+
+    // Cache entries waiting for a derived image of some kind, next first, and whether one is being
+    // made.  Core's loop's.  One at a time end to end -- made, written on the disk loop, recorded
+    // -- which is what keeps one written for an entry evicted meanwhile from racing the eviction.
+    struct PendingDerived {
+        int64_t entry;
+        cache::Derived kind;
+        std::optional<std::filesystem::path> plain;  // as `_record_cached`'s
+        // Asked for by someone looking at it: no thumbnail queued later goes ahead of it.
+        bool hurried = false;
+    };
+    std::deque<PendingDerived> _derived_pending;
+    bool _derived_running = false;
+
+    // The entry and kind being decoded, whose row is marked until `_derived_made` settles it.
+    std::optional<std::pair<int64_t, cache::Derived>> _derived_attempt;
+
+    void _queue_derived(
+            int64_t entry,
+            cache::Derived kind,
+            std::optional<std::filesystem::path> plain = std::nullopt);
+
+    // Moves it to the front of the queue, if it is queued: a display is waiting for it.  One that
+    // is not has been tried already, or is not to be.
+    void _hurry_derived(int64_t entry, cache::Derived kind);
+
+    void _unmark_derived_attempt(int64_t entry, cache::Derived kind);
+
+    // Starts the next queued derived image unless one is being made, skipping entries that have
+    // gone since they were queued, or that now have that kind or a recorded failure to make it.
+    void _pump_derived();
+
+    // Back from the derive thread with what it made: writes it beside the entry if the entry
+    // still wants it.  Nullopt is a refusal, which stays recorded until the kind's version
+    // changes; `failed`, an exception, which may not happen again: a thumbnail is retried at the
+    // next start, and a rendition is refused.  `facts` is what the header said, written to the
+    // entry, with a rendition's verdict when that needs no decode; nullopt when the file could not
+    // be opened at all.
+    void _derived_made(
+            int64_t entry,
+            cache::Derived kind,
+            std::string name,
+            std::optional<std::vector<std::byte>> made,
+            bool failed,
+            std::optional<PictureFacts> facts);
+
+    // Records a derived image written beside entry `entry`, `width` x `height` pixels (0 for none
+    // of its own), and tells the messages showing it; or, if the entry has gone meanwhile, removes
+    // the file again.
+    void _record_derived(
+            int64_t entry,
+            cache::Derived kind,
+            const std::string& name,
+            int64_t on_disk,
+            uint32_t width = 0,
+            uint32_t height = 0);
+
+    // Queues a thumbnail for every cached picture with neither a thumbnail nor a recorded failure
+    // to make one.  Run at every start because the queue is not kept: this is what picks up
+    // whatever was still in it when the process ended.
+    void _thumbnail_pass();
+
     // `automatic` for an auto-download, which is always kept; anything else is kept only if
     // `_caches_requested` says so.  `ended` is the waiter's.
     void _attachment_data(
@@ -1124,25 +1469,71 @@ class Client {
         size_t index;
     };
 
-    // Core's loop's.  Newest at the front, and taken from there.
+    // Core's loop's.  Newest at the front, and taken from there.  What it holds is also flagged
+    // `auto_pending` in the database, which is what a restart rebuilds it from.
     std::deque<PendingAutoDownload> _auto_pending;
     size_t _auto_running = 0;
     bool _auto_pumping = false;
 
+    // Replaces the queue with every attachment still flagged, newest sent first.  Run when the
+    // cache directory is set and when a network is attached, and does nothing without the first.
+    void _reload_auto_downloads();
+
+    // Unflags what the setting of its conversation, under the current size limit, no longer takes:
+    // in one conversation, or in all of them for nullopt.
+    void _drop_unwanted_auto(std::optional<int64_t> convo);
+
+    // Whether a queued entry is still owed under the conversation's current setting and size
+    // limit, dropping its flag when the answer has become no.
+    bool _auto_still_owed(const PendingAutoDownload& entry);
+
     // Starts queued auto-downloads until as many are running as `auto_download_concurrency`
     // allows.  Does nothing when called from within itself, which an auto-download ending as soon
-    // as it starts -- a cache hit, or no network -- does: the loop already running picks up the
-    // freed slot, where recursing would go one level deeper for every entry in the queue.
+    // as it starts -- a cache hit, say -- does: the loop already running picks up the freed slot,
+    // where recursing would go one level deeper for every entry in the queue.
     void _pump_auto_downloads();
 
     // Whether a file somebody asked for, of the size its sender declared, is kept once fetched: it
     // needs somewhere to go, and to fit `requested_cache_max_size`.
     bool _caches_requested(std::optional<int64_t> size);
 
-    // Decides what an arriving message's attachments are worth fetching unasked, sets whether it is
-    // shown as a gallery, and starts whatever it decided on.  Does nothing without a cache
-    // directory: the point of fetching early is to have the file to hand, and with nowhere to keep
-    // it the download would be thrown away.
+    // Where a read that finishes on another loop hands its answer, on Core's loop.
+    using bytes_answer = std::function<void(Expected<std::vector<std::byte>>)>;
+
+    // Starts such a read on Core's loop, `wait` meaning as for `_read_cache_file`.
+    using bytes_read = std::function<void(bytes_answer, bool wait)>;
+
+    // The public handler and waiting forms of such a read: run `start` on Core's loop with
+    // somewhere to answer, and report what it answers or throws.
+    void _answer_bytes(bytes_read start, result_function<std::vector<std::byte>> cb);
+    std::vector<std::byte> _await_bytes(bytes_read start);
+
+    // Reads `file` on the disk loop, behind whatever is queued there, and hands it to `then` on
+    // Core's loop.  `wait` reads it right here instead, for a caller on Core's loop that must
+    // answer before returning.  Only for a file whose row the caller has just found.
+    void _read_cache_file(
+            std::filesystem::path file,
+            bool wait,
+            std::function<void(std::optional<std::vector<std::byte>>)> then);
+
+    // A cache entry whose file a read found missing, or unreadable and so removed: the entry is
+    // dropped, and the messages showing it told.
+    void _drop_unreadable(int64_t id, const std::string& name);
+
+    // These read on the disk loop and hand the answer to `done` on Core's loop.  They throw
+    // `session::error` rather than calling `done` when there is plainly nothing to read.
+    void _attachment_thumbnail(int64_t message_id, size_t index, bytes_answer done, bool wait);
+    void _attachment_rendition(int64_t message_id, size_t index, bytes_answer done, bool wait);
+    void _attachment_data_cached(int64_t message_id, size_t index, bytes_answer done, bool wait);
+
+    // The edge new thumbnails are made at: the stored setting, or failing that the constructor's.
+    uint32_t _thumbnail_edge();
+    uint32_t _rendition_edge();
+    uint32_t _derived_edge(cache::Derived kind);
+
+    // Decides what an arriving message's attachments are worth fetching unasked, and starts
+    // whatever it decided on.  Does nothing without a cache directory: the point of fetching early
+    // is to have the file to hand, and with nowhere to keep it the download would be thrown away.
     void _auto_download(const ConversationId& convo, int64_t message_id);
 
     bool _set_gallery(int64_t message_id, bool gallery);
@@ -1181,24 +1572,95 @@ class Client {
             bool include_deleted);
     std::optional<Message> _message(int64_t id);
     int64_t _send_message(const ConversationId& id, const OutgoingMessage& msg);
+
+    // The files a send took over (`OutgoingAttachment::take_file`), until its message is stored.
+    // Dropped before `stored()`, it removes its copies and leaves the caller's files alone.
+    class TakenFiles;
+
+    // Copies or links each `take_file` attachment into `_outgoing_dir()` and points it there.  On
+    // the calling thread, after `_require_sendable`; null when nothing was taken.
+    std::shared_ptr<TakenFiles> _take_files(OutgoingMessage& msg);
+
     int64_t _send_message(
             const ConversationId& id,
             const OutgoingMessage& msg,
-            Conversation::upload_progress on_upload);
+            Conversation::upload_progress on_upload,
+            std::shared_ptr<TakenFiles> taken = nullptr);
+
+    // Removes the file attachment `index` took, once it is uploaded and its cached copy is under
+    // way.  A retry never uploads it again.
+    void _drop_taken_file(int64_t client_id, size_t index);
+
+    // The file an attachment row's `path` names, resolving a taken file against the cache dir.
+    std::filesystem::path _attachment_file(const std::string& stored) const;
+
+    // The file a not-yet-uploaded attachment took, while its message can still be sent.
+    std::optional<std::filesystem::path> _taken_unsent(
+            sqlite::Connection& c, int64_t message_id, size_t index);
+
+    // `_read_cache_file` for a taken file, which is kept as it is rather than encrypted.
+    void _read_taken_file(
+            std::filesystem::path file,
+            bool wait,
+            std::function<void(std::optional<std::vector<std::byte>>)> then);
+
+    // Where taken files are kept, or empty without a cache directory.
+    std::filesystem::path _outgoing_dir() const;
+
+    // Removes what `_outgoing_dir()` holds that no message still has to upload.  Listed on the disk
+    // loop and decided on Core's, as `_sweep_cache` is.
+    void _sweep_outgoing();
+
+    // Forgets the sending thumbnails of the messages showing cache entry `entry`, whose own
+    // thumbnail now stands for them, and removes their files.
+    void _drop_sending_thumbnails(sqlite::Connection& c, int64_t entry);
+
+    // Names taken or being copied into `_outgoing_dir()` that no row names yet, which a sweep must
+    // keep.  Locked because taking happens on the caller's thread.
+    std::mutex _taking_mutex;
+    std::unordered_set<std::string> _taking;
 
     // Uploads the message's first attachment that has no url yet and, when there are none left,
     // finishes the send.  Each upload's completion calls this again, so the chain runs one file at
     // a time and resumes wherever it was left -- which is also what a retry does.
     void _upload_next(int64_t client_id, Conversation::upload_progress on_upload);
 
-    // The rest of `_upload_next`, once the disk loop has looked at the file: uploads attachment
-    // `index` from `path`, or fails the message for good if `file_size` says the file is gone.
+    // The first stage of a send or retry: copies each attachment still at the caller's path into
+    // `_outgoing_dir()` on the disk loop and points its row there, so that nothing after reads the
+    // caller's file.  Then `_derive_outgoing`.
+    void _copy_outgoing(int64_t client_id, Conversation::upload_progress on_upload);
+
+    // The stage before the uploads: for each picture Session displays whose width, height or
+    // thumbhash the caller did not supply, probes and encodes them on the derive loop and writes
+    // them into the row, so the pointer carries a placeholder.  Then `_upload_next`.
+    void _derive_outgoing(int64_t client_id, Conversation::upload_progress on_upload);
+
+    // Between the disk loop's look at the file and its upload: a picture this build decodes is
+    // re-encoded on the derive loop (`image::sendable`) and its row rewritten to describe what is
+    // sent; a picture it cannot decode is flagged as the original file; anything else goes as it
+    // is, from the very bytes that were looked at.
+    void _convert_outgoing(
+            int64_t client_id,
+            size_t index,
+            std::string path,
+            int64_t file_size,
+            std::optional<std::string> content_type,
+            Conversation::upload_progress on_upload);
+
+    // The file server's limit on one file, which applies to it encrypted.
+    uint64_t _attachment_max_encrypted_size();
+
+    // The rest of `_upload_next`, once the file is known: uploads attachment `index` from `path`,
+    // or from `body` when that is set, or fails the message for good if `file_size` says the file
+    // is gone.  `on_recorded`, when set, writes to the row in the transaction that records the url.
     void _upload_one(
             int64_t client_id,
             size_t index,
             std::string path,
             std::optional<int64_t> file_size,
-            Conversation::upload_progress on_upload);
+            std::shared_ptr<const std::vector<std::byte>> body,
+            Conversation::upload_progress on_upload,
+            std::function<void(sqlite::Connection&)> on_recorded = nullptr);
 
     // Rebuilds the message's content with its now-uploaded attachments named in it, replaces what
     // was stored, and dispatches it.  Rebuilt from the database rather than from what send_message
@@ -1385,6 +1847,9 @@ class Client {
     // entry to mark as used.
     void _save_from_cache(
             std::shared_ptr<Save> s, std::filesystem::path file, std::optional<int64_t> entry_id);
+
+    // Copies a taken file that has not been uploaded into the save, on the disk loop.
+    void _save_from_taken(std::shared_ptr<Save> s, std::filesystem::path file);
 
     // Writes the whole of `bytes` into the save, on the disk loop, for one served from a transfer
     // that held its file rather than caching it.
