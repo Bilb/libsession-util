@@ -82,6 +82,9 @@ struct Sandbox {
             net{attach_mock_network(c->core, std::move(config))} {
         TestHelper::seed_pfs_nak(c->core, own_sid(*c));
         std::filesystem::create_directories(dir);
+        c->set_cache_dir(cache.path);
+        // Kept out of the cache, so that `read_back` reads what reached the file server.
+        c->set_attachment_cache_limit(1, await);
     }
     ~Sandbox() { std::filesystem::remove_all(dir); }
     std::filesystem::path write(std::string_view name, const bytes& b) {
@@ -112,7 +115,8 @@ TEST_CASE(
         "[client][send][pictures]") {
     using namespace image_test;
     Sandbox s;
-    s.c->set_cache_dir(s.cache.path);
+    // This one checks what the send keeps, so the cache holds it.
+    s.c->set_attachment_cache_limit(std::nullopt, await);
     auto photo = derived_test::picture(640, 480, ".jpg");
     auto logo =
             save(draw(

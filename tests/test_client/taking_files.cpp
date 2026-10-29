@@ -189,19 +189,20 @@ TEST_CASE("Client: a refused send leaves the caller's file where it was", "[clie
     CHECK(files_in(s.outgoing) == 0);
 }
 
-TEST_CASE("Client: take_file needs a cache directory", "[client][send][take]") {
+TEST_CASE("Client: sending files needs a cache directory", "[client][send][take]") {
     TempClient c;
     auto me = own_sid(*c);
     TestHelper::seed_pfs_nak(c->core, me);
     auto file = std::filesystem::temp_directory_path() / random::unique_id("test_take_nocache", 7);
     std::ofstream{file} << "contents";
 
-    CHECK_THROWS_AS(
-            c->send_message(
-                    ConversationId::dm(me),
-                    {.attachments = {OutgoingAttachment{.path = file, .take_file = true}}},
-                    await),
-            std::invalid_argument);
+    for (bool take : {true, false})
+        CHECK_THROWS_AS(
+                c->send_message(
+                        ConversationId::dm(me),
+                        {.attachments = {OutgoingAttachment{.path = file, .take_file = take}}},
+                        await),
+                std::invalid_argument);
     CHECK(std::filesystem::exists(file));
     std::filesystem::remove(file);
 }
@@ -225,7 +226,9 @@ TEST_CASE(
     CHECK(std::filesystem::exists(owned));
 }
 
-TEST_CASE("Client: without take_file the caller's file is left alone", "[client][send][take]") {
+TEST_CASE(
+        "Client: without take_file the file is copied and the caller's left alone",
+        "[client][send][take]") {
     Sandbox s;
     auto* net = attach_mock_network(s.c->core);
     auto body = contents(4000);
@@ -235,9 +238,37 @@ TEST_CASE("Client: without take_file the caller's file is left alone", "[client]
     sync(*s.c);
     REQUIRE(accept_stores(*net) == 1);
     CHECK(s.c->message(id, await)->attachments[0].uploaded);
-    CHECK(stored_path(s.c, id) == file.string());
+    CHECK(stored_path(s.c, id).starts_with("outgoing/"));
+    CHECK(on_server(s.c, *net, id) == body);
     CHECK(read_all(file) == body);
-    CHECK(files_in(s.outgoing) == 0);
+    CHECK(derived_test::eventually([&] {
+        sync(*s.c);
+        return files_in(s.outgoing) == 0;
+    }));
+}
+
+TEST_CASE(
+        "Client: a file sent without take_file can go once it is copied", "[client][send][take]") {
+    Sandbox s;
+    auto* net = attach_mock_network(s.c->core);
+    net->failing_uploads = 1;
+    auto body = contents(5000);
+    auto file = s.write("notes.txt", body);
+
+    auto id = s.send(file, /*take=*/false);
+    sync(*s.c);
+    REQUIRE(s.c->message(id, await)->send_state == SendState::failed);
+    auto owned = s.cache.path / stored_path(s.c, id);
+    REQUIRE(std::filesystem::exists(owned));
+    CHECK(s.c->message(id, await)->attachments[0].availability == AttachmentAvailability::cached);
+    CHECK(s.c->attachment_data_cached(id, 0, await) == body);
+
+    std::filesystem::remove(file);
+    REQUIRE(s.c->retry_send(id, await));
+    sync(*s.c);
+    REQUIRE(accept_stores(*net) == 1);
+    CHECK(on_server(s.c, *net, id) == body);
+    CHECK(eventually_gone(s.c, owned));
 }
 
 TEST_CASE("Client: a taken file survives the cache directory moving", "[client][send][take]") {
@@ -442,7 +473,6 @@ TEST_CASE(
     auto id = s.send("outgoing/mine.bin", /*take=*/false);
     sync(*s.c);
     REQUIRE(accept_stores(*net) == 1);
-    CHECK(std::filesystem::path{stored_path(s.c, id)}.is_absolute());
     CHECK(on_server(s.c, *net, id) == body);
     CHECK(read_all(s.dir / "outgoing/mine.bin") == body);
 }

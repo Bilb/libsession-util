@@ -353,10 +353,10 @@ class Conversation {
     ///   the only thing that means done: `sent == total` merely means the last byte was
     ///   acknowledged, and the server's decision to accept the file arrives after that.
     /// - `result` holding an error — that attachment failed: `err::attachment_file_missing` if its
-    ///   file has gone (the message is then `SendState::unsendable`), `err::network_unavailable`
-    ///   with no network attached, and otherwise `err::upload_failed` with the status in the
-    ///   message.  The message fails as a whole, but this is reported per attachment, so a list of
-    ///   them can mark the one that broke rather than all of them.
+    ///   file was gone before libsession copied it (the message is then `SendState::unsendable`),
+    ///   `err::network_unavailable` with no network attached, and otherwise `err::upload_failed`
+    ///   with the status in the message.  The message fails as a whole, but this is reported per
+    ///   attachment, so a list of them can mark the one that broke rather than all of them.
     ///
     /// Reports for one attachment arrive in order — progress, then exactly one result — but
     /// reports for different attachments may interleave, and a failure does not stop the others
@@ -374,11 +374,13 @@ class Conversation {
     /// it can fire before this function returns, so it must not depend on anything the caller sets
     /// up afterwards.
     ///
-    /// The files are only checked here.  Each is read when its upload comes up, and again by a
-    /// retry that still has to upload it, so it must stay at its `path`, unchanged, until then --
-    /// unless `OutgoingAttachment::take_file` hands it over.
+    /// The files are only checked here.  Each is copied into the cache directory once the message
+    /// is stored, unless `OutgoingAttachment::take_file` hands it over, and the upload and any
+    /// retry read that copy; so a caller's file has to stay at its `path` only until the copy is
+    /// made, which the attachment's `availability` turning `cached` reports, not until the upload.
     ///
-    /// @throws std::invalid_argument if any attachment's file is not a readable, non-empty file,
+    /// @throws std::invalid_argument if there are attachments and no cache directory is set (see
+    /// `Client::set_cache_dir`), if any attachment's file is not a readable, non-empty file,
     /// if one with `take_file` is a symbolic link, cannot be linked or copied, has no cache
     /// directory to go to, is too large for the file server and not a picture re-encoding could
     /// shrink (`image::SendPlan::too_large_for_server`, or any file past the limit with

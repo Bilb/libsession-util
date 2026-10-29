@@ -756,6 +756,8 @@ void Client::_require_sendable(
         std::string_view op, const ConversationId& id, const OutgoingMessage& msg) {
     _require_dm(op, id);
     _require_readable(msg.attachments);
+    if (!msg.attachments.empty() && call_get([this] { return _outgoing_dir(); }).empty())
+        throw std::invalid_argument{"{}: sending files needs a cache directory"_format(op)};
 
     if (!msg.reply_to)
         return;
@@ -5663,8 +5665,171 @@ int64_t Client::_send_message(
             id.to_string(),
             attachments.size());
 
-    _derive_outgoing(client_id, std::move(on_upload));
+    _copy_outgoing(client_id, std::move(on_upload));
     return client_id;
+}
+
+void Client::_copy_outgoing(int64_t client_id, Conversation::upload_progress on_upload) {
+    struct Copy {
+        size_t idx;
+        std::string from, name;
+        std::optional<Error> error = std::nullopt;
+        bool missing = false;
+    };
+    std::vector<Copy> copies;
+    {
+        auto c = core.database().conn();
+        for (auto&& [idx, path] : c.prepared_results<int64_t, std::string>(
+                     R"(
+            SELECT idx, path FROM message_attachments
+            WHERE message = ? AND url IS NULL AND path IS NOT NULL
+            ORDER BY idx
+        )",
+                     client_id)) {
+            if (taken_name(path))
+                continue;
+            auto ext = utf8_string(utf8_path(path).extension());
+            auto name = random::random_base32(26) + (ext.size() <= MAX_TAKEN_EXTENSION ? ext : "");
+            copies.push_back({static_cast<size_t>(idx), std::move(path), std::move(name)});
+        }
+    }
+    if (copies.empty())
+        return _derive_outgoing(client_id, std::move(on_upload));
+
+    auto dir = _outgoing_dir();
+    if (dir.empty()) {
+        // Only a message from a run that had a cache directory, retried in one that has none: not
+        // missing, so a later run that sets it can retry.
+        for (const auto& copy : copies)
+            if (on_upload)
+                on_upload(
+                        copy.idx,
+                        0,
+                        0,
+                        unexpected{Error{
+                                err::attachment_unreadable, "no cache directory to copy into"}});
+        return _fail_attachment_send(client_id);
+    }
+
+    // Claimed before the files exist, as `_take_files` does, so that a sweep keeps them.
+    {
+        std::lock_guard lock{_taking_mutex};
+        for (const auto& copy : copies)
+            _taking.insert(copy.name);
+    }
+
+    _post_disk([this,
+                client_id,
+                dir = std::move(dir),
+                copies = std::move(copies),
+                on_upload = std::move(on_upload)]() mutable {
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        bool copied = false;
+        for (auto& copy : copies) {
+            auto from = utf8_path(copy.from);
+            if (ec) {
+                copy.error =
+                        Error{err::attachment_unreadable,
+                              "cannot create {}: {}"_format(utf8_string(dir), ec.message())};
+                continue;
+            }
+            std::error_code copy_ec;
+            if (!std::filesystem::is_regular_file(from, copy_ec)) {
+                copy.missing = !std::filesystem::exists(from, copy_ec);
+                copy.error = Error{
+                        copy.missing ? err::attachment_file_missing : err::attachment_unreadable,
+                        "{} is {}"_format(copy.from, copy.missing ? "gone" : "not a file")};
+                continue;
+            }
+            // A copy rather than a link: a link would carry an edit made to the caller's file in
+            // place into what is sent.
+            auto to = dir / utf8_path(copy.name);
+            std::filesystem::copy_file(from, to, copy_ec);
+            if (!copy_ec) {
+                try {
+                    sync_to_disk(to);
+                    copied = true;
+                } catch (const std::system_error& e) {
+                    copy_ec = e.code();
+                }
+            }
+            if (copy_ec) {
+                std::filesystem::remove(to, copy_ec);
+                copy.error =
+                        Error{err::attachment_unreadable,
+                              "{} cannot be copied: {}"_format(copy.from, copy_ec.message())};
+            }
+        }
+        if (copied)
+            try {
+                sync_to_disk(dir);
+            } catch (const std::system_error&) {
+            }
+
+        call([this,
+              client_id,
+              dir,
+              copies = std::move(copies),
+              on_upload = std::move(on_upload)]() mutable {
+            bool pointed = false, missing = false, failed = false;
+            std::vector<std::string> orphans;
+            {
+                auto c = core.database().conn();
+                for (const auto& copy : copies) {
+                    if (copy.error) {
+                        failed = true;
+                        missing |= copy.missing;
+                        continue;
+                    }
+                    // Matched on the old path too: a message deleted while its copy was made has
+                    // no row to point, and its copy is nobody's.
+                    if (c.prepared_exec(
+                                R"(
+                    UPDATE message_attachments SET path = ?3
+                    WHERE message = ?1 AND idx = ?2 AND path = ?4 AND url IS NULL
+                )",
+                                client_id,
+                                static_cast<int64_t>(copy.idx),
+                                taken_path(copy.name),
+                                copy.from) > 0)
+                        pointed = true;
+                    else
+                        orphans.push_back(copy.name);
+                }
+            }
+            {
+                std::lock_guard lock{_taking_mutex};
+                for (const auto& copy : copies)
+                    _taking.erase(copy.name);
+            }
+            if (!orphans.empty())
+                _post_disk([dir, orphans = std::move(orphans)] {
+                    for (const auto& name : orphans) {
+                        std::error_code ec;
+                        std::filesystem::remove(dir / utf8_path(name), ec);
+                    }
+                });
+            if (failed) {
+                for (const auto& copy : copies) {
+                    if (!copy.error)
+                        continue;
+                    log::warning(
+                            cat,
+                            "Attachment {} of message {} is not sent: {}",
+                            copy.idx,
+                            client_id,
+                            copy.error->message);
+                    if (on_upload)
+                        on_upload(copy.idx, 0, 0, unexpected{*copy.error});
+                }
+                return _fail_attachment_send(client_id, missing);
+            }
+            if (pointed)
+                _emit_message(/*added=*/false, client_id);
+            _derive_outgoing(client_id, std::move(on_upload));
+        });
+    });
 }
 
 void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress on_upload) {
@@ -5806,10 +5971,9 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
     auto path = utf8_string(_attachment_file(stored));
     const bool original = (flags & ATTACHMENT_FLAG_ORIGINAL_FILE) != 0;
 
-    // Checked here rather than only at send_message, because that check is on the other side of
-    // however long the message sat waiting: a file present when it was attached can be gone by the
-    // time its turn comes, and a message resumed in a later run may have been waiting for days.
-    // On the disk loop, and carried on with back here.
+    // Our own copy by now, but checked all the same: the cache directory is the platform's to
+    // empty, and a message resumed in a later run may have been waiting for days.  On the disk
+    // loop, and carried on with back here.
     _post_disk([this,
                 client_id,
                 index = static_cast<size_t>(idx),
@@ -6347,11 +6511,11 @@ bool Client::_retry_send(int64_t client_id, Conversation::upload_progress on_upl
             client_id,
             has_uploads_left ? " (attachments still to upload)" : "");
 
-    // Resumes wherever it was left, through the derive stage, which a run that ended before it
-    // could leave undone and which skips what is already there; then _upload_next takes the first
-    // attachment with no url, so the ones that already got up are not sent again, and a message
-    // needing none goes straight to being dispatched.
-    _derive_outgoing(client_id, std::move(on_upload));
+    // Resumes wherever it was left, through the copy and derive stages, which a run that ended
+    // before them could leave undone and which skip what is already there; then _upload_next takes
+    // the first attachment with no url, so the ones that already got up are not sent again, and a
+    // message needing none goes straight to being dispatched.
+    _copy_outgoing(client_id, std::move(on_upload));
     return true;
 }
 

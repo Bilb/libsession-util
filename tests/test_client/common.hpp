@@ -237,10 +237,10 @@ struct Recorder {
 /// way is testing the scheduler.  Wait on the observable outcome instead.
 inline void sync(Client& c) {
     // Work goes back and forth between the loops: a download's bytes are handled on the disk loop,
-    // which reports its end onto Core's, which may send it back to read the file; a send with a
-    // picture derives on its own loop first, then uploads through the disk loop.  A few rounds
-    // covers the longest such exchange.
-    for (int i = 0; i < 5; i++) {
+    // which reports its end onto Core's, which may send it back to read the file; a send copies its
+    // files on the disk loop, derives a picture on its own loop, then uploads through the disk
+    // loop.  A few rounds covers the longest such exchange.
+    for (int i = 0; i < 8; i++) {
         c.core.disk_loop()->call_get([] { return 0; });
         TestHelper::drain_derive_loop(c);
         c.core.loop().call_get([] { return 0; });

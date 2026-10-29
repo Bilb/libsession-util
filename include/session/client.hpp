@@ -1609,8 +1609,8 @@ class Client {
     // loop and decided on Core's, as `_sweep_cache` is.
     void _sweep_outgoing();
 
-    // Names taken into `_outgoing_dir()` whose message is not stored yet, which a sweep must keep.
-    // Locked because taking happens on the caller's thread.
+    // Names taken or being copied into `_outgoing_dir()` that no row names yet, which a sweep must
+    // keep.  Locked because taking happens on the caller's thread.
     std::mutex _taking_mutex;
     std::unordered_set<std::string> _taking;
 
@@ -1618,6 +1618,11 @@ class Client {
     // finishes the send.  Each upload's completion calls this again, so the chain runs one file at
     // a time and resumes wherever it was left -- which is also what a retry does.
     void _upload_next(int64_t client_id, Conversation::upload_progress on_upload);
+
+    // The first stage of a send or retry: copies each attachment still at the caller's path into
+    // `_outgoing_dir()` on the disk loop and points its row there, so that nothing after reads the
+    // caller's file.  Then `_derive_outgoing`.
+    void _copy_outgoing(int64_t client_id, Conversation::upload_progress on_upload);
 
     // The stage before the uploads: for each picture Session displays whose width, height or
     // thumbhash the caller did not supply, probes and encodes them on the derive loop and writes

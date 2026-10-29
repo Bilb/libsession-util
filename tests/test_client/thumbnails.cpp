@@ -536,7 +536,9 @@ TEST_CASE("Client: a thumbnail asked for before it is made is made next", "[clie
 }
 
 TEST_CASE("Client: a picture we send carries its own placeholder", "[client][send][placeholder]") {
+    TempCacheDir cache;
     TempClient c;
+    c->set_cache_dir(cache.path);
     auto* net = attach_mock_network(c->core);
     auto me = own_sid(*c);
     TestHelper::seed_pfs_nak(c->core, me);
@@ -602,7 +604,9 @@ TEST_CASE("Client: a picture we send carries its own placeholder", "[client][sen
 
 TEST_CASE(
         "Client: a retried send reads what a picture still lacks", "[client][send][placeholder]") {
+    TempCacheDir cache;
     TempClient c;
+    c->set_cache_dir(cache.path);
     auto me = own_sid(*c);
     TestHelper::seed_pfs_nak(c->core, me);
     auto dir = std::filesystem::temp_directory_path() / random::unique_id("test_placeholder", 7);

@@ -113,7 +113,9 @@ TEST_CASE(
 }
 
 TEST_CASE("Client: a message we send starts as a gallery", "[client][gallery]") {
+    TempCacheDir cache;
     TempClient c;
+    c->set_cache_dir(cache.path);
     attach_mock_network(c->core);
     auto dir = std::filesystem::temp_directory_path() / random::unique_id("test_gallery", 7);
     std::filesystem::create_directories(dir);

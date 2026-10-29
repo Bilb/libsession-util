@@ -28,8 +28,8 @@ inline constexpr std::string_view no_thumbnail = "attachment.no_thumbnail";
 /// Session displays, or refused.  One being made is reported through `messages_updated`.
 inline constexpr std::string_view no_rendition = "attachment.no_rendition";
 
-/// The local file an outgoing attachment was made from is no longer there, so the message cannot
-/// be sent.
+/// The local file an outgoing attachment was made from was gone before libsession had its own copy,
+/// so the message cannot be sent.
 inline constexpr std::string_view attachment_file_missing = "attachment.file_missing";
 
 /// Too large to send: a picture that does not fit the file server's limit even re-encoded at

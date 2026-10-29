@@ -20,15 +20,21 @@ constexpr size_t MAX_THUMBHASH_SIZE = 25;
 /// and uploaded when the message is sent, not when it is attached, so a caller can hold these
 /// against a draft for as long as the user takes to write it.
 struct OutgoingAttachment {
-    /// The file to send.  Read when its upload comes up and again by any retry, not by
-    /// `send_message` itself, so without `take_file` it must stay here, unchanged, until the upload
-    /// is done.
+    /// The file to send.  Without `take_file` it is copied beneath `Client::set_cache_dir` once the
+    /// message is stored, on the disk loop rather than in `send_message`, and only that copy is
+    /// read from then on, so the caller's file may be moved, edited or deleted once
+    /// `Attachment::availability` reads `cached`.  A file gone before its copy is made leaves the
+    /// message `SendState::unsendable`, with `err::attachment_file_missing`.
+    ///
+    /// The copy waits there **unencrypted**, and goes when `take_file`'s would.  Until the file is
+    /// uploaded, `Client::attachment_data`, `attachment_data_cached` and `save_attachment` serve
+    /// the copy and `Attachment::availability` says `cached`.
     std::filesystem::path path;
 
-    /// Hands the file to libsession, which keeps it beneath `Client::set_cache_dir` (needed for
-    /// this), reads it from there for the upload and any retry, and deletes it once nothing can
-    /// send it: when it has uploaded (a retry never uploads it again), when its message turns
-    /// `SendState::unsendable`, or when its message is deleted.
+    /// Hands the file to libsession instead of copying it, which keeps it beneath
+    /// `Client::set_cache_dir`, reads it from there for the upload and any retry, and deletes it
+    /// once nothing can send it: when it has uploaded (a retry never uploads it again), when its
+    /// message turns `SendState::unsendable`, or when its message is deleted.
     ///
     /// The caller's file is removed once the message is stored, and must not be used afterwards.
     /// Until then it is untouched, and it stays at `path` whenever the message is never stored,

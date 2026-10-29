@@ -89,7 +89,9 @@ TEST_CASE("Client: an arriving message records the files it names", "[client][at
 }
 
 TEST_CASE("Client: a message reports the attachments it carries", "[client][send][attachments]") {
+    TempCacheDir cache;
     TempClient c;
+    c->set_cache_dir(cache.path);
     auto* net = attach_mock_network(c->core);
 
     auto dir = std::filesystem::temp_directory_path() / random::unique_id("test_attach", 7);
@@ -168,7 +170,9 @@ TEST_CASE("Client: a message reports the attachments it carries", "[client][send
 TEST_CASE(
         "Client: an office document sent with no type is typed by its extension",
         "[client][send][attachments]") {
+    TempCacheDir cache;
     TempClient c;
+    c->set_cache_dir(cache.path);
     attach_mock_network(c->core);
 
     auto dir = std::filesystem::temp_directory_path() / random::unique_id("test_attach", 7);
@@ -202,7 +206,9 @@ TEST_CASE(
 }
 
 TEST_CASE("Client: an attachment carries a thumbhash in both directions", "[client][attachments]") {
+    TempCacheDir cache;
     TempClient c;
+    c->set_cache_dir(cache.path);
     SenderKeys peer;
     attach_mock_network(c->core);
 
@@ -261,7 +267,9 @@ TEST_CASE("Client: an attachment carries a thumbhash in both directions", "[clie
 }
 
 TEST_CASE("Client: an over-long thumbhash is refused", "[client][attachments]") {
+    TempCacheDir cache;
     TempClient c;
+    c->set_cache_dir(cache.path);
     SenderKeys peer;
     attach_mock_network(c->core);
 
@@ -529,7 +537,11 @@ TEST_CASE("Client: an attachment we sent can be saved back", "[client][attachmen
     // decrypted and written by saving it.  Nothing here knows what the other half did except
     // through what was stored -- the url, its `d` fragment, the key and the size -- so a
     // disagreement between the two shows up as bytes that do not match.
+    TempCacheDir cache;
     TempClient c;
+    c->set_cache_dir(cache.path);
+    // Kept out of the cache, so that saving reads back what reached the file server.
+    c->set_attachment_cache_limit(1, await);
     auto* net = attach_mock_network(c->core);
 
     auto me = own_sid(*c);
@@ -593,7 +605,11 @@ TEST_CASE("Client: an attachment we sent can be saved back", "[client][attachmen
 TEST_CASE(
         "Client: a save does not destroy files it was not asked to touch",
         "[client][attachments]") {
+    TempCacheDir cache;
     TempClient c;
+    c->set_cache_dir(cache.path);
+    // Kept out of the cache, so that saving reads back what reached the file server.
+    c->set_attachment_cache_limit(1, await);
     auto* net = attach_mock_network(c->core);
 
     auto me = own_sid(*c);
@@ -654,7 +670,11 @@ TEST_CASE(
 
 TEST_CASE(
         "Client: an approved replacement is not renamed out of the way", "[client][attachments]") {
+    TempCacheDir cache;
     TempClient c;
+    c->set_cache_dir(cache.path);
+    // Kept out of the cache, so that saving reads back what reached the file server.
+    c->set_attachment_cache_limit(1, await);
     auto* net = attach_mock_network(c->core);
 
     auto me = own_sid(*c);
@@ -707,7 +727,11 @@ TEST_CASE(
 TEST_CASE(
         "Client: saving what we sent someone else does not claim they saved it",
         "[client][attachments]") {
+    TempCacheDir cache;
     TempClient c;
+    c->set_cache_dir(cache.path);
+    // Kept out of the cache, so that saving reads back what reached the file server.
+    c->set_attachment_cache_limit(1, await);
     auto* net = attach_mock_network(c->core);
 
     SenderKeys peer;
@@ -754,7 +778,9 @@ TEST_CASE(
 }
 
 TEST_CASE("Client: a peer can tell us they saved what we sent", "[client][attachments]") {
+    TempCacheDir cache;
     TempClient c;
+    c->set_cache_dir(cache.path);
     SenderKeys peer;
     auto* net = attach_mock_network(c->core);
 
@@ -970,7 +996,9 @@ TEST_CASE(
     }
 
     Recorder r;
+    TempCacheDir cache;
     TempClient c{r.handlers()};
+    c->set_cache_dir(cache.path);
     auto me = own_sid(*c);
     TestHelper::seed_pfs_nak(c->core, me);
 
@@ -1010,7 +1038,9 @@ TEST_CASE(
         out << "some file contents";
     }
 
+    TempCacheDir cache;
     TempClient c;
+    c->set_cache_dir(cache.path);
     auto me = own_sid(*c);
     TestHelper::seed_pfs_nak(c->core, me);
 
@@ -1046,7 +1076,9 @@ TEST_CASE("Client: retrying a send that cannot work", "[client][send][attachment
     }
 
     Recorder r;
+    TempCacheDir cache;
     TempClient c{r.handlers()};
+    c->set_cache_dir(cache.path);
     auto me = own_sid(*c);
     TestHelper::seed_pfs_nak(c->core, me);
 
@@ -1069,19 +1101,16 @@ TEST_CASE("Client: retrying a send that cannot work", "[client][send][attachment
     CHECK(failure_code(results.front()) == err::network_unavailable);
     CHECK(c->message(id, await)->send_state == SendState::failed);
 
-    // With the file gone the retry can only ever fail the same way, so the message becomes
-    // terminal rather than staying something an application would offer to try again.
+    // The message has its own copy, so the caller's file going changes nothing: the retry fails
+    // for the network again, and stays something to try again.
     std::filesystem::remove(file);
 
     results.clear();
     CHECK(c->retry_send(id, record, await));
     sync(*c);
     REQUIRE(results.size() == 1);
-    CHECK(failure_code(results.front()) == err::attachment_file_missing);
-    CHECK(c->message(id, await)->send_state == SendState::unsendable);
-
-    // ... and being terminal, it is refused rather than attempted again.
-    CHECK_FALSE(c->retry_send(id, await));
+    CHECK(failure_code(results.front()) == err::network_unavailable);
+    CHECK(c->message(id, await)->send_state == SendState::failed);
 }
 
 TEST_CASE(
