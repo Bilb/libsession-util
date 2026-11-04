@@ -501,9 +501,10 @@ class Client {
     /// Made for every cached picture Session displays: as a download is kept, as a file we send is
     /// kept, and once for the files already cached by a version that made none.  A picture we send
     /// has one sooner, made from libsession's own copy before its upload starts and served until
-    /// the cached file's own is made; it does not count towards `attachment_cache_limit`.  Each is
-    /// made at the `thumbnail_edge` in force at the time and kept with the file, so it goes when
-    /// the file is evicted or deleted and counts towards `attachment_cache_limit` with it.
+    /// the cached file's own is made or refused, or until the upload ends without the cache keeping
+    /// the file; it does not count towards `attachment_cache_limit`.  Each is made at the
+    /// `thumbnail_edge` in force at the time and kept with the file, so it goes when the file is
+    /// evicted or deleted and counts towards `attachment_cache_limit` with it.
     ///
     /// Reading one marks the cached file as used, as reading the file itself does: a picture being
     /// shown as its thumbnail is a picture in use, and should not be first to go.  Asking for one
@@ -1611,9 +1612,18 @@ class Client {
     // loop and decided on Core's, as `_sweep_cache` is.
     void _sweep_outgoing();
 
-    // Forgets the sending thumbnails of the messages showing cache entry `entry`, whose own
-    // thumbnail now stands for them, and removes their files.
-    void _drop_sending_thumbnails(sqlite::Connection& c, int64_t entry);
+    // Forgets the sending thumbnails of the messages showing cache entry `entry` once its own
+    // thumbnail is made or refused, or whatever its state when `going`, and removes their files.
+    // True if any was dropped.
+    bool _settle_sending_thumbnails(sqlite::Connection& c, int64_t entry, bool going = false);
+
+    // Forgets each attachment's sending thumbnail and removes its file.  True if any was dropped.
+    bool _drop_sending_thumbnails(
+            sqlite::Connection& c, std::span<const std::pair<int64_t, int64_t>> attachments);
+
+    // Drops the sending thumbnail of an upload that leaves no cached copy, whose own thumbnail
+    // would replace it, and reports the message.
+    void _drop_uncached_sending_thumbnail(int64_t message_id, size_t index);
 
     // Names taken or being copied into `_outgoing_dir()` that no row names yet, which a sweep must
     // keep.  Locked because taking happens on the caller's thread.

@@ -488,7 +488,8 @@ CREATE TABLE message_attachments (
 
     -- The size of the thumbnail libsession made of a picture we send, from its own copy, before the
     -- upload: `outgoing/thumbnail-<message>-<idx>`, encrypted as a cache file is.  It stands in for
-    -- the cached file's thumbnail until that one is made, then goes.  NULL for none.
+    -- the cached file's thumbnail until that one is made or refused, or until the upload ends
+    -- with no cached copy, then goes.  NULL for none.
     sending_thumbnail_width INTEGER,
     sending_thumbnail_height INTEGER,
 

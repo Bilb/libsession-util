@@ -706,6 +706,52 @@ TEST_CASE(
     std::filesystem::remove_all(dir);
 }
 
+TEST_CASE(
+        "Client: a sending thumbnail goes with an upload the cache does not keep",
+        "[client][thumbnail][send]") {
+    TempCacheDir cache;
+    TempClient c;
+    c->set_cache_dir(cache.path);
+    c->set_attachment_cache_limit(1000, await);
+    auto me = own_sid(*c);
+    TestHelper::seed_pfs_nak(c->core, me);
+    auto dir = std::filesystem::temp_directory_path() / random::unique_id("test_sending_thumb", 7);
+    std::filesystem::create_directories(dir);
+    auto photo = dir / "photo.jpg";
+    {
+        auto bytes = picture(640, 480, ".jpg");
+        std::ofstream out{photo, std::ios::binary};
+        out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    }
+
+    // No network at first, so the sending thumbnail is seen before the upload.
+    auto id = c->send_message(
+            ConversationId::dm(me), {.attachments = {OutgoingAttachment{.path = photo}}}, await);
+    sync(*c);
+    REQUIRE(c->message(id, await)->attachments.at(0).has_thumbnail);
+
+    auto* net = attach_mock_network(c->core);
+    REQUIRE(c->retry_send(id, nullptr, await));
+    sync(*c);
+    REQUIRE(accept_stores(*net) == 1);
+    settle(*c);
+    auto a = c->message(id, await)->attachments.at(0);
+    REQUIRE(a.uploaded);
+    REQUIRE(a.availability != AttachmentAvailability::cached);
+    CHECK_FALSE(a.has_thumbnail);
+    CHECK_THROWS(c->attachment_thumbnail(id, 0, await));
+    CHECK(TestHelper::on_loop(c->core, [&] {
+              return c->core.database().conn().prepared_get<int64_t>(
+                      "SELECT count(*) FROM message_attachments"
+                      " WHERE sending_thumbnail_width IS NOT NULL");
+          }) == 0);
+    CHECK(eventually([&] {
+        return !std::filesystem::exists(cache.path / "outgoing" / "thumbnail-{}-0"_format(id));
+    }));
+
+    std::filesystem::remove_all(dir);
+}
+
 TEST_CASE("Client: a sending thumbnail that is gone is forgotten", "[client][thumbnail][send]") {
     TempCacheDir cache;
     TempClient c;

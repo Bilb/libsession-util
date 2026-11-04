@@ -7088,8 +7088,10 @@ void Client::_cache_outgoing_attachment(
     if (!msg)
         return;
     auto found = std::ranges::find(msg->attachments, index, &Attachment::index);
-    if (found == msg->attachments.end() || !found->size)
+    if (found == msg->attachments.end())
         return;
+    if (!found->size)
+        return _drop_uncached_sending_thumbnail(client_id, index);
     auto size = *found->size;
 
     // Kept whatever the download rules, but never a file the whole cache could not hold: eviction
@@ -7098,7 +7100,7 @@ void Client::_cache_outgoing_attachment(
     if (auto limit = core.globals.get_integer(CACHE_LIMIT_KEY);
         limit &&
         static_cast<int64_t>(attachment::encrypted_size(static_cast<size_t>(size))) > *limit)
-        return;
+        return _drop_uncached_sending_thumbnail(client_id, index);
 
     // Not on `Attachment`, deliberately: where a file is locally is the application's business, and
     // this is the one place that needs the path back.
@@ -7107,14 +7109,15 @@ void Client::_cache_outgoing_attachment(
             client_id,
             static_cast<int64_t>(index));
     if (!stored)
-        return;
+        return _drop_uncached_sending_thumbnail(client_id, index);
 
     // Copied on the disk loop, a chunk at a time, and recorded back here: the upload's own body
     // when it sent one, else the file re-read.  Best effort throughout: a file moved or replaced
     // between the upload finishing and this leaves nothing cached, which costs a download if the
-    // message is ever drawn again and nothing else.
+    // message is ever drawn again, and its sending thumbnail.
     _post_disk([this,
                 client_id,
+                index,
                 url,
                 size,
                 body = std::move(body),
@@ -7135,7 +7138,9 @@ void Client::_cache_outgoing_attachment(
                     "uploaded",
                     client_id,
                     utf8_string(source));
-            return;
+            return call([this, client_id, index] {
+                _drop_uncached_sending_thumbnail(client_id, index);
+            });
         }
 
         int64_t on_disk;
@@ -7164,7 +7169,9 @@ void Client::_cache_outgoing_attachment(
             // A cache that cannot be written is a cache that misses next time, which is not worth
             // anything more than a note.
             log::warning(cat, "Could not cache attachment of message {}: {}", client_id, e.what());
-            return;
+            return call([this, client_id, index] {
+                _drop_uncached_sending_thumbnail(client_id, index);
+            });
         }
 
         // The local file stands in for the cached copy only when it is what was uploaded, and is
@@ -7211,6 +7218,8 @@ bool Client::_record_cached(
     )",
             url,
             id);
+    // An entry whose thumbnail is already settled makes none, so nothing else retires these.
+    _settle_sending_thumbnails(c, id);
 
     // Said here rather than by whoever asked for the bytes, because this is the moment it becomes
     // true and there is more than one way to reach it: a download completing, and a file of our own
@@ -7280,6 +7289,7 @@ std::vector<int64_t> Client::_drop_cached(
     // were.  Losing the local copy is a change to every one of them -- back to a file that has to
     // be fetched before it can be shown -- which is the whole reason they are reachable at all.
     auto showing = _messages_cached_as(c, id);
+    _settle_sending_thumbnails(c, id, /*going=*/true);
 
     // The row is an index, not the truth: a file that is already gone still costs a row, and
     // removing it is as much progress as unlinking one.
@@ -7603,7 +7613,7 @@ void Client::_derived_made(
                         derived_version(kind),
                         entry,
                         k) > 0;
-        if (refused && kind == cache::Derived::rendition)
+        if (refused && (kind == cache::Derived::rendition || _settle_sending_thumbnails(c, entry)))
             _emit_messages_showing(c, _messages_cached_as(c, entry));
     }
 
@@ -7703,35 +7713,59 @@ void Client::_record_derived(
             static_cast<int64_t>(width),
             static_cast<int64_t>(height));
     if (kind == cache::Derived::thumbnail)
-        _drop_sending_thumbnails(c, entry);
+        _settle_sending_thumbnails(c, entry);
 
     _emit_messages_showing(c, _messages_cached_as(c, entry));
     // The entry has grown, which is the other moment the total can.
     _evict_cache(entry);
 }
 
-void Client::_drop_sending_thumbnails(sqlite::Connection& c, int64_t entry) {
-    std::vector<std::string> names;
-    for (auto [message, idx] : c.prepared_results<int64_t, int64_t>(
-                 "SELECT message, idx FROM message_attachments"
-                 " WHERE cached = ? AND sending_thumbnail_width IS NOT NULL",
-                 entry))
-        names.push_back(sending_thumbnail_name(message, idx));
-    if (names.empty())
-        return;
-    c.prepared_exec(
-            R"(
-        UPDATE message_attachments
-        SET sending_thumbnail_width = NULL, sending_thumbnail_height = NULL
-        WHERE cached = ? AND sending_thumbnail_width IS NOT NULL
+bool Client::_settle_sending_thumbnails(sqlite::Connection& c, int64_t entry, bool going) {
+    std::vector<std::pair<int64_t, int64_t>> attachments;
+    for (auto row : c.prepared_results<int64_t, int64_t>(
+                 R"(
+        SELECT a.message, a.idx FROM message_attachments a
+        LEFT JOIN attachment_derived d ON d.entry = a.cached AND d.kind = ?2
+        WHERE a.cached = ?1 AND a.sending_thumbnail_width IS NOT NULL
+            AND (?4 OR d.size IS NOT NULL OR d.failed = ?3)
     )",
-            entry);
+                 entry,
+                 static_cast<int>(cache::Derived::thumbnail),
+                 derived_version(cache::Derived::thumbnail),
+                 going))
+        attachments.emplace_back(std::get<0>(row), std::get<1>(row));
+    return _drop_sending_thumbnails(c, attachments);
+}
+
+bool Client::_drop_sending_thumbnails(
+        sqlite::Connection& c, std::span<const std::pair<int64_t, int64_t>> attachments) {
+    std::vector<std::string> names;
+    for (auto [message, idx] : attachments)
+        if (c.prepared_exec(
+                    R"(
+            UPDATE message_attachments
+            SET sending_thumbnail_width = NULL, sending_thumbnail_height = NULL
+            WHERE message = ? AND idx = ? AND sending_thumbnail_width IS NOT NULL
+        )",
+                    message,
+                    idx) > 0)
+            names.push_back(sending_thumbnail_name(message, idx));
+    if (names.empty())
+        return false;
     _post_disk([dir = _outgoing_dir(), names = std::move(names)] {
         for (const auto& name : names) {
             std::error_code ec;
             std::filesystem::remove(dir / utf8_path(name), ec);
         }
     });
+    return true;
+}
+
+void Client::_drop_uncached_sending_thumbnail(int64_t message_id, size_t index) {
+    const std::pair<int64_t, int64_t> attachment{message_id, static_cast<int64_t>(index)};
+    auto c = core.database().conn();
+    if (_drop_sending_thumbnails(c, {&attachment, 1}))
+        _emit_message(/*added=*/false, message_id);
 }
 
 void Client::_thumbnail_pass() {

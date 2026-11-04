@@ -312,7 +312,9 @@ struct Attachment {
     ///
     /// The exception is a picture we send: its thumbnail is made from libsession's own copy before
     /// the upload starts, and served until the cached file's thumbnail replaces it, so it stays
-    /// true from just after the send to the file's eviction, however long the upload takes.
+    /// true from just after the send to the file's eviction, however long the upload takes.  When
+    /// the cache does not keep the uploaded file (it is larger than `attachment_cache_limit`, or
+    /// its copy fails), it turns false once the upload ends, as for a received file never cached.
     ///
     /// Never true for anything but a picture Session displays (see
     /// `image::is_displayable_image`) that libsession could decode.  Videos have none.
