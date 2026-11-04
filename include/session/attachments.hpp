@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -639,6 +640,10 @@ class Encryptor {
             const std::filesystem::path& file,
             bool allow_large = false,
             std::function<void(int64_t bytes_read, int64_t total_size)> progress = nullptr);
+
+    /// `load_key_from_file` for bytes already in memory, held until encryption is done.
+    cleared_b32 load_key_from_data(
+            std::shared_ptr<const std::vector<std::byte>> data, bool allow_large = false);
 
     /// Factory: constructs an Encryptor, runs load_from_file, and returns the ready Encryptor
     /// along with the decryption key.

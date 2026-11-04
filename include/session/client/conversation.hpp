@@ -68,7 +68,7 @@ struct MessagePreview {
     /// True if there is at least one attachment and every one of them is an image, so a row can say
     /// "3 images" where it would otherwise say "3 files".  False when there are none at all.
     ///
-    /// "Image" means a content type Session displays as one (image::displayable_image_types), the
+    /// "Image" means a content type Session displays as one (image::is_displayable_image), the
     /// same rule as Message::gallery_viewable: an SVG or TIFF counts as a file.
     bool all_images = false;
 };
@@ -297,8 +297,32 @@ class Conversation {
     /// Calling this is also what records that the question has been asked at all, so a client that
     /// prompts on first use should call it with whatever answer it was given — `none` included,
     /// since that is not the same as never having asked, and only the latter should prompt again.
+    ///
+    /// It governs what arrives afterwards; `download_existing_attachments` is the way to fetch what
+    /// is already here.  Whatever this conversation still had queued that the new setting does not
+    /// take is dropped, and only a later `download_existing_attachments` queues it again.
     void set_auto_download(AutoDownload mode, result_function<> cb);
     void set_auto_download(AutoDownload mode, await_t);
+
+    /// Queues every attachment already in this conversation that its auto-download setting takes
+    /// and that is not here yet, behind new arrivals: what an offer to "also download what is
+    /// already in this chat" calls once `set_auto_download` has recorded the answer.  Does nothing
+    /// without a cache directory.
+    ///
+    /// New arrivals stay ahead only until the queue is next rebuilt -- a restart, a network
+    /// attached, or a later call -- which orders everything owed by send time, newest first.
+    ///
+    /// @throws std::invalid_argument if auto-download is unset or `none` here (through `cb` for the
+    /// handler form, which needs the database to know).
+    void download_existing_attachments(result_function<> cb);
+    void download_existing_attachments(await_t);
+
+    /// What `download_existing_attachments` would download, for each mode, under the current
+    /// `auto_download_max_size`: what an offer of it can say it costs.  Counts files rather than
+    /// attachments, since a file several messages carry is fetched once, and includes what an
+    /// earlier attempt left owed.  Zero for both without a cache directory.
+    void existing_attachments(result_function<ExistingAttachmentCounts> cb);
+    ExistingAttachmentCounts existing_attachments(await_t);
 
     // -- Sending ------------------------------------------------------------------------------
 
@@ -329,10 +353,10 @@ class Conversation {
     ///   the only thing that means done: `sent == total` merely means the last byte was
     ///   acknowledged, and the server's decision to accept the file arrives after that.
     /// - `result` holding an error — that attachment failed: `err::attachment_file_missing` if its
-    ///   file has gone (the message is then `SendState::unsendable`), `err::network_unavailable`
-    ///   with no network attached, and otherwise `err::upload_failed` with the status in the
-    ///   message.  The message fails as a whole, but this is reported per attachment, so a list of
-    ///   them can mark the one that broke rather than all of them.
+    ///   file was gone before libsession copied it (the message is then `SendState::unsendable`),
+    ///   `err::network_unavailable` with no network attached, and otherwise `err::upload_failed`
+    ///   with the status in the message.  The message fails as a whole, but this is reported per
+    ///   attachment, so a list of them can mark the one that broke rather than all of them.
     ///
     /// Reports for one attachment arrive in order — progress, then exactly one result — but
     /// reports for different attachments may interleave, and a failure does not stop the others
@@ -350,13 +374,20 @@ class Conversation {
     /// it can fire before this function returns, so it must not depend on anything the caller sets
     /// up afterwards.
     ///
-    /// The files are read at this point, not when they were attached, so they must still exist.
-    /// Nothing about them is stored: what persists is the message, whose content names the uploaded
-    /// copies.  Re-sending a failed message therefore uploads again.
+    /// The files are only checked here.  Each is copied into the cache directory once the message
+    /// is stored, unless `OutgoingAttachment::take_file` hands it over, and the upload and any
+    /// retry read that copy; so a caller's file has to stay at its `path` only until the copy is
+    /// made, which the attachment's `availability` turning `cached` reports, not until the upload.
     ///
-    /// @throws std::invalid_argument if any attachment's file cannot be opened or exceeds the file
-    /// server's limit, or if `reply_to` names a message that does not exist or belongs to another
-    /// conversation; thrown on the calling thread, before anything is stored or dispatched.
+    /// @throws std::invalid_argument if there are attachments and no cache directory is set (see
+    /// `Client::set_cache_dir`), if any attachment's file is not a readable, non-empty file,
+    /// if one with `take_file` is a symbolic link, cannot be linked or copied, has no cache
+    /// directory to go to, is too large for the file server and not a picture re-encoding could
+    /// shrink (`image::SendPlan::too_large_for_server`, or any file past the limit with
+    /// `original_file`), or is a picture past the decode limits sent without `original_file`
+    /// (`image::SendPlan::too_large_to_decode`), or if `reply_to` names a message that does not
+    /// exist or belongs to another conversation; thrown on the calling thread, before anything is
+    /// stored or dispatched.
     using upload_progress = std::function<void(
             size_t index, int64_t sent, int64_t total, std::optional<Expected<void>> result)>;
     void send_message(OutgoingMessage msg, upload_progress on_upload, result_function<int64_t> cb);
@@ -578,6 +609,8 @@ class AnyConversation {
     SESSION_CONVO_FORWARD(set_mute_until)
     SESSION_CONVO_FORWARD(set_expiry)
     SESSION_CONVO_FORWARD(set_auto_download)
+    SESSION_CONVO_FORWARD(download_existing_attachments)
+    SESSION_CONVO_FORWARD(existing_attachments)
     SESSION_CONVO_FORWARD(send_message)
     SESSION_CONVO_FORWARD(clear_messages)
     SESSION_CONVO_FORWARD(delete_conversation)

@@ -1047,23 +1047,27 @@ constexpr int ReceiptMessage::Type_ARRAYSIZE;
 bool AttachmentPointer_Flags_IsValid(int value) {
   switch (value) {
     case 1:
+    case 2:
       return true;
     default:
       return false;
   }
 }
 
-static ::PROTOBUF_NAMESPACE_ID::internal::ExplicitlyConstructed<std::string> AttachmentPointer_Flags_strings[1] = {};
+static ::PROTOBUF_NAMESPACE_ID::internal::ExplicitlyConstructed<std::string> AttachmentPointer_Flags_strings[2] = {};
 
 static const char AttachmentPointer_Flags_names[] =
+  "ORIGINAL_FILE"
   "VOICE_MESSAGE";
 
 static const ::PROTOBUF_NAMESPACE_ID::internal::EnumEntry AttachmentPointer_Flags_entries[] = {
-  { {AttachmentPointer_Flags_names + 0, 13}, 1 },
+  { {AttachmentPointer_Flags_names + 0, 13}, 2 },
+  { {AttachmentPointer_Flags_names + 13, 13}, 1 },
 };
 
 static const int AttachmentPointer_Flags_entries_by_number[] = {
-  0, // 1 -> VOICE_MESSAGE
+  1, // 1 -> VOICE_MESSAGE
+  0, // 2 -> ORIGINAL_FILE
 };
 
 const std::string& AttachmentPointer_Flags_Name(
@@ -1072,12 +1076,12 @@ const std::string& AttachmentPointer_Flags_Name(
       ::PROTOBUF_NAMESPACE_ID::internal::InitializeEnumStrings(
           AttachmentPointer_Flags_entries,
           AttachmentPointer_Flags_entries_by_number,
-          1, AttachmentPointer_Flags_strings);
+          2, AttachmentPointer_Flags_strings);
   (void) dummy;
   int idx = ::PROTOBUF_NAMESPACE_ID::internal::LookUpEnumName(
       AttachmentPointer_Flags_entries,
       AttachmentPointer_Flags_entries_by_number,
-      1, value);
+      2, value);
   return idx == -1 ? ::PROTOBUF_NAMESPACE_ID::internal::GetEmptyString() :
                      AttachmentPointer_Flags_strings[idx].get();
 }
@@ -1085,7 +1089,7 @@ bool AttachmentPointer_Flags_Parse(
     ::PROTOBUF_NAMESPACE_ID::ConstStringParam name, AttachmentPointer_Flags* value) {
   int int_value;
   bool success = ::PROTOBUF_NAMESPACE_ID::internal::LookUpEnumValue(
-      AttachmentPointer_Flags_entries, 1, name, &int_value);
+      AttachmentPointer_Flags_entries, 2, name, &int_value);
   if (success) {
     *value = static_cast<AttachmentPointer_Flags>(int_value);
   }
@@ -1093,6 +1097,7 @@ bool AttachmentPointer_Flags_Parse(
 }
 #if (__cplusplus < 201703) && (!defined(_MSC_VER) || (_MSC_VER >= 1900 && _MSC_VER < 1912))
 constexpr AttachmentPointer_Flags AttachmentPointer::VOICE_MESSAGE;
+constexpr AttachmentPointer_Flags AttachmentPointer::ORIGINAL_FILE;
 constexpr AttachmentPointer_Flags AttachmentPointer::Flags_MIN;
 constexpr AttachmentPointer_Flags AttachmentPointer::Flags_MAX;
 constexpr int AttachmentPointer::Flags_ARRAYSIZE;

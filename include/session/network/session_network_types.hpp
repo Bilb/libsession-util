@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -289,6 +290,8 @@ struct UploadRequest : FileTransferRequest {
 
 struct FileUploadRequest : FileTransferRequest {
     std::filesystem::path file;
+    // When set, uploaded in place of `file`'s contents, which are then never read.
+    std::shared_ptr<const std::vector<std::byte>> data;
     attachment::Domain domain = attachment::Domain::ATTACHMENT;
     bool allow_large = false;
     std::optional<std::chrono::seconds> ttl;

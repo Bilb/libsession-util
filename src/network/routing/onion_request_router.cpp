@@ -586,7 +586,8 @@ void OnionRequestRouter::upload_file(FileUploadRequest request, std::span<const 
                                  upload_id,
                                  file_server_config = _config.file_server_config]() mutable {
         try {
-            auto key = enc.load_key_from_file(request.file, request.allow_large);
+            auto key = request.data ? enc.load_key_from_data(request.data, request.allow_large)
+                                    : enc.load_key_from_file(request.file, request.allow_large);
             auto enc_size = attachment::encrypted_size(enc.data_size());
 
             // Accumulate all encrypted output into a buffer (onion requests require the

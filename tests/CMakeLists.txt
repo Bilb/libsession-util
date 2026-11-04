@@ -6,16 +6,24 @@ endif()
 
 set(LIB_SESSION_UTESTS_SOURCES
     test_client/attachments.cpp
+    test_client/auto_download.cpp
     test_client/configs.cpp
+    test_client/content_types.cpp
     test_client/conversation_api.cpp
     test_client/download_cache.cpp
+    test_client/gallery.cpp
     test_client/profile_pictures.cpp
     test_client/ids_and_schema.cpp
     test_client/interop_and_threading.cpp
+    test_client/sending_pictures.cpp
+    test_client/taking_files.cpp
     test_client/receiving.cpp
+    test_client/picture_info.cpp
+    test_client/rendition.cpp
     test_client/replies.cpp
     test_client/requests.cpp
     test_client/sending.cpp
+    test_client/thumbnails.cpp
     test_client/volatile.cpp
     test_core_configs.cpp
     test_core_devices.cpp
@@ -48,6 +56,9 @@ set(LIB_SESSION_UTESTS_SOURCES
     test_image_platform.cpp
     test_image_probe.cpp
     test_image_thumbhash.cpp
+    test_image_rendition.cpp
+    test_image_sendable.cpp
+    test_image_thumbnail.cpp
     test_image_vips.cpp
     #test_logging.cpp  # Handled separately, see below
     test_multi_encrypt.cpp
@@ -100,9 +111,6 @@ target_link_libraries(test_libs INTERFACE
     # The image tests inspect libvips and libheif directly to confirm what libsession::image did.
     sessiondep::vips
     sessiondep::libheif)
-if(SESSION_ENABLE_JPEGLI)
-    target_compile_definitions(test_libs INTERFACE SESSION_ENABLE_JPEGLI)
-endif()
 
 add_executable(testAll main.cpp ${LIB_SESSION_UTESTS_SOURCES})
 target_include_directories(testAll PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -160,6 +168,14 @@ if(BUILD_LIVE_TESTS)
     target_link_libraries(quic-files PRIVATE test_libs)
     target_include_directories(quic-files PRIVATE
         ${CMAKE_SOURCE_DIR}/external/session-router/external/CLI11/include)
+endif()
+
+add_library(shared-link-check MODULE shared_link_check.cpp)
+target_link_libraries(shared-link-check PRIVATE libsession::client libsession::image)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # So that what an application calls is shown to be linked in, not only that what is linked is
+    # position-independent.
+    target_link_options(shared-link-check PRIVATE "LINKER:--no-undefined")
 endif()
 
 add_executable(swarm-auth-test EXCLUDE_FROM_ALL swarm-auth-test.cpp)
