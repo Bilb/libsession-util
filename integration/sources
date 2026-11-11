@@ -2,9 +2,10 @@
 # One entry per line: label, GitHub repository, ref.
 # A pull/N/head entry is removed by the sync once PR N is merged upstream.
 
-client  session-foundation/libsession  client
-pr-198  session-foundation/libsession  pull/198/head
-pr-206  session-foundation/libsession  pull/206/head
-pr-216  session-foundation/libsession  pull/216/head
-pr-219  session-foundation/libsession  pull/219/head
-pr-220  session-foundation/libsession  pull/220/head
+client       session-foundation/libsession  client
+attachments  Bilb/libsession-util           attachments/all
+pr-198       session-foundation/libsession  pull/198/head
+pr-206       session-foundation/libsession  pull/206/head
+pr-216       session-foundation/libsession  pull/216/head
+pr-219       session-foundation/libsession  pull/219/head
+pr-220       session-foundation/libsession  pull/220/head
