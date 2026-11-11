@@ -370,9 +370,9 @@ class Conversation {
     ///
     /// Progress fires as often as the transfer reports, which on a fast upload is often; coalescing
     /// is the caller's to do, since dropping intermediate values loses nothing.  Like the
-    /// `callbacks` handlers it runs on Core's event loop, so it must not block or throw — and note
-    /// it can fire before this function returns, so it must not depend on anything the caller sets
-    /// up afterwards.
+    /// `callbacks` handlers it is delivered through the Client's dispatcher, or run on Core's event
+    /// loop when there is none, so it must not block or throw — and note it can fire before this
+    /// function returns, so it must not depend on anything the caller sets up afterwards.
     ///
     /// The files are only checked here.  Each is copied into the cache directory once the message
     /// is stored, unless `OutgoingAttachment::take_file` hands it over, and the upload and any

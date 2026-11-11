@@ -3059,7 +3059,7 @@ AnyConversation Client::_create_conversation(const ConversationId& id) {
     bool created, contacted = false;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
         created = ensure_conversation(c, id, clock_now_ms()).created;
 
         // Opening a conversation with someone makes them an approved contact: choosing to write to
@@ -3083,7 +3083,7 @@ void Client::_mark_read(const ConversationId& id, std::optional<sys_ms> up_to) {
     int changed = 0;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         auto convo = find_conversation(c, id);
         if (!convo)
@@ -3135,7 +3135,7 @@ void Client::_set_marked_unread(const ConversationId& id, bool unread) {
     int changed = 0;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         auto convo = find_conversation(c, id);
         if (!convo)
@@ -3161,7 +3161,7 @@ void Client::_set_conversation_setting(const ConversationId& id, std::string_vie
     int changed = 0;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         auto convo = find_conversation(c, id);
         if (!convo)
@@ -3197,7 +3197,7 @@ void Client::_set_expiry(
     int changed = 0;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         auto convo = find_conversation(c, id);
         if (!convo)
@@ -3330,7 +3330,7 @@ void Client::_set_auto_download(const ConversationId& id, AutoDownload mode) {
     int changed = 0;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         auto convo = find_conversation(c, id);
         if (!convo)
@@ -3428,7 +3428,7 @@ void Client::_set_nickname(const ConversationId& id, std::string_view nickname) 
     bool changed = false;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         auto account = identity_id(c, id);
 
@@ -3454,7 +3454,7 @@ void Client::_set_priority(const ConversationId& id, int priority) {
     int changed = 0;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         // Not ensure_conversation() for one that already exists: that moves last_activity forward,
         // and pinning is not activity -- it would reorder the very list it is being used to order.
@@ -3478,7 +3478,7 @@ void Client::_set_blocked(const ConversationId& id, bool blocked) {
     bool changed = false;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
         auto account = identity_id(c, id);
 
         // Blocking someone we have never made a contact of is the ordinary case rather than the
@@ -3504,7 +3504,7 @@ void Client::_clear_messages(const ConversationId& id) {
     bool emptied = false;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         auto convo = find_conversation(c, id);
         if (!convo)
@@ -3530,7 +3530,7 @@ void Client::_delete_conversation(const ConversationId& id, bool keep_messages) 
     bool emptied = false, hidden = false;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         auto convo = find_conversation(c, id);
         if (!convo)
@@ -3565,7 +3565,7 @@ void Client::_delete_contact(const ConversationId& id) {
     bool removed = false;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         auto account = c.prepared_maybe_get<int64_t>(
                 "SELECT id FROM accounts WHERE session_id = ?", id.session_id());
@@ -3599,7 +3599,7 @@ bool Client::_delete_message(int64_t message_id, Deletion how_far) {
     std::optional<ConversationId> convo;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         auto convo_row = c.prepared_maybe_get<int64_t>(
                 "SELECT conversation FROM messages WHERE id = ?", message_id);
@@ -4020,7 +4020,7 @@ bool Client::_purge_deleted_message(int64_t message_id) {
     std::optional<ConversationId> convo;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         auto convo_row = c.prepared_maybe_get<int64_t>(
                 "SELECT conversation FROM messages WHERE id = ? AND deleted IS NOT NULL",
@@ -4044,7 +4044,7 @@ size_t Client::_purge_deleted(const ConversationId& id) {
     int removed = 0;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         auto convo = find_conversation(c, id);
         if (!convo)
@@ -4304,7 +4304,7 @@ void Client::_reconcile_contacts() {
 
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         // Ordered rather than a vector because the deletion pass below looks every stored contact
         // up in it: scanning instead would make a routine merge quadratic in the size of the
@@ -4507,7 +4507,7 @@ void Client::_reconcile_convo_volatile() {
     std::vector<ConversationId> touched;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         for (auto it = volatiles.begin_1to1(); it != volatiles.end(); ++it) {
             const auto& entry = *it;
@@ -4772,7 +4772,7 @@ void Client::_reconcile_user_profile() {
 
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         std::optional<std::string_view> pic_url;
         std::optional<std::span<const std::byte>> pic_key;
@@ -5503,7 +5503,7 @@ int64_t Client::_send_message(const ConversationId& id, const OutgoingMessage& m
     int64_t client_id;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         auto convo = ensure_conversation(c, id, now);
         created = convo.created;
@@ -5594,6 +5594,7 @@ int64_t Client::_send_message(
     const auto& attachments = msg.attachments;
     if (attachments.empty())
         return _send_message(id, msg);
+    auto handler = _dispatch_upload(std::move(on_upload));
 
     auto body = msg.body;
     auto now = clock_now_ms();
@@ -5622,7 +5623,7 @@ int64_t Client::_send_message(
     int64_t client_id;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         auto convo = ensure_conversation(c, id, now);
         created = convo.created;
@@ -5655,11 +5656,16 @@ int64_t Client::_send_message(
 
         for (size_t i = 0; i < attachments.size(); i++) {
             const auto& a = attachments[i];
+            // The file's size now, so a sending message's total is known before any upload starts.
+            // Its upload records the size it actually sent, should the file change in between.
+            std::error_code ec;
+            auto size = std::filesystem::file_size(a.path, ec);
             c.prepared_exec(
                     R"(
                 INSERT INTO message_attachments
-                    (message, idx, path, content_type, filename, flags, width, height, thumbhash)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (message, idx, path, content_type, filename, flags, width, height, thumbhash,
+                     size)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             )",
                     client_id,
                     static_cast<int64_t>(i),
@@ -5672,7 +5678,8 @@ int64_t Client::_send_message(
                             (a.original_file ? ATTACHMENT_FLAG_ORIGINAL_FILE : 0),
                     a.width ? std::optional<int64_t>{*a.width} : std::nullopt,
                     a.height ? std::optional<int64_t>{*a.height} : std::nullopt,
-                    a.thumbhash);
+                    a.thumbhash,
+                    ec ? std::nullopt : std::optional{static_cast<int64_t>(size)});
         }
         default_gallery(c, client_id);
 
@@ -5699,11 +5706,11 @@ int64_t Client::_send_message(
             id.to_string(),
             attachments.size());
 
-    _copy_outgoing(client_id, std::move(on_upload));
+    _copy_outgoing(client_id, std::move(handler));
     return client_id;
 }
 
-void Client::_copy_outgoing(int64_t client_id, Conversation::upload_progress on_upload) {
+void Client::_copy_outgoing(int64_t client_id, upload_handler on_upload) {
     struct Copy {
         size_t idx;
         std::string from, name;
@@ -5736,7 +5743,7 @@ void Client::_copy_outgoing(int64_t client_id, Conversation::upload_progress on_
         // missing, so a later run that sets it can retry.
         for (const auto& copy : copies)
             if (on_upload)
-                on_upload(
+                (*on_upload)(
                         copy.idx,
                         0,
                         0,
@@ -5855,7 +5862,7 @@ void Client::_copy_outgoing(int64_t client_id, Conversation::upload_progress on_
                             client_id,
                             copy.error->message);
                     if (on_upload)
-                        on_upload(copy.idx, 0, 0, unexpected{*copy.error});
+                        (*on_upload)(copy.idx, 0, 0, unexpected{*copy.error});
                 }
                 return _fail_attachment_send(client_id, missing);
             }
@@ -5866,7 +5873,7 @@ void Client::_copy_outgoing(int64_t client_id, Conversation::upload_progress on_
     });
 }
 
-void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress on_upload) {
+void Client::_derive_outgoing(int64_t client_id, upload_handler on_upload) {
     struct Wanted {
         int64_t idx;
         std::filesystem::path path;
@@ -6025,7 +6032,7 @@ void Client::_derive_outgoing(int64_t client_id, Conversation::upload_progress o
     }
 }
 
-void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_upload) {
+void Client::_upload_next(int64_t client_id, upload_handler on_upload) {
     std::optional<std::tuple<int64_t, std::string, int64_t, std::optional<std::string>>> next;
     {
         auto c = core.database().conn();
@@ -6052,7 +6059,7 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
                 client_id,
                 stored);
         if (on_upload)
-            on_upload(
+            (*on_upload)(
                     static_cast<size_t>(idx),
                     0,
                     0,
@@ -6098,7 +6105,7 @@ void Client::_upload_next(int64_t client_id, Conversation::upload_progress on_up
                         err::attachment_too_large,
                         reason);
                 if (on_upload)
-                    on_upload(
+                    (*on_upload)(
                             index,
                             0,
                             0,
@@ -6127,7 +6134,7 @@ void Client::_convert_outgoing(
         std::string path,
         int64_t file_size,
         std::optional<std::string> content_type,
-        Conversation::upload_progress on_upload) {
+        upload_handler on_upload) {
     enum class Outcome { as_is, original, converted, too_large, unreadable };
     struct Converted {
         Outcome outcome = Outcome::as_is;
@@ -6212,7 +6219,7 @@ void Client::_convert_outgoing(
                     code,
                     reason);
             if (on_upload)
-                on_upload(index, 0, 0, unexpected{Error{code, std::move(message)}});
+                (*on_upload)(index, 0, 0, unexpected{Error{code, std::move(message)}});
             _fail_attachment_send(client_id, permanent);
         };
         std::function<void(sqlite::Connection&)> on_recorded;
@@ -6310,7 +6317,7 @@ void Client::_convert_outgoing(
                 index,
                 client_id);
         if (on_upload)
-            on_upload(
+            (*on_upload)(
                     index,
                     0,
                     0,
@@ -6382,7 +6389,7 @@ void Client::_upload_one(
         std::string path,
         std::optional<int64_t> file_size,
         std::shared_ptr<const std::vector<std::byte>> body,
-        Conversation::upload_progress on_upload,
+        upload_handler on_upload,
         std::function<void(sqlite::Connection&)> on_recorded) {
     if (!file_size) {
         log::warning(
@@ -6392,7 +6399,7 @@ void Client::_upload_one(
                 client_id);
         log::debug(cat, "Attachment {} of message {} was {}", index, client_id, path);
         if (on_upload)
-            on_upload(
+            (*on_upload)(
                     index,
                     0,
                     0,
@@ -6409,13 +6416,17 @@ void Client::_upload_one(
                 index,
                 client_id);
         if (on_upload)
-            on_upload(
+            (*on_upload)(
                     index,
                     0,
                     0,
                     unexpected{Error{err::network_unavailable, "no network is attached"}});
         return _fail_attachment_send(client_id);
     }
+
+    // As a download does: the 0/0 that says this file has started, before its size is known.
+    if (on_upload)
+        (*on_upload)(index, 0, 0, std::nullopt);
 
     network::FileUploadRequest req;
     req.file = utf8_path(path);
@@ -6432,9 +6443,15 @@ void Client::_upload_one(
         // squelch one another.  Only progress passes through it: starting and finishing are things
         // a caller must always hear, and they are reported from elsewhere.
         auto throttle = std::make_shared<update_throttle>(_high_freq_dispatch_interval);
-        req.on_progress = [index, on_upload, throttle](int64_t sent, int64_t total) {
+        // Progress arrives on the network's loop, and `on_upload` leaves from Core's, through the
+        // dispatcher.  Queued with `call`, as `on_complete` queues the outcome, so a file's last
+        // progress still comes before its outcome.  Throttled here, so a squelched report is never
+        // queued at all.
+        req.on_progress = [this, index, on_upload, throttle](int64_t sent, int64_t total) {
             if (throttle->allow())
-                on_upload(index, sent, total, std::nullopt);
+                call([on_upload, index, sent, total] {
+                    (*on_upload)(index, sent, total, std::nullopt);
+                });
         };
     }
 
@@ -6469,7 +6486,7 @@ void Client::_upload_one(
                                     client_id,
                                     *err);
                             if (on_upload)
-                                on_upload(
+                                (*on_upload)(
                                         index,
                                         0,
                                         0,
@@ -6526,7 +6543,7 @@ void Client::_upload_one(
                                 url);
 
                         if (on_upload)
-                            on_upload(index, meta.size, meta.size, Expected<void>{});
+                            (*on_upload)(index, meta.size, meta.size, Expected<void>{});
 
                         _upload_next(client_id, on_upload);
                     } catch (const std::exception& e) {
@@ -6548,6 +6565,7 @@ void Client::_upload_one(
 }
 
 bool Client::_retry_send(int64_t client_id, Conversation::upload_progress on_upload) {
+    auto handler = _dispatch_upload(std::move(on_upload));
     std::optional<ConversationId> convo_id;
     bool has_uploads_left;
     {
@@ -6608,7 +6626,7 @@ bool Client::_retry_send(int64_t client_id, Conversation::upload_progress on_upl
     // before them could leave undone and which skip what is already there; then _upload_next takes
     // the first attachment with no url, so the ones that already got up are not sent again, and a
     // message needing none goes straight to being dispatched.
-    _copy_outgoing(client_id, std::move(on_upload));
+    _copy_outgoing(client_id, std::move(handler));
     return true;
 }
 
@@ -6700,14 +6718,29 @@ Client::transfer_progress Client::_attachment_progress(
     });
 }
 
+Client::upload_handler Client::_dispatch_upload(Conversation::upload_progress cb) {
+    if (!cb)
+        return nullptr;
+    auto target = std::make_shared<const Conversation::upload_progress>(std::move(cb));
+    return std::make_shared<const Conversation::upload_progress>(
+            [this, target = std::move(target)](
+                    size_t index, int64_t sent, int64_t total, std::optional<Expected<void>> r) {
+                _dispatch_out([target, index, sent, total, r = std::move(r)] {
+                    (*target)(index, sent, total, r);
+                });
+            });
+}
+
 Client::transfer_progress Client::_dispatch_progress(transfer_progress cb) {
     if (!cb)
         return {};
-    return [this, cb = std::move(cb)](
+    // Held once and shared by every report's hop, as an upload's handler is: this fires once per
+    // chunk, and copying the callable into each hop would cost a copy a chunk and give each report
+    // a fresh copy of whatever state the callable keeps.
+    auto target = std::make_shared<const transfer_progress>(std::move(cb));
+    return [this, target = std::move(target)](
                    int64_t done, int64_t total, std::optional<Expected<void>> r) {
-        // Copied rather than moved into the hop: this fires once per chunk, and moving would leave
-        // the next report with nothing to reach.
-        _dispatch_out([cb, done, total, r] { cb(done, total, r); });
+        _dispatch_out([target, done, total, r = std::move(r)] { (*target)(done, total, r); });
     };
 }
 
@@ -8322,7 +8355,7 @@ void Client::_finish_attachment_send(int64_t client_id) {
 
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
         c.prepared_exec(
                 "UPDATE messages SET send_state = ?, sync_send_state = ? WHERE id = ?",
                 static_cast<int>(SendState::pending),
@@ -8552,7 +8585,7 @@ void Client::_on_message_received(core::ReceivedMessage&& msg) {
     std::vector<std::string> arrived_urls;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
 
         // A blocked account is refused here rather than filtered when drawing, so that nothing it
         // sends becomes history, an unread count or a notification.  Only what *they* sent: our own
@@ -8763,7 +8796,7 @@ void Client::_apply_send_status(
     std::optional<ConversationId> convo;
     {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
+        auto tx = c.begin_immediate();
         // The two sends own one column each, so a status for one never disturbs the other.
         auto column = sync ? "sync_send_state"sv : "send_state"sv;
         bool changed =

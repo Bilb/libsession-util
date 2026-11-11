@@ -81,6 +81,7 @@ list(APPEND LIB_SESSION_UTESTS_SOURCES
     test_backend_session_file_server.cpp
     test_backed_session_open_group_server.cpp
     test_ip_country.cpp
+    test_network_clock.cpp
     test_network_swarm.cpp
     test_onionreq.cpp
     test_onion_request_router.cpp
@@ -111,6 +112,12 @@ target_link_libraries(test_libs INTERFACE
     # The image tests inspect libvips and libheif directly to confirm what libsession::image did.
     sessiondep::vips
     sessiondep::libheif)
+if(APPLE)
+    # The platform tests encode their own HEIC fixtures with ImageIO.  libsession::image links these
+    # privately, which reaches us only when it is a static library.
+    target_link_libraries(test_libs INTERFACE
+        "-framework ImageIO" "-framework CoreGraphics" "-framework CoreFoundation")
+endif()
 
 add_executable(testAll main.cpp ${LIB_SESSION_UTESTS_SOURCES})
 target_include_directories(testAll PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
