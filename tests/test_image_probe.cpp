@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "../src/image/vips_internal.hpp"
+#include "image_drawing.hpp"
 #include "image_fixtures.hpp"
 #include "utils.hpp"
 
@@ -25,6 +26,7 @@ using image::Format;
 using image::detail::image_ptr;
 using image_fixtures::avif_64x48;
 using image_fixtures::heic_64x48;
+using image_fixtures::heic_p3_rotated;
 
 namespace {
 
@@ -133,6 +135,52 @@ TEST_CASE("probe reads each accepted format's header", "[image][probe]") {
         }
     }
 
+    SECTION("an animated PNG reports the frames its acTL declares, of which libvips reads one") {
+        auto still = save(make_image(30, 20).get(), ".png");
+        auto info = probe_bytes(still);
+        REQUIRE(info);
+        CHECK_FALSE(info->animated());
+        CHECK_FALSE(info->first_frame_only());
+
+        auto apng = image_test::animated_png(still, 5);
+        info = probe_bytes(apng);
+        REQUIRE(info);
+        CHECK(info->format == Format::png);
+        CHECK(info->width == 30);
+        CHECK(info->height == 20);
+        CHECK(info->frames == 5);
+        CHECK(info->first_frame_only());
+
+        // Read from a file, and past a chunk far larger than any fixed-size head.
+        temp_file f;
+        f.write(image_test::with_png_chunk(apng, "tEXt", std::vector<uint8_t>(200'000, 'x')));
+        image::Source file{f.path};
+        info = image::probe(file);
+        REQUIRE(info);
+        CHECK(info->frames == 5);
+
+        // The count is the file's claim, and capped.
+        info = probe_bytes(
+                image_test::with_png_chunk(still, "acTL", {0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0}));
+        REQUIRE(info);
+        CHECK(info->frames == 65'535);
+
+        // One frame is a still; an acTL after the image data is not an APNG's.
+        info = probe_bytes(image_test::animated_png(still, 1));
+        REQUIRE(info);
+        CHECK_FALSE(info->first_frame_only());
+        auto late = image_test::with_png_chunk(
+                still, "acTL", {0, 0, 0, 5, 0, 0, 0, 0}, still.size() - 12);
+        info = probe_bytes(late);
+        REQUIRE(info);
+        CHECK(info->frames == 1);
+
+        // Other formats' animations are decoded whole.
+        info = probe_bytes(save(make_image(30, 20, 3, 4).get(), ".webp"));
+        REQUIRE(info);
+        CHECK_FALSE(info->first_frame_only());
+    }
+
     SECTION("AVIF") {
         auto info = probe_bytes(avif_64x48);
         REQUIRE(info);
@@ -154,6 +202,14 @@ TEST_CASE("probe reads each accepted format's header", "[image][probe]") {
 #else
         CHECK(info->decodable == (heif_have_decoder_for_format(heif_compression_HEVC) != 0));
 #endif
+    }
+
+    SECTION("HEIC's rotation is applied to its dimensions once, not again for its EXIF") {
+        auto info = probe_bytes(heic_p3_rotated);
+        REQUIRE(info);
+        CHECK(info->format == Format::heic);
+        CHECK(info->width == 48);
+        CHECK(info->height == 64);
     }
 }
 
@@ -275,4 +331,27 @@ TEST_CASE("probe throws a decryption error rather than calling it not an image",
             image::probe(src),
             std::runtime_error,
             Message("Attachment decryption failed: invalid key or corrupted data"));
+}
+
+TEST_CASE("probe says which images are decoded whole", "[image][probe]") {
+    auto whole = [](std::span<const std::byte> data) {
+        auto info = probe_bytes(data);
+        REQUIRE(info);
+        return info->decoded_whole;
+    };
+    auto img = make_image(64, 48);
+    CHECK_FALSE(whole(save(img.get(), ".jpg")));
+    CHECK(whole(save(img.get(), ".jpg[interlace]")));
+    CHECK_FALSE(whole(save(img.get(), ".png")));
+    CHECK(whole(save(img.get(), ".png[interlace]")));
+    CHECK_FALSE(whole(save(img.get(), ".webp")));
+    CHECK(whole(save(make_image(64, 48, 3, 2).get(), ".webp")));
+    CHECK(whole(save(img.get(), ".gif")));
+    CHECK(whole(avif_64x48));
+    // ImageIO decodes HEIC at the size asked for.
+#ifdef __APPLE__
+    CHECK_FALSE(whole(heic_64x48));
+#else
+    CHECK(whole(heic_64x48));
+#endif
 }

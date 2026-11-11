@@ -352,6 +352,9 @@ message AttachmentPointer {
 
   enum Flags {
     VOICE_MESSAGE = 1;
+    // The sender's file exactly as it was, metadata and all, rather than a picture re-encoded for
+    // sending: shown as a file to export, never opened as a picture.
+    ORIGINAL_FILE = 2;
   }
 
   reserved 11;

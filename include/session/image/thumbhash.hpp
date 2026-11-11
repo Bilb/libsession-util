@@ -6,6 +6,8 @@
 #include <span>
 #include <vector>
 
+#include "source.hpp"
+
 namespace session::image::thumbhash {
 
 /// The largest input dimension `encode` accepts.  ThumbHash's own limit: the output is at most a
@@ -42,6 +44,16 @@ struct image {
 ///
 /// Throws `std::invalid_argument` if the dimensions are out of range or `rgba` is the wrong size.
 std::vector<std::byte> encode(std::span<const std::byte> rgba, uint32_t width, uint32_t height);
+
+/// API: image/thumbhash/of_picture
+///
+/// The ThumbHash of a picture: `encode` applied to it scaled to fit `max_input_dimension`, upright
+/// and in sRGB, which is what a sender puts on an attachment pointer so that a recipient has
+/// something to draw before the file arrives.  Nullopt for anything that is not an image we accept,
+/// under the same rules as `thumbnail`.
+///
+/// Throws std::runtime_error as `thumbnail` does.
+std::optional<std::vector<std::byte>> of_picture(Source& source);
 
 /// API: image/thumbhash/decode
 ///

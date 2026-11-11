@@ -335,11 +335,12 @@ inline const std::string& ReceiptMessage_Type_Name(T enum_t_value) {
 bool ReceiptMessage_Type_Parse(
     ::PROTOBUF_NAMESPACE_ID::ConstStringParam name, ReceiptMessage_Type* value);
 enum AttachmentPointer_Flags : int {
-  AttachmentPointer_Flags_VOICE_MESSAGE = 1
+  AttachmentPointer_Flags_VOICE_MESSAGE = 1,
+  AttachmentPointer_Flags_ORIGINAL_FILE = 2
 };
 bool AttachmentPointer_Flags_IsValid(int value);
 constexpr AttachmentPointer_Flags AttachmentPointer_Flags_Flags_MIN = AttachmentPointer_Flags_VOICE_MESSAGE;
-constexpr AttachmentPointer_Flags AttachmentPointer_Flags_Flags_MAX = AttachmentPointer_Flags_VOICE_MESSAGE;
+constexpr AttachmentPointer_Flags AttachmentPointer_Flags_Flags_MAX = AttachmentPointer_Flags_ORIGINAL_FILE;
 constexpr int AttachmentPointer_Flags_Flags_ARRAYSIZE = AttachmentPointer_Flags_Flags_MAX + 1;
 
 const std::string& AttachmentPointer_Flags_Name(AttachmentPointer_Flags value);
@@ -4112,6 +4113,8 @@ class AttachmentPointer final :
   typedef AttachmentPointer_Flags Flags;
   static constexpr Flags VOICE_MESSAGE =
     AttachmentPointer_Flags_VOICE_MESSAGE;
+  static constexpr Flags ORIGINAL_FILE =
+    AttachmentPointer_Flags_ORIGINAL_FILE;
   static inline bool Flags_IsValid(int value) {
     return AttachmentPointer_Flags_IsValid(value);
   }

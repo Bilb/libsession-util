@@ -19,9 +19,30 @@ inline constexpr std::string_view message_not_found = "message.not_found";
 /// The message exists but has no attachment at the index asked about.
 inline constexpr std::string_view attachment_not_found = "attachment.not_found";
 
-/// The local file an outgoing attachment was made from is no longer there, so the message cannot
-/// be sent.
+/// The attachment has no thumbnail to serve: it is not an image Session displays, its file is not
+/// in the cache, or its thumbnail has not been made yet.  `Attachment::has_thumbnail` says in
+/// advance which answer to expect.
+inline constexpr std::string_view no_thumbnail = "attachment.no_thumbnail";
+
+/// `Client::attachment_rendition` has none to serve yet, or never will: not cached, not a picture
+/// Session displays, or refused.  One being made is reported through `messages_updated`.
+inline constexpr std::string_view no_rendition = "attachment.no_rendition";
+
+/// The local file an outgoing attachment was made from was gone before libsession had its own copy,
+/// so the message cannot be sent.
 inline constexpr std::string_view attachment_file_missing = "attachment.file_missing";
+
+/// Too large to send: a picture that does not fit the file server's limit even re-encoded at
+/// `image::min_sendable_edge`, a file sent as it is or as its original that does not fit it, or a
+/// picture too large to decode.  The message cannot be sent.
+inline constexpr std::string_view attachment_too_large = "attachment.too_large";
+
+/// A picture could not be read or re-encoded for sending: the file failed to read, or failed to
+/// decode.  The message fails as any upload failure does, and a retry tries again.
+inline constexpr std::string_view attachment_unreadable = "attachment.unreadable";
+
+/// The file is not in the cache, which is all that `Client::attachment_data_cached` reads.
+inline constexpr std::string_view not_cached = "file.not_cached";
 
 /// The file server does not have the file: it has expired, or was never there.  Only the sender
 /// sending it again fixes this.  Matches `AttachmentAvailability::not_found`.
