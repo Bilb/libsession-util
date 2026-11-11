@@ -35,7 +35,7 @@ if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
     echo "a merge is in progress: resolve it and 'git commit', then run this again" >&2
     exit 1
 fi
-if ! git diff --quiet HEAD -- || [ -n "$(git ls-files --unmerged)" ]; then
+if ! git diff --quiet --ignore-submodules HEAD -- || [ -n "$(git ls-files --unmerged)" ]; then
     echo "the working tree has uncommitted changes" >&2
     exit 1
 fi
