@@ -2,7 +2,7 @@
 #
 # Brings session-app-next up to date with every entry in integration/sources.
 #
-# Usage: integration/sync [--push REMOTE]
+# Usage: integration/sync.sh [--push REMOTE]
 #
 # Run it from the integration branch with a clean tree. Each entry is fetched and merged in order;
 # an entry whose head is already in the branch is skipped. A merged pull request is removed from
