@@ -75,7 +75,7 @@ train_rerere() {
 
 last_merged() {
     git log --merges --format=%B HEAD |
-        awk -v l="$1" '$1 == "Integration-Head:" && $2 == l { print $3; exit }'
+        awk -v l="$1" '!found && $1 == "Integration-Head:" && $2 == l { print $3; found = 1 }'
 }
 
 pr_state() {
