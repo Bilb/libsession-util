@@ -497,7 +497,8 @@ void streaming_file_upload(
         state->cv.notify_one();
     });
 
-    auto key = enc.load_key_from_file(request.file, request.allow_large);
+    auto key = request.data ? enc.load_key_from_data(request.data, request.allow_large)
+                            : enc.load_key_from_file(request.file, request.allow_large);
     auto upload_size = attachment::encrypted_size(enc.data_size());
     auto enc_ptr = std::make_shared<attachment::Encryptor>(std::move(enc));
 

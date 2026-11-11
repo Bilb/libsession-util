@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
@@ -40,6 +41,9 @@ namespace session::client::cache {
 /// the other's files unreferenced, which it would, since neither knows the other's urls.
 inline constexpr std::string_view PROFILE_DIR = "profile";
 inline constexpr std::string_view ATTACHMENT_DIR = "attachments";
+/// Files a send took over (`OutgoingAttachment::take_file`), kept as they were rather than
+/// encrypted, until they are uploaded.
+inline constexpr std::string_view OUTGOING_DIR = "outgoing";
 
 /// The name `url`'s cached file takes, and where that file lives beneath `dir`.
 ///
@@ -130,6 +134,37 @@ class Writer {
 /// The suffix an in-progress write carries.  A sweep must skip these: it decides what to delete by
 /// what is *not* referenced, and a download that has not finished is not referenced yet.
 inline constexpr std::string_view PARTIAL_SUFFIX = ".part";
+
+/// The images made from a cached attachment, as `attachment_derived.kind` stores them.
+enum class Derived : int { thumbnail = 1, rendition = 2 };
+
+/// What a derived image is called: its file's name with the kind's suffix appended, beside it.  A
+/// sweep reads a name with one of these suffixes as belonging to the entry named by the rest.
+struct DerivedKind {
+    Derived kind;
+    std::string_view suffix;
+};
+inline constexpr std::array DERIVED_KINDS{
+        DerivedKind{Derived::thumbnail, ".thumb"}, DerivedKind{Derived::rendition, ".view"}};
+
+inline constexpr std::string_view THUMBNAIL_SUFFIX = DERIVED_KINDS[0].suffix;
+
+inline std::string_view derived_suffix(Derived kind) {
+    for (const auto& k : DERIVED_KINDS)
+        if (k.kind == kind)
+            return k.suffix;
+    return {};
+}
+
+inline std::string derived_name(std::string_view name, Derived kind) {
+    std::string out{name};
+    out += derived_suffix(kind);
+    return out;
+}
+
+inline std::string thumbnail_name(std::string_view name) {
+    return derived_name(name, Derived::thumbnail);
+}
 
 /// The names of the finished files in `dir/kind`, in no particular order.
 ///

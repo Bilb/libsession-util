@@ -217,7 +217,7 @@ namespace opt {
     struct file_server_max_file_size {
         uint64_t max_file_size;
 
-        file_server_max_file_size(uint16_t max_file_size) : max_file_size{max_file_size} {}
+        file_server_max_file_size(uint64_t max_file_size) : max_file_size{max_file_size} {}
     };
 
     /// Can be used to tell recipients where a custom file server's QUIC endpoint is, by naming it
