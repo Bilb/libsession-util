@@ -124,7 +124,7 @@ while read -r label repo ref; do
         if [ -z "$prev" ]; then
             git log --no-merges --format='%h %s' "HEAD..$new"
         elif git merge-base --is-ancestor "$prev" "$new"; then
-            git log --no-merges --format='%h %s' "$prev..$new"
+            git log --no-merges --format='%h %s' "$prev..$new" ^HEAD
         else
             echo "rewritten since the last sync:"
             git range-diff --no-color "$prev...$new"
