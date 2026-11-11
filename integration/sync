@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+#
+# Brings session-app-next up to date with every entry in integration/sources.
+#
+# Usage: integration/sync [--push REMOTE]
+#
+# Run it from the integration branch with a clean tree. Each entry is fetched and merged in order;
+# an entry whose head is already in the branch is skipped. A merged pull request is removed from
+# integration/sources. Each merge records the merged head in an "Integration-Head: <label> <sha>"
+# trailer, which is how the next run knows what changed since.
+#
+# A conflict that rerere has seen before is resolved automatically. Anything else stops the run
+# with the merge in progress: resolve it, `git commit --no-edit --cleanup=strip`, and run the
+# script again.
+#
+# What moved since the last sync is printed and written to .git/integration-report.md.
+
+set -euo pipefail
+
+push_remote=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --push) push_remote="${2:?--push needs a remote}"; shift 2 ;;
+        -h|--help) sed -n '3,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+cd "$(git rev-parse --show-toplevel)"
+sources=integration/sources
+report="$(git rev-parse --git-path integration-report.md)"
+
+branch="$(git symbolic-ref --short -q HEAD)" || { echo "not on a branch" >&2; exit 1; }
+if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+    echo "a merge is in progress: resolve it and 'git commit', then run this again" >&2
+    exit 1
+fi
+if ! git diff --quiet HEAD -- || [ -n "$(git ls-files --unmerged)" ]; then
+    echo "the working tree has uncommitted changes" >&2
+    exit 1
+fi
+
+git config rerere.enabled true
+git config rerere.autoUpdate true
+
+# Replays this branch's own merges into rr-cache, so every clone resolves a conflict the way the
+# branch already did. Each merge is replayed once per clone.
+train_rerere() {
+    local trained wt m
+    trained="$(git rev-parse --git-path integration-trained)"
+    touch "$trained"
+    local todo=()
+    while read -r m; do
+        grep -qx "$m" "$trained" || todo+=("$m")
+    done < <(git log --merges --format=%H --grep='^Integration-Head: ' HEAD)
+    [ ${#todo[@]} -gt 0 ] || return 0
+
+    echo "Learning conflict resolutions from ${#todo[@]} earlier merge(s)..."
+    wt="$(git rev-parse --git-path integration-train)"
+    rm -rf "$wt"
+    git worktree prune
+    git worktree add -q --detach "$wt" HEAD
+    for m in "${todo[@]}"; do
+        git -C "$wt" checkout -q -f --detach "$m^1"
+        if ! git -C "$wt" merge -q --no-commit --no-ff "$m^2" >/dev/null 2>&1 &&
+            git -C "$wt" rev-parse -q --verify MERGE_HEAD >/dev/null; then
+            git -C "$wt" checkout -q "$m" -- .
+            git -C "$wt" rerere >/dev/null
+        fi
+        git -C "$wt" merge --abort 2>/dev/null || git -C "$wt" reset -q --hard
+        echo "$m" >>"$trained"
+    done
+    git worktree remove --force "$wt"
+}
+
+last_merged() {
+    git log --merges --format=%B HEAD |
+        awk -v l="$1" '$1 == "Integration-Head:" && $2 == l { print $3; exit }'
+}
+
+pr_state() {
+    command -v gh >/dev/null || { echo UNKNOWN; return; }
+    gh pr view "$2" -R "$1" --json state --jq .state 2>/dev/null || echo UNKNOWN
+}
+
+drop_source() {
+    local label="$1" why="$2"
+    awk -v l="$label" '$1 != l' "$sources" >"$sources.tmp" && mv "$sources.tmp" "$sources"
+    git commit -q -m "Drop $label from the integration sources: $why" -- "$sources"
+    echo "  dropped: $why"
+}
+
+train_rerere
+
+: >"$report"
+echo "# session-app-next sync, $(date -u '+%Y-%m-%d %H:%M UTC')" >>"$report"
+
+stopped=
+while read -r label repo ref; do
+    case "$label" in ''|'#'*) continue ;; esac
+    echo "== $label ($repo $ref)"
+
+    if [[ "$ref" =~ ^pull/([0-9]+)/head$ ]]; then
+        state="$(pr_state "$repo" "${BASH_REMATCH[1]}")"
+        if [ "$state" = MERGED ]; then
+            drop_source "$label" "merged upstream"
+            printf '\n## %s\n\nMerged upstream, removed from the sources.\n' "$label" >>"$report"
+            continue
+        elif [ "$state" = CLOSED ]; then
+            echo "  closed without merging; still merged here until it is removed from $sources"
+        fi
+    fi
+
+    git fetch -q --no-tags "https://github.com/$repo.git" "+$ref:refs/integration/$label"
+    new="$(git rev-parse "refs/integration/$label")"
+    if git merge-base --is-ancestor "$new" HEAD; then
+        echo "  up to date"
+        continue
+    fi
+
+    prev="$(last_merged "$label")"
+    {
+        printf '\n## %s: %s\n\n```\n' "$label" "${prev:+${prev:0:10} -> }${new:0:10}"
+        if [ -z "$prev" ]; then
+            git log --no-merges --format='%h %s' "HEAD..$new"
+        elif git merge-base --is-ancestor "$prev" "$new"; then
+            git log --no-merges --format='%h %s' "$prev..$new"
+        else
+            echo "rewritten since the last sync:"
+            git range-diff --no-color "$prev...$new"
+        fi
+        printf '```\n'
+    } >>"$report"
+    sed -n '/^## '"$label"':/,$p' "$report" | sed 's/^/  /'
+
+    msg="Merge $label ($repo $ref) into $branch"
+    trailer="Integration-Head: $label $new"
+    if git merge -q --no-ff --no-edit -m "$msg" -m "$trailer" "$new"; then
+        continue
+    fi
+    if ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+        echo "  the merge failed before it started; see the error above" >&2
+        exit 1
+    fi
+    if [ -z "$(git diff --name-only --diff-filter=U)" ]; then
+        echo "  conflicts resolved from earlier merges"
+        git commit -q --no-edit --cleanup=strip
+        continue
+    fi
+    echo
+    echo "Conflict merging $label in:"
+    git diff --name-only --diff-filter=U | sed 's/^/  /'
+    echo "Resolve it, 'git add' the files, 'git commit --no-edit --cleanup=strip', then run this again."
+    stopped=1
+    break
+done < <(git show "HEAD:$sources")
+
+echo
+echo "Report: $report"
+[ -z "$stopped" ] || exit 1
+
+if [ -n "$push_remote" ]; then
+    git push "$push_remote" "HEAD:refs/heads/$branch"
+fi
