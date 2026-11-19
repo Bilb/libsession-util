@@ -386,8 +386,8 @@ static std::optional<int64_t> find_conversation(sqlite::Connection& c, const Con
 
 core::callbacks Client::_core_callbacks() {
     // Capturing `this` here is safe despite running in Core's member-init list: every callback we
-    // install can only fire from receive_messages(), send_dm(), a config merge, or set_network(),
-    // none of which Core calls during its own construction.
+    // install can only fire from receive_messages(), send_dm(), a config merge, set_network(), or a
+    // config push starting or stopping, none of which Core reports during its own construction.
     //
     // These are Client's own wiring, and an application cannot supply any of its own: what it is
     // promised is `client::callbacks`, which is reported through the dispatcher and carries whole
@@ -413,6 +413,8 @@ core::callbacks Client::_core_callbacks() {
 
     cb.network_attached = [this] { call([this] { _reload_auto_downloads(); }); };
 
+    cb.config_push_changed = [this](bool) { _update_outbound(); };
+
     return cb;
 }
 
@@ -421,6 +423,12 @@ void Client::_init() {
     _disk_jq.emplace(*_disk_loop);
     _derive_loop = std::make_shared<oxen::quic::Loop>();
     _derive_jq.emplace(*_derive_loop);
+
+    // Both of what follows is recovery for an application starting up, and a one-shot Core is not
+    // that: it shares the database with an application that may only be suspended, whose sends are
+    // still its own and live.  Marking them interrupted here would overwrite them.
+    if (core.one_shot())
+        return;
 
     // Core's send queue is in-memory, so anything still mid-flight when the last run ended is not
     // resumed and its outcome is unknowable.  Say so rather than guessing either way.
@@ -462,8 +470,15 @@ void Client::_init() {
     // that every writer is the loop thread.  We are the constructing thread here, and the loop is
     // already running by the time a Client is built: the first `_touch` schedules `_flush_pending`,
     // which steals `_dirty` out from under the reconcile still filling it.
-    if (core.globals.have_account())
-        call_get([this] { _reconcile_all(); });
+    //
+    // The first answer on whether anything is going out comes after the sweep, which has just
+    // settled every send the last run left behind; what remains is a config push already owed, or
+    // one that reconciling has just made owed.
+    call_get([this] {
+        if (core.globals.have_account())
+            _reconcile_all();
+        _update_outbound();
+    });
 }
 
 // -- Change notification ----------------------------------------------------------------------
@@ -478,6 +493,30 @@ void Client::set_dispatcher(dispatcher d) {
 
 void Client::set_high_freq_dispatch_interval(std::chrono::milliseconds interval) {
     call([this, interval] { _high_freq_dispatch_interval = interval; });
+}
+
+bool Client::outbound_busy() const {
+    return _outbound_busy.load();
+}
+
+void Client::_update_outbound() {
+    bool busy = core.configs.push_pending() || [this] {
+        auto c = core.database().conn();
+        return c.prepared_get<int>(
+                       _OUTBOUND_QUERY,
+                       static_cast<int>(SendState::pending),
+                       static_cast<int>(SendState::sending),
+                       static_cast<int>(SendState::uploading)) != 0;
+    }();
+
+    if (busy == _outbound_busy.load())
+        return;
+    _outbound_busy.store(busy);
+    log::debug(cat, "Outbound work {}", busy ? "started" : "finished");
+    _emit([busy](const callbacks& cbs) {
+        if (cbs.outbound_changed)
+            cbs.outbound_changed(busy);
+    });
 }
 
 void Client::_dispatch_out(std::function<void()> job) {
@@ -2822,6 +2861,14 @@ std::optional<Message> Client::message(int64_t id, await_t) {
     return call_get([this, id] { return _message(id); });
 }
 
+int64_t Client::badge_count(await_t) {
+    return call_get([this] { return _badge_count(); });
+}
+
+std::optional<Message> Client::message_by_hash(std::string hash, await_t) {
+    return call_get([this, hash = std::move(hash)] { return _message_by_hash(hash); });
+}
+
 int64_t Client::send_message(const ConversationId& id, OutgoingMessage msg, await_t) {
     return send_message(id, std::move(msg), nullptr, await);
 }
@@ -2876,6 +2923,14 @@ DM Client::open_dm(const ConversationId& id, await_t) {
 
 void Client::message(int64_t id, result_function<std::optional<Message>> cb) {
     _async([this, id] { return _message(id); }, std::move(cb));
+}
+
+void Client::badge_count(result_function<int64_t> cb) {
+    _async([this] { return _badge_count(); }, std::move(cb));
+}
+
+void Client::message_by_hash(std::string hash, result_function<std::optional<Message>> cb) {
+    _async([this, hash = std::move(hash)] { return _message_by_hash(hash); }, std::move(cb));
 }
 
 uint64_t Client::save_attachment(
@@ -5821,6 +5876,48 @@ std::optional<Message> Client::_message(int64_t id) {
     return std::move(found.front());
 }
 
+int64_t Client::_badge_count() {
+    // A request is a one-to-one conversation with someone not approved, other than ourselves; it
+    // counts once however many messages it holds, so a stranger cannot inflate the badge.
+    // Mentions-only is a group setting and reads as "all" on a one-to-one conversation.
+    //
+    // TODO: once Client holds groups, a group invitation not yet accepted counts once, as a request
+    // does; and a mentions-only group counts its unread mentions, once Client records which
+    // messages mention us -- until then such a group counts nothing (the clause below).
+    std::vector<std::byte> me;
+    if (core.globals.have_account())
+        me = to_vector(core.globals.session_id());
+    auto now_s = std::chrono::duration_cast<std::chrono::seconds>(clock_now_ms().time_since_epoch())
+                         .count();
+    return core.database().conn().prepared_get<int64_t>(
+            R"(
+SELECT COALESCE(SUM(CASE WHEN request THEN 1 ELSE unread_count END), 0)
+  FROM (SELECT c.unread_count,
+               c.dm IS NOT NULL AND a.session_id IS NOT ?1 AND NOT COALESCE(ct.approved, 0)
+                   AS request
+          FROM conversations c
+          LEFT JOIN accounts a ON a.id = c.dm
+          LEFT JOIN contacts ct ON ct.account = c.dm
+         WHERE c.unread_count > 0
+           AND c.mute_until <= ?2
+           AND c.notifications != ?3
+           AND NOT (c.dm IS NULL AND c.notifications = ?4)
+           AND NOT COALESCE(ct.blocked, 0))
+)",
+            me,
+            now_s,
+            static_cast<int>(config::notify_mode::disabled),
+            static_cast<int>(config::notify_mode::mentions_only));
+}
+
+std::optional<Message> Client::_message_by_hash(std::string_view hash) {
+    auto id = core.database().conn().prepared_maybe_get<int64_t>(
+            "SELECT id FROM messages WHERE swarm_hash = ?", hash);
+    if (!id)
+        return std::nullopt;
+    return _message(*id);
+}
+
 std::optional<std::string> Client::_message_debug(int64_t message_id) {
     auto c = core.database().conn();
     auto raw = c.prepared_maybe_get<std::string>(
@@ -5963,6 +6060,17 @@ int64_t Client::_send_message(const ConversationId& id, const OutgoingMessage& m
         tx.commit();
     }
 
+    _announce_send(id, client_id, created, approved);
+
+    log::debug(cat, "send_message: message {} to conversation {}", client_id, id.to_string());
+
+    _dispatch_sends(client_id, id, content, synced, now, to_self);
+
+    return client_id;
+}
+
+void Client::_announce_send(
+        const ConversationId& id, int64_t client_id, bool created, bool approved) {
     if (approved) {
         _sync_contact(id);
         // Both: approving moves the row out of the requests and into the conversations, so one list
@@ -5976,11 +6084,8 @@ int64_t Client::_send_message(const ConversationId& id, const OutgoingMessage& m
     _emit_message(true, client_id);
     _touch(id);
 
-    log::debug(cat, "send_message: message {} to conversation {}", client_id, id.to_string());
-
-    _dispatch_sends(client_id, id, content, synced, now, to_self);
-
-    return client_id;
+    // Stored pending or uploading, so this is where a send starts counting as outbound work.
+    _update_outbound();
 }
 
 void Client::_dispatch_sends(
@@ -6117,18 +6222,7 @@ int64_t Client::_send_message(
     if (taken)
         taken->stored();
 
-    if (approved) {
-        _sync_contact(id);
-        // Both: approving moves the row out of the requests and into the conversations, so one list
-        // lost it and the other gained it.  Reported with the row's flush below rather than now,
-        // since the message being sent changes the row too.
-        _touch_lists(true, true);
-    }
-    if (created)
-        _emit_conversation_added(id);
-    _reveal_note_to_self(id);
-    _emit_message(true, client_id);
-    _touch(id);
+    _announce_send(id, client_id, created, approved);
 
     log::debug(
             cat,
@@ -7044,8 +7138,10 @@ bool Client::_retry_send(int64_t client_id, Conversation::upload_progress on_upl
                     client_id);
     }
 
-    if (has_uploads_left)
+    if (has_uploads_left) {
         _emit_message(false, client_id);
+        _update_outbound();
+    }
 
     log::debug(
             cat,
@@ -8699,7 +8795,8 @@ void Client::_finish_attachment_send(int64_t client_id) {
                 client_id);
         if (!row) {
             log::warning(cat, "Cannot finish message {}: it is gone", client_id);
-            return;
+            // As in `_fail_attachment_send`: its uploads are over, whatever became of it.
+            return _update_outbound();
         }
         auto [convo_row, msg_body, msg_ts, msg_id, reply_author, reply_ts, reply_msgid] = *row;
         convo_id = conversation_id_at(c, convo_row);
@@ -8816,8 +8913,10 @@ void Client::_fail_attachment_send(int64_t client_id, bool permanent) {
         auto c = core.database().conn();
         auto convo = c.prepared_maybe_get<int64_t>(
                 "SELECT conversation FROM messages WHERE id = ?", client_id);
+        // Gone while it uploaded, so nothing is left to fail -- but the upload has ended, and it
+        // may have been the last outbound work there was.
         if (!convo)
-            return;
+            return _update_outbound();
         convo_id = conversation_id_at(c, *convo);
 
         // The rows are left alone: what has already been uploaded stays recorded, which is what
@@ -8834,6 +8933,7 @@ void Client::_fail_attachment_send(int64_t client_id, bool permanent) {
     // Nothing can retry an unsendable message, so a file it took is no longer needed.
     if (permanent)
         _sweep_outgoing();
+    _update_outbound();
 }
 
 // -- Core event handling ----------------------------------------------------------------------
@@ -9258,6 +9358,10 @@ void Client::_apply_send_status(
 
     if (convo)
         _emit_message(false, client_id);
+
+    // Whether or not the row changed: one deleted outright while its send was out has nothing left
+    // to update, and its final status is still what ends the send.
+    _update_outbound();
 }
 
 }  // namespace session::client

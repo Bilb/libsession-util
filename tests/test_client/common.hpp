@@ -64,8 +64,14 @@ struct TempClient {
 
     template <ClientOption... Opts>
     void reopen(Opts&&... opts) {
+        reopen(callbacks{}, std::forward<Opts>(opts)...);
+    }
+
+    /// As above, with handlers: for a test asking what a Client is told as it starts.
+    template <ClientOption... Opts>
+    void reopen(callbacks cbs, Opts&&... opts) {
         client.reset();
-        client = std::make_unique<Client>(path, std::forward<Opts>(opts)...);
+        client = std::make_unique<Client>(path, std::move(cbs), std::forward<Opts>(opts)...);
     }
 
     ~TempClient() {
@@ -128,13 +134,12 @@ inline void approve(Client& c, const b33& sid) {
     });
 }
 
-/// Builds, encrypts and delivers a v1 DM into `to` as if it had arrived from the swarm.
-inline void deliver(
+/// Builds and encrypts a v1 DM to `to`, as it would be stored in `to`'s swarm.
+inline auto encode_incoming_dm(
         Client& to,
         const SenderKeys& from,
         std::string_view body,
         sys_ms ts,
-        std::string hash,
         std::string_view display_name = "",
         std::optional<b33> sync_target = std::nullopt,
         const std::function<void(SessionProtos::DataMessage&)>& decorate = nullptr,
@@ -153,8 +158,23 @@ inline void deliver(
         decorate(*data);
 
     auto plaintext = content.SerializeAsString();
-    auto encoded = encode_dm_v1(
+    return encode_dm_v1(
             std::as_bytes(std::span{plaintext}), from.ed_sk, ts, own_sid(to), std::nullopt);
+}
+
+/// Builds, encrypts and delivers a v1 DM into `to` as if it had arrived from the swarm.
+inline void deliver(
+        Client& to,
+        const SenderKeys& from,
+        std::string_view body,
+        sys_ms ts,
+        std::string hash,
+        std::string_view display_name = "",
+        std::optional<b33> sync_target = std::nullopt,
+        const std::function<void(SessionProtos::DataMessage&)>& decorate = nullptr,
+        std::optional<int64_t> msgid = std::nullopt) {
+    auto encoded =
+            encode_incoming_dm(to, from, body, ts, display_name, sync_target, decorate, msgid);
 
     core::SwarmMessage sm{encoded, std::move(hash), ts, from_epoch_ms(1'000'000'000'000)};
 

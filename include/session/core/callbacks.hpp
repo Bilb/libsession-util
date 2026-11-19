@@ -7,7 +7,9 @@
 #include <session/core/swarm_message.hpp>
 #include <session/util.hpp>
 #include <span>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace session::core {
@@ -40,6 +42,15 @@ enum class MessageDecryptFailure {
     bad_format,      ///< Message is structurally malformed (e.g. invalid bencode, truncated fields)
     unknown_version,  ///< Message starts with 0x00 but carries an unrecognised version byte;
                       ///< likely a future protocol version this build does not understand
+};
+
+/// What `Core::receive_messages` could not read, for a caller that has to act on it there and then
+/// rather than through `message_decrypt_failed` -- a notification extension, deciding what a push
+/// that arrived but would not decrypt should show.
+struct ReceiveResult {
+    /// One-to-one messages that did not decrypt, by swarm hash, with the reason.  Each is also
+    /// reported to `message_decrypt_failed`.
+    std::vector<std::pair<std::string, MessageDecryptFailure>> undecryptable;
 };
 
 /// A successfully decrypted one-to-one message from Namespace::Default.
@@ -219,6 +230,18 @@ struct callbacks {
     /// Callback fired once `set_network` (or `make_network`) has attached a network, on the
     /// caller's thread, so that work which needs one can start.
     std::function<void()> network_attached;
+
+    /// Callback fired when `Configs::push_pending()` changes: a push of the account's configs has
+    /// become due, or the last one due has been answered or found unable to go.
+    ///
+    /// Fires on Core's loop, on a change only, and once per operation: a push moving from
+    /// scheduled to sent stays pending throughout and fires nothing.  Not fired while Core is being
+    /// constructed, so a push that construction itself schedules -- a new account's defaults -- is
+    /// not reported; read push_pending() once construction is done for the starting state.
+    ///
+    /// Parameters:
+    /// - pending -- the new value of push_pending().
+    std::function<void(bool pending)> config_push_changed;
 };
 
 }  // namespace session::core
