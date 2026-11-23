@@ -144,11 +144,18 @@ Core::~Core() {
     // could not.
     //
     // Swallowed rather than propagated: this is a destructor, and a database that cannot be written
-    // is not something the caller tearing Core down can act on.
+    // is not something the caller tearing Core down can act on.  The dump is caught on its own so
+    // that its failing - as it does once the database has been interrupted to let the process be
+    // suspended - still lets the queue stop, which is what makes it safe to destroy the members
+    // below.
     try {
         call_get([this] {
-            if (globals.have_account())
-                configs.store_dumps();
+            try {
+                if (globals.have_account())
+                    configs.store_dumps();
+            } catch (const std::exception& e) {
+                log::warning(cat, "Could not store the config dumps at shutdown: {}", e.what());
+            }
             _jq.stop();
         });
     } catch (const std::exception& e) {
@@ -227,6 +234,12 @@ void Core::set_network(std::unique_ptr<network::Network> network) {
 
     if (_network && callbacks.network_attached)
         callbacks.network_attached();
+
+    // The timer's first poll is a whole interval away, and until a poll the account sees nothing
+    // new and holds no subscription; so poll now as well.  Queued rather than run here, on the
+    // caller's thread.  Requests sent before the network is ready wait for it.
+    if (_network && _poll_on_attach)
+        _jq.call_soon([this] { _poll(); });
 }
 
 void Core::_remove_timer(quic::TimerID& timer) {
