@@ -68,7 +68,7 @@ struct TempClient {
     }
 
     /// As above, with handlers: for a test asking what a Client is told as it starts.
-    template <core::CoreOption... Opts>
+    template <ClientOption... Opts>
     void reopen(callbacks cbs, Opts&&... opts) {
         client.reset();
         client = std::make_unique<Client>(path, std::move(cbs), std::forward<Opts>(opts)...);

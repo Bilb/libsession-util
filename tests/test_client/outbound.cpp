@@ -236,7 +236,9 @@ TEST_CASE("Client: outbound ends when a send fails", "[client][outbound]") {
 
 TEST_CASE("Client: outbound covers an attachment upload and then its send", "[client][outbound]") {
     OutboundLog log;
+    TempCacheDir cache;
     TempClient c{log.handlers()};
+    c->set_cache_dir(cache.path);
     auto* net = quiet_start<HeldUploads>(c);
     log.clear();
     TempFile file;
@@ -267,7 +269,9 @@ TEST_CASE("Client: outbound covers an attachment upload and then its send", "[cl
 
 TEST_CASE("Client: outbound ends when an upload fails", "[client][outbound]") {
     OutboundLog log;
+    TempCacheDir cache;
     TempClient c{log.handlers()};
+    c->set_cache_dir(cache.path);
     auto* net = quiet_start<HeldUploads>(c);
     log.clear();
     TempFile file;
@@ -305,7 +309,9 @@ TEST_CASE("Client: outbound ends when an upload fails", "[client][outbound]") {
 
 TEST_CASE("Client: outbound ends with an upload whose message was deleted", "[client][outbound]") {
     OutboundLog log;
+    TempCacheDir cache;
     TempClient c{log.handlers()};
+    c->set_cache_dir(cache.path);
     auto* net = quiet_start<HeldUploads>(c);
     log.clear();
     TempFile file;
@@ -454,8 +460,9 @@ TEST_CASE("Client: receiving is not outbound work", "[client][outbound]") {
 
     deliver(*c, sender, "are you there?", from_epoch_ms(2000), "h2");
     sync(*c);
-    REQUIRE(c->conversation(ConversationId::dm(sender.session_id), await)->messages(await).size() ==
-            2);
+    REQUIRE(c->conversation(ConversationId::dm(sender.session_id), await)
+                    ->messages(await)
+                    .messages.size() == 2);
 
     CHECK_FALSE(c->outbound_busy());
     CHECK(log.seen().empty());
@@ -463,7 +470,9 @@ TEST_CASE("Client: receiving is not outbound work", "[client][outbound]") {
 
 TEST_CASE("Client: outbound starts idle after a run left sends in flight", "[client][outbound]") {
     OutboundLog log;
+    TempCacheDir cache;
     TempClient c;
+    c->set_cache_dir(cache.path);
     auto* net = quiet_start<HeldUploads>(c);
 
     // Left mid-flight, exactly as a process killed in the background would leave them.
